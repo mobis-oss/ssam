@@ -1,0 +1,50 @@
+# Root BUILD file for SSAM workspace
+
+# Export Cargo files for crate_universe
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+])
+
+# Alias targets for convenience
+alias(
+    name = "libssam",
+    actual = "//libssam:libssam",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "libssam_test",
+    actual = "//libssam:libssam_test",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "ssam-wrap",
+    actual = "//ssam-wrap:ssam-wrap",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "quotactl-rs",
+    actual = "//quotactl-rs:quotactl-rs",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "ssamd",
+    actual = "//ssamd:ssamd",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "ssam-log",
+    actual = "//ssam-log:ssam-log",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "ssam",
+    actual = "//ssam:ssam",
+    visibility = ["//visibility:public"],
+)

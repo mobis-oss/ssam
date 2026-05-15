@@ -1,0 +1,1164 @@
+// Copyright 2025-2026 Hyundai Mobis Co., Ltd.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::sync::Arc;
+
+#[non_exhaustive]
+#[derive(strum_macros::Display, Debug)]
+pub(crate) enum ContainerRuntime {
+    #[strum(serialize = "/usr/bin/crun")]
+    CRun,
+}
+
+#[derive(Debug)] // TODO:: Get default executor from config
+pub(crate) enum ExecutorType {
+    Systemd(systemd::ServiceInfo),
+}
+
+#[derive(Debug, Clone, derive_more::Deref)]
+pub(crate) struct PackageExecutor(Arc<dyn CommandExecutorBackend>);
+
+impl PackageExecutor {
+    pub(crate) async fn new(
+        package_name: String,
+        command: Arc<dyn CommandArguments>,
+        execution_type: ExecutorType,
+        state_sender: tokio::sync::mpsc::Sender<ExecutionStatus>,
+    ) -> anyhow::Result<Self> {
+        let mgr = match execution_type {
+            ExecutorType::Systemd(service_info) => systemd::TransientUnitExecutor::new(
+                package_name,
+                command,
+                service_info,
+                state_sender,
+            )
+            .await
+            .map(|executor| Arc::new(executor) as Arc<dyn CommandExecutorBackend>),
+        }?;
+        Ok(Self(mgr))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ExecutionResult {
+    Success(ExecutionStatus),
+    Canceled(ExecutionStatus),
+    Failure(String),
+    Timeout,
+}
+
+pub(crate) trait ExecutionState: Send + Sync + std::fmt::Display + std::fmt::Debug {}
+
+#[derive(Debug)]
+pub(crate) enum ExecutionStatus {
+    Active(Arc<dyn ExecutionState>),
+    Inactive(Arc<dyn ExecutionState>),
+}
+
+impl std::fmt::Display for ExecutionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match self {
+            ExecutionStatus::Active(state) | ExecutionStatus::Inactive(state) => state,
+        };
+        write!(f, "{state}")
+    }
+}
+
+pub(crate) mod oci {
+    use std::path::{Path, PathBuf};
+
+    use anyhow::Context;
+    use libssam::ssam_package::PackageSeccompPolicy;
+    use libssam::utils::PrettyJsonWriter;
+    use oci_spec::runtime::{Arch, Linux, LinuxSeccomp, Mount, MountBuilder, RootBuilder};
+    use tempfile::TempDir;
+
+    use crate::package_volume::PackageVolume;
+
+    /// Represents the host architecture mapped to seccomp architecture constants.
+    /// Maps `std::env::consts::ARCH` values to corresponding `SCMP_ARCH_*` values.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum HostArch {
+        /// x86 (32-bit) - maps to `SCMP_ARCH_X86`
+        X86,
+        /// `x86_64` (64-bit) - maps to `SCMP_ARCH_X86_64`
+        X86_64,
+        /// ARM (32-bit) - maps to `SCMP_ARCH_ARM`
+        Arm,
+        /// `AArch64` (64-bit) - maps to `SCMP_ARCH_AARCH64`
+        Aarch64,
+        /// Unsupported architecture
+        Unsupported,
+    }
+
+    impl HostArch {
+        /// Creates a `HostArch` from `std::env::consts::ARCH`.
+        pub(crate) fn from_env() -> Self {
+            match std::env::consts::ARCH {
+                "x86" => Self::X86,
+                "x86_64" => Self::X86_64,
+                "arm" => Self::Arm,
+                "aarch64" => Self::Aarch64,
+                _ => Self::Unsupported,
+            }
+        }
+
+        /// Returns the corresponding `oci_spec::runtime::Arch` value.
+        pub(crate) fn to_oci_arch(self) -> Option<Arch> {
+            match self {
+                Self::X86 => Some(Arch::ScmpArchX86),
+                Self::X86_64 => Some(Arch::ScmpArchX86_64),
+                Self::Arm => Some(Arch::ScmpArchArm),
+                Self::Aarch64 => Some(Arch::ScmpArchAarch64),
+                Self::Unsupported => None,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct ContainerSecurityConfig<'conf> {
+        pub seccomp_policy: Option<&'conf PackageSeccompPolicy>,
+        pub mac_enabled: bool,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct TransientRuntimeConfig {
+        path: TempDir,
+    }
+
+    impl TransientRuntimeConfig {
+        const MOUNT_OPTION: [&'static str; 2] = ["rbind", "rw"];
+        const CONTAINER_DEFAULT_APPARMOR_PROFILE: &str = "container-default";
+
+        /// Creates a new transient runtime configuration for a container.
+        ///
+        /// Prepares a temporary directory with a `config.json` OCI runtime specification,
+        /// configuring rootfs, seccomp, cgroups, and bind mounts for the package.
+        ///
+        /// # Arguments
+        ///
+        /// * `oci_runtime_conf_tmpl` - The template OCI runtime specification.
+        /// * `security_config` - The container security configuration.
+        /// * `cgroups_path` - The base path for cgroups.
+        /// * `package_name` - The name of the package.
+        /// * `pkg_volume` - The package volume containing mount point and data directory information.
+        pub(crate) fn new(
+            oci_runtime_conf_tmpl: &oci_spec::runtime::Spec,
+            security_config: &ContainerSecurityConfig,
+            cgroups_path: &str,
+            package_name: &str,
+            pkg_volume: &PackageVolume,
+        ) -> anyhow::Result<Self> {
+            let path = tempfile::tempdir().context("Failed to create temporary directory")?;
+
+            let mount_point = pkg_volume.get_mount_point();
+            // just absolutize the rootfs path. the rootfs might not be mounted yet.
+            let rootfs_path = std::path::absolute(mount_point).with_context(|| {
+                format!("Unable to absoluteize rootfs directory of {package_name}")
+            })?;
+            let mut oci_runtime_conf = oci_runtime_conf_tmpl.clone();
+
+            let linux = oci_runtime_conf.linux_mut().get_or_insert(Linux::default());
+
+            let seccomp = Self::build_seccomp_config(security_config.seccomp_policy);
+            if seccomp.is_none() {
+                log::info!("{package_name}: seccomp is disabled by configuration");
+            }
+            linux.set_seccomp(seccomp);
+
+            let process = oci_runtime_conf
+                .process_mut()
+                .get_or_insert(oci_spec::runtime::Process::default());
+
+            let apparmor_profile = security_config
+                .mac_enabled
+                .then(|| Self::build_apparmor_profile(package_name))
+                .flatten();
+            if apparmor_profile.is_none() {
+                log::info!("{package_name}: AppArmor is disabled by configuration");
+            }
+            let _ = process.set_apparmor_profile(apparmor_profile);
+
+            let cgroups_path =
+                PathBuf::from(cgroups_path).join(format!("{package_name}.service/container"));
+            Self::set_cgroups_path(&mut oci_runtime_conf, cgroups_path);
+
+            let r = RootBuilder::default()
+                .path(rootfs_path.clone())
+                .readonly(true)
+                .build()
+                .context("Failed to build OCI root configuration")?;
+            oci_runtime_conf.set_root(Some(r));
+
+            if let Some((data_root, data_dirs)) = pkg_volume
+                .data_directory()
+                .and_then(|data_dir| data_dir.data_dirs().map(|dirs| (data_dir.path(), dirs)))
+            {
+                match Self::make_bind_mounts(data_root, data_dirs) {
+                    Ok(bind_mounts) => {
+                        for mnt in bind_mounts {
+                            Self::append_mount(&mut oci_runtime_conf, mnt);
+                        }
+                    }
+                    Err(e) => {
+                        // Log the error but don't fail the entire operation
+                        log::warn!("Warning: Failed to create bind mounts: {e}");
+                    }
+                }
+            }
+
+            let new_conf_path = path.path().join("config.json");
+
+            oci_runtime_conf
+                .save_pretty(new_conf_path.as_path())
+                .context(format!(
+                    "Failed to save container runtime spec to {}",
+                    new_conf_path.display()
+                ))?;
+
+            Ok(Self { path })
+        }
+
+        pub(crate) fn set_cgroups_path(spec: &mut oci_spec::runtime::Spec, cgroups_path: PathBuf) {
+            if let Some(linux) = spec.linux_mut() {
+                linux.set_cgroups_path(Some(cgroups_path));
+            }
+        }
+
+        pub(crate) fn append_mount(spec: &mut oci_spec::runtime::Spec, mount: Mount) {
+            if let Some(mounts) = spec.mounts_mut() {
+                mounts.push(mount);
+            }
+        }
+
+        /// Builds the `AppArmor` profile name for the container.
+        ///
+        /// If `AppArmor` is not available on the host, returns `None`.
+        /// Otherwise, returns the package-specific profile or falls back to the default.
+        fn build_apparmor_profile(package_name: &str) -> Option<String> {
+            let enabled = crate::apparmor::is_enabled()
+                .inspect_err(|e| log::warn!("Failed to check AppArmor status: {e}"))
+                .ok()?; // Err -> None, then early return
+
+            if !enabled {
+                log::info!("AppArmor is disabled on the host. Ignore to apply default profile.");
+                return None;
+            }
+
+            let profile_name = format!("ssam-prof-{package_name}");
+            let profile = crate::apparmor::get_profile(&profile_name)
+                .inspect_err(|e| {
+                    log::warn!(
+                        "AppArmor may not be properly configured. \
+                         Failed to get profile '{profile_name}': {e}"
+                    );
+                })
+                .ok()?; // Err -> None, then early return
+
+            profile.map(|_| profile_name).or_else(|| {
+                log::warn!(
+                    "AppArmor profile 'ssam-prof-{package_name}' not found. Falling back to default."
+                );
+                Some(Self::CONTAINER_DEFAULT_APPARMOR_PROFILE.to_string())
+            })
+        }
+
+        /// Builds a `LinuxSeccomp` configuration from the given seccomp policy.
+        ///
+        /// Parses the JSON policy, extracts architecture mappings, and constructs
+        /// the final `LinuxSeccomp` with appropriate architectures set.
+        fn build_seccomp_config(
+            seccomp_policy: Option<&PackageSeccompPolicy>,
+        ) -> Option<LinuxSeccomp> {
+            // Parse seccomp policy JSON
+            let seccomp_json = seccomp_policy.and_then(|policy| {
+                serde_json::from_slice::<serde_json::Value>(policy.as_bytes())
+                    .inspect_err(|e| log::debug!("Failed to parse seccomp profile JSON: {e}"))
+                    .ok()
+            })?;
+
+            // Extract architectures from archMap
+            let architectures = seccomp_json
+                .get("archMap")
+                .and_then(|v| {
+                    v.as_array().or_else(|| {
+                        log::warn!("archMap is not an array in seccomp profile");
+                        None
+                    })
+                })
+                .and_then(|arch_map| {
+                    Self::convert_arch_map_to_architectures(arch_map, HostArch::from_env())
+                });
+
+            // Build LinuxSeccomp and set architectures
+            serde_json::from_value::<LinuxSeccomp>(seccomp_json)
+                .inspect_err(|e| log::debug!("Failed to parse seccomp configuration: {e}"))
+                .ok()
+                .map(|mut seccomp| {
+                    seccomp.set_architectures(architectures);
+                    seccomp
+                })
+        }
+
+        fn make_bind_mounts(
+            package_data_root: &Path,
+            data_dirs: Vec<&Path>,
+        ) -> anyhow::Result<Vec<Mount>> {
+            let dest_prefix = Path::new("/");
+            data_dirs
+                .into_iter()
+                .map(|dest_path| {
+                    let src_path =
+                        package_data_root.join(dest_path.strip_prefix("/").unwrap_or(dest_path));
+                    let dest = dest_prefix.join(dest_path);
+                    let options = Self::MOUNT_OPTION
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    MountBuilder::default()
+                        .destination(&dest)
+                        .source(src_path)
+                        .typ("none")
+                        .options(options)
+                        .build()
+                        .map_err(Into::into)
+                })
+                .collect()
+        }
+
+        /// Converts archMap to a list of architectures based on the given host architecture.
+        ///
+        /// Returns `Some(archs)` if a matching entry is found,
+        /// `None` if no match is found or if the host architecture is unsupported.
+        pub(crate) fn convert_arch_map_to_architectures(
+            arch_map: &[serde_json::Value],
+            host_arch: HostArch,
+        ) -> Option<Vec<Arch>> {
+            let oci_arch = host_arch.to_oci_arch()?;
+            let host_arch_str = oci_arch.to_string();
+
+            // Find the entry matching the host architecture and parse architectures
+            let architectures = arch_map.iter().find_map(|entry| {
+                let arch_str = entry.get("architecture")?.as_str()?;
+                if arch_str != host_arch_str {
+                    return None;
+                }
+
+                let main_arch: Arch = arch_str.parse().ok()?;
+                let sub_archs: Vec<Arch> = entry
+                    .get("subArchitectures")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().and_then(|s| s.parse().ok()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                Some(std::iter::once(main_arch).chain(sub_archs).collect())
+            });
+
+            if architectures.is_none() {
+                log::warn!("No matching architecture entry found in archMap for '{host_arch_str}'");
+            }
+
+            architectures
+        }
+
+        pub(crate) fn dir_path(&self) -> &Path {
+            self.path.path()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+pub(crate) trait CommandExecutorBackend: Send + Sync + std::fmt::Debug {
+    async fn start(&self) -> anyhow::Result<ExecutionResult>;
+    async fn stop(&self) -> anyhow::Result<ExecutionResult>;
+    async fn teardown(&self) -> anyhow::Result<()>;
+}
+
+pub(crate) trait CommandArguments: Send + Sync + std::fmt::Debug {
+    fn get_start_args(&self) -> anyhow::Result<Vec<String>>;
+    fn get_stop_args(&self) -> anyhow::Result<Vec<String>>;
+}
+
+pub(crate) mod container {
+    use super::{CommandArguments, ContainerRuntime, oci};
+    #[derive(Debug)]
+    pub(crate) struct ContainerCommand {
+        name: String,
+        runtime: ContainerRuntime,
+        runtime_config: oci::TransientRuntimeConfig,
+    }
+
+    impl ContainerCommand {
+        pub(crate) fn new(
+            name: String,
+            runtime: ContainerRuntime,
+            runtime_config: oci::TransientRuntimeConfig,
+        ) -> Self {
+            Self {
+                name,
+                runtime,
+                runtime_config,
+            }
+        }
+
+        // Add a method to access runtime_config for testing
+        #[cfg(test)]
+        pub(crate) fn runtime_config(&self) -> &oci::TransientRuntimeConfig {
+            &self.runtime_config
+        }
+    }
+
+    impl CommandArguments for ContainerCommand {
+        fn get_start_args(&self) -> anyhow::Result<Vec<String>> {
+            let path = self.runtime_config.dir_path();
+
+            if !path.exists() {
+                anyhow::bail!("Bundle path does not exist: {}", path.display());
+            }
+
+            let bundle_path = path
+                .to_str()
+                .ok_or(anyhow::anyhow!("Invalid bundle path: {}", path.display()))?;
+
+            Ok(vec![
+                self.runtime.to_string(),
+                "run".to_owned(),
+                "--bundle".to_owned(),
+                bundle_path.to_owned(),
+                self.name.clone(),
+            ])
+        }
+
+        fn get_stop_args(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec![
+                self.runtime.to_string(),
+                "delete".to_owned(),
+                "--force".to_owned(),
+                self.name.clone(),
+            ])
+        }
+    }
+}
+
+pub(crate) mod systemd;
+
+#[cfg(test)]
+mod tests {
+    use super::oci::{ContainerSecurityConfig, TransientRuntimeConfig};
+    use crate::package_volume::{DataDirectory, PackageVolume};
+    use libssam::ssam_package::PackageSeccompPolicy;
+    use oci_spec::runtime::{LinuxBuilder, ProcessBuilder, RootBuilder, Spec};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    // Helper to create a test seccomp policy
+    fn create_test_seccomp_policy() -> PackageSeccompPolicy {
+        PackageSeccompPolicy::default_policy()
+    }
+
+    // Helper to create a real PackageVolume for testing using the package_volume test infrastructure
+    fn create_test_package_volume_real(mount_point: &Path) -> anyhow::Result<PackageVolume> {
+        use crate::package_volume::tests::mocks::{MockLoopDeviceControl, MockMountBackend};
+        use crate::package_volume::tests::package_fs_metadata_test;
+        use crate::package_volume::{PackageFileSystem, PackageFsMetadata};
+
+        let package_name = "test-package".to_string();
+        let test_pkg_file = package_fs_metadata_test::create_test_ssam_package_file();
+        let pkgfs_meta = PackageFsMetadata::new(mount_point, &test_pkg_file)?;
+
+        let pkgfs = PackageFileSystem {
+            package_name: package_name.clone(),
+            loop_controller: MockLoopDeviceControl,
+            pkgfs_meta,
+            mount_strategy: MockMountBackend,
+        };
+
+        Ok(PackageVolume::new(package_name, pkgfs, None))
+    }
+
+    // Helper to create a real PackageVolume with data directory for testing
+    fn create_test_package_volume_real_with_data(
+        mount_point: &Path,
+        data_root: PathBuf,
+        data_dirs_str: String,
+    ) -> anyhow::Result<PackageVolume> {
+        use crate::package_volume::tests::mocks::{MockLoopDeviceControl, MockMountBackend};
+        use crate::package_volume::tests::package_fs_metadata_test;
+        use crate::package_volume::{
+            DefaultQuotaEntryBackend, PackageFileSystem, PackageFsMetadata,
+        };
+
+        let package_name = "test-package".to_string();
+        let test_pkg_file = package_fs_metadata_test::create_test_ssam_package_file();
+        let pkgfs_meta = PackageFsMetadata::new(mount_point, &test_pkg_file)?;
+
+        let pkgfs = PackageFileSystem {
+            package_name: package_name.clone(),
+            loop_controller: MockLoopDeviceControl,
+            pkgfs_meta,
+            mount_strategy: MockMountBackend,
+        };
+
+        let data_directory =
+            DataDirectory::<DefaultQuotaEntryBackend>::new(data_root, Some(data_dirs_str), None)?;
+
+        Ok(PackageVolume::new(
+            package_name,
+            pkgfs,
+            Some(data_directory),
+        ))
+    }
+
+    #[test]
+    fn test_transient_runtime_config_actual_new_function() {
+        // Test the ACTUAL TransientRuntimeConfig::new function with real PackageVolume
+        let oci_spec = create_test_oci_spec();
+        let seccomp_policy = create_test_seccomp_policy();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+        // Create a real PackageVolume using the same infrastructure as package_volume tests
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let security_config = ContainerSecurityConfig {
+            seccomp_policy: Some(&seccomp_policy),
+            mac_enabled: true,
+        };
+
+        // Call the ACTUAL TransientRuntimeConfig::new function
+        let result = TransientRuntimeConfig::new(
+            &oci_spec,
+            &security_config,
+            "/sys/fs/cgroup/system.slice",
+            "test-package",
+            &package_volume,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Actual TransientRuntimeConfig::new should succeed: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        let config_path = config.dir_path();
+        assert!(config_path.exists(), "Config directory should exist");
+
+        // Verify the config.json was created
+        let config_file = config_path.join("config.json");
+        assert!(config_file.exists(), "config.json should be created");
+
+        // Verify the content is valid JSON
+        let content = fs::read_to_string(&config_file).expect("Should read config file");
+
+        // Simple JSON validation - check for basic structure
+        assert!(
+            content.contains('{') && content.contains('}'),
+            "Should be valid JSON structure"
+        );
+
+        // Verify it contains expected elements
+        assert!(
+            content.contains("test-package"),
+            "Should contain package name as hostname"
+        );
+        assert!(
+            content.contains("/sys/fs/cgroup/system.slice/test-package.service/container"),
+            "Should contain correct cgroups path"
+        );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_actual_new_with_data_directory() {
+        // Test the ACTUAL function with data directories
+        let oci_spec = create_test_oci_spec();
+        let seccomp_policy = create_test_seccomp_policy();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        let data_root = temp_dir.path().join("data");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        fs::create_dir_all(&data_root).expect("Failed to create data root");
+
+        // Create a real PackageVolume with data directory
+        let package_volume = create_test_package_volume_real_with_data(
+            &mount_point,
+            data_root,
+            "/app/data:/var/log".to_string(),
+        )
+        .expect("Failed to create test PackageVolume with data");
+
+        let security_config = ContainerSecurityConfig {
+            seccomp_policy: Some(&seccomp_policy),
+            mac_enabled: true,
+        };
+
+        // Call the ACTUAL TransientRuntimeConfig::new function
+        let result = TransientRuntimeConfig::new(
+            &oci_spec,
+            &security_config,
+            "/sys/fs/cgroup/system.slice",
+            "test-package",
+            &package_volume,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Actual TransientRuntimeConfig::new with data dirs should succeed: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        let config_file = config.dir_path().join("config.json");
+        let content = fs::read_to_string(&config_file).expect("Should read config file");
+
+        // Verify bind mounts are created for data directories
+        // Note: Linux bind mounts typically use type "none" with "rbind" option
+        assert!(
+            content.contains("\"type\": \"none\""),
+            "Should contain type: none (with space after colon)"
+        );
+        assert!(content.contains("rbind"), "Should contain rbind option");
+        assert!(
+            content.contains("app/data") && content.contains("var/log"),
+            "Should contain both data directory paths"
+        );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_seccomp_disabled() {
+        // Test that seccomp is not applied when seccomp policy is None
+        let oci_spec = create_test_oci_spec();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let security_config = ContainerSecurityConfig {
+            seccomp_policy: None,
+            mac_enabled: true,
+        };
+
+        // Call TransientRuntimeConfig::new with seccomp_policy = None
+        let result = TransientRuntimeConfig::new(
+            &oci_spec,
+            &security_config,
+            "/sys/fs/cgroup/system.slice",
+            "test-package-no-seccomp",
+            &package_volume,
+        );
+
+        assert!(
+            result.is_ok(),
+            "TransientRuntimeConfig::new with seccomp disabled should succeed: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        let config_file = config.dir_path().join("config.json");
+        let content = fs::read_to_string(&config_file).expect("Should read config file");
+
+        // Verify seccomp is not present in the config
+        let config_json: serde_json::Value =
+            serde_json::from_str(&content).expect("Should parse config.json");
+        let linux = config_json.get("linux").expect("Should have linux section");
+        let seccomp = linux.get("seccomp");
+
+        assert!(
+            seccomp.is_none() || seccomp == Some(&serde_json::Value::Null),
+            "seccomp should be null or absent when disabled, but got: {seccomp:?}"
+        );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_seccomp() {
+        // Test that seccomp is applied when seccomp policy is provided
+        let oci_spec = create_test_oci_spec();
+        let seccomp_policy = create_test_seccomp_policy();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let security_config = ContainerSecurityConfig {
+            seccomp_policy: Some(&seccomp_policy),
+            mac_enabled: true,
+        };
+
+        // Call TransientRuntimeConfig::new with seccomp_policy = Some
+        let result = TransientRuntimeConfig::new(
+            &oci_spec,
+            &security_config,
+            "/sys/fs/cgroup/system.slice",
+            "test-package-with-seccomp",
+            &package_volume,
+        );
+
+        assert!(
+            result.is_ok(),
+            "TransientRuntimeConfig::new with seccomp enabled should succeed: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        let config_file = config.dir_path().join("config.json");
+        let content = fs::read_to_string(&config_file).expect("Should read config file");
+
+        // Verify seccomp is present in the config
+        let config_json: serde_json::Value =
+            serde_json::from_str(&content).expect("Should parse config.json");
+        let linux = config_json.get("linux").expect("Should have linux section");
+        let seccomp = linux.get("seccomp");
+
+        assert!(
+            seccomp.is_some() && seccomp != Some(&serde_json::Value::Null),
+            "seccomp should be present when enabled"
+        );
+
+        // Verify seccomp has expected structure
+        let seccomp = seccomp.unwrap();
+        assert!(
+            seccomp.get("defaultAction").is_some(),
+            "seccomp should have defaultAction"
+        );
+    }
+
+    fn create_test_oci_spec() -> Spec {
+        let process = ProcessBuilder::default()
+            .args(vec!["sh".to_string()])
+            .build()
+            .expect("Failed to build process");
+
+        let root = RootBuilder::default()
+            .path("/")
+            .build()
+            .expect("Failed to build root");
+
+        let linux = LinuxBuilder::default()
+            .build()
+            .expect("Failed to build linux config");
+
+        oci_spec::runtime::SpecBuilder::default()
+            .version("1.0.2")
+            .process(process)
+            .root(root)
+            .linux(linux)
+            .build()
+            .expect("Failed to build OCI spec")
+    }
+
+    // Tests for ContainerExecutor
+    mod container_command_tests {
+        use super::*;
+        use crate::executor::container::ContainerCommand;
+        use crate::executor::{CommandArguments, ContainerRuntime};
+
+        fn create_test_container_command() -> ContainerCommand {
+            let oci_spec = create_test_oci_spec();
+            let seccomp_policy = create_test_seccomp_policy();
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mount_point = temp_dir.path().join("mount");
+            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+            let package_volume = create_test_package_volume_real(&mount_point)
+                .expect("Failed to create test PackageVolume");
+
+            let security_config = ContainerSecurityConfig {
+                seccomp_policy: Some(&seccomp_policy),
+                mac_enabled: true,
+            };
+
+            let runtime_config = TransientRuntimeConfig::new(
+                &oci_spec,
+                &security_config,
+                "/sys/fs/cgroup/system.slice",
+                "test-container",
+                &package_volume,
+            )
+            .expect("Failed to create runtime config");
+
+            ContainerCommand::new(
+                "test-container".to_string(),
+                ContainerRuntime::CRun,
+                runtime_config,
+            )
+        }
+
+        #[test]
+        fn test_container_command_new() {
+            let executor = create_test_container_command();
+
+            // Test that the ContainerExecutor was created successfully
+            assert!(format!("{executor:?}").contains("test-container"));
+            assert!(format!("{executor:?}").contains("CRun"));
+        }
+
+        #[test]
+        fn test_container_command_get_start_args() {
+            let executor = create_test_container_command();
+
+            let start_args = executor.get_start_args().expect("Should get start args");
+
+            // Verify the start command structure
+            assert_eq!(start_args.len(), 5);
+            assert_eq!(start_args[0], "/usr/bin/crun");
+            assert_eq!(start_args[1], "run");
+            assert_eq!(start_args[2], "--bundle");
+            // start_args[3] is the bundle path
+            assert_eq!(start_args[4], "test-container");
+
+            // Verify the bundle path exists (it should be created by TransientRuntimeConfig)
+            let bundle_path = Path::new(&start_args[3]);
+            assert!(
+                bundle_path.exists(),
+                "Bundle path should exist: {bundle_path:?}"
+            );
+        }
+
+        #[test]
+        fn test_container_command_get_stop_args() {
+            let executor = create_test_container_command();
+
+            let stop_args = executor.get_stop_args().expect("Should get stop args");
+
+            // Verify the stop command structure
+            assert_eq!(stop_args.len(), 4);
+            assert_eq!(stop_args[0], "/usr/bin/crun");
+            assert_eq!(stop_args[1], "delete");
+            assert_eq!(stop_args[2], "--force");
+            assert_eq!(stop_args[3], "test-container");
+        }
+
+        #[test]
+        fn test_container_command_get_start_args_bundle_not_exists() {
+            // Create a ContainerExecutor with a TransientRuntimeConfig that points to a non-existent path
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mount_point = temp_dir.path().join("mount");
+            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+            let package_volume = create_test_package_volume_real(&mount_point)
+                .expect("Failed to create test PackageVolume");
+
+            let oci_spec = create_test_oci_spec();
+            let seccomp_policy = create_test_seccomp_policy();
+            let security_config = ContainerSecurityConfig {
+                seccomp_policy: Some(&seccomp_policy),
+                mac_enabled: true,
+            };
+
+            let runtime_config = TransientRuntimeConfig::new(
+                &oci_spec,
+                &security_config,
+                "/sys/fs/cgroup/system.slice",
+                "test-container",
+                &package_volume,
+            )
+            .expect("Failed to create runtime config");
+
+            let executor = ContainerCommand::new(
+                "test-container".to_string(),
+                ContainerRuntime::CRun,
+                runtime_config,
+            );
+
+            // Remove the bundle directory to simulate error condition
+            let bundle_path = executor.runtime_config().dir_path();
+            if bundle_path.exists() {
+                fs::remove_dir_all(bundle_path).expect("Failed to remove bundle dir");
+            }
+
+            // Should return an error when bundle path doesn't exist
+            let result = executor.get_start_args();
+            assert!(
+                result.is_err(),
+                "Should fail when bundle path doesn't exist"
+            );
+
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("Bundle path does not exist"),
+                "Error should mention bundle path: {error_msg}"
+            );
+        }
+
+        #[test]
+        fn test_container_runtime_display() {
+            let runtime = ContainerRuntime::CRun;
+            assert_eq!(runtime.to_string(), "/usr/bin/crun");
+        }
+
+        #[test]
+        fn test_container_command_debug_format() {
+            let executor = create_test_container_command();
+            let debug_str = format!("{executor:?}");
+
+            // Verify debug format contains expected information
+            assert!(debug_str.contains("ContainerCommand"));
+            assert!(debug_str.contains("test-container"));
+            assert!(debug_str.contains("CRun"));
+            assert!(debug_str.contains("TransientRuntimeConfig"));
+        }
+    }
+
+    // Tests for ExecutorImpl
+    mod executor_impl_tests {
+
+        use crate::executor::ContainerRuntime;
+
+        #[test]
+        fn test_container_runtime_variants() {
+            // Test ContainerRuntime enum
+            let crun = ContainerRuntime::CRun;
+            assert_eq!(crun.to_string(), "/usr/bin/crun");
+            assert_eq!(format!("{crun:?}"), "CRun");
+        }
+
+        #[test]
+        fn test_execution_result_variants() {
+            // Test ExecutionResult enum variants
+            use crate::executor::ExecutionResult;
+
+            // Test variant creation - we can only test Success and Failure since they don't require real state
+            let failure_result = ExecutionResult::Failure("Test failure".to_string());
+            assert_eq!(format!("{failure_result:?}"), "Failure(\"Test failure\")");
+
+            let timeout_result = ExecutionResult::Timeout;
+            assert_eq!(format!("{timeout_result:?}"), "Timeout");
+        }
+    }
+
+    mod host_arch_tests {
+        use crate::executor::oci::HostArch;
+        use oci_spec::runtime::Arch;
+
+        #[test]
+        fn test_host_arch_to_oci_arch() {
+            assert_eq!(HostArch::X86.to_oci_arch(), Some(Arch::ScmpArchX86));
+            assert_eq!(HostArch::X86_64.to_oci_arch(), Some(Arch::ScmpArchX86_64));
+            assert_eq!(HostArch::Arm.to_oci_arch(), Some(Arch::ScmpArchArm));
+            assert_eq!(HostArch::Aarch64.to_oci_arch(), Some(Arch::ScmpArchAarch64));
+            assert_eq!(HostArch::Unsupported.to_oci_arch(), None);
+        }
+
+        #[test]
+        fn test_oci_arch_to_string() {
+            // Verify that oci_spec::runtime::Arch produces expected SCMP_ARCH_* strings
+            assert_eq!(Arch::ScmpArchX86.to_string(), "SCMP_ARCH_X86");
+            assert_eq!(Arch::ScmpArchX86_64.to_string(), "SCMP_ARCH_X86_64");
+            assert_eq!(Arch::ScmpArchArm.to_string(), "SCMP_ARCH_ARM");
+            assert_eq!(Arch::ScmpArchAarch64.to_string(), "SCMP_ARCH_AARCH64");
+        }
+    }
+
+    mod convert_arch_map_tests {
+        use crate::executor::oci::{HostArch, TransientRuntimeConfig};
+        use oci_spec::runtime::Arch;
+        use serde_json::json;
+
+        fn create_test_arch_map() -> serde_json::Value {
+            json!([
+                {
+                    "architecture": "SCMP_ARCH_X86_64",
+                    "subArchitectures": [
+                        "SCMP_ARCH_X86",
+                        "SCMP_ARCH_X32"
+                    ]
+                },
+                {
+                    "architecture": "SCMP_ARCH_AARCH64",
+                    "subArchitectures": [
+                        "SCMP_ARCH_ARM"
+                    ]
+                },
+                {
+                    "architecture": "SCMP_ARCH_X86",
+                    "subArchitectures": []
+                },
+                {
+                    "architecture": "SCMP_ARCH_ARM",
+                    "subArchitectures": []
+                }
+            ])
+        }
+
+        #[test]
+        fn test_convert_arch_map_x86_64() {
+            let arch_map = create_test_arch_map();
+            let arch_map_arr = arch_map.as_array().unwrap();
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::X86_64,
+            );
+
+            assert!(result.is_some());
+            let archs = result.unwrap();
+            assert_eq!(archs.len(), 3);
+            assert_eq!(archs[0], Arch::ScmpArchX86_64);
+            assert_eq!(archs[1], Arch::ScmpArchX86);
+            assert_eq!(archs[2], Arch::ScmpArchX32);
+        }
+
+        #[test]
+        fn test_convert_arch_map_aarch64() {
+            let arch_map = create_test_arch_map();
+            let arch_map_arr = arch_map.as_array().unwrap();
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::Aarch64,
+            );
+
+            assert!(result.is_some());
+            let archs = result.unwrap();
+            assert_eq!(archs.len(), 2);
+            assert_eq!(archs[0], Arch::ScmpArchAarch64);
+            assert_eq!(archs[1], Arch::ScmpArchArm);
+        }
+
+        #[test]
+        fn test_convert_arch_map_x86() {
+            let arch_map = create_test_arch_map();
+            let arch_map_arr = arch_map.as_array().unwrap();
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::X86,
+            );
+
+            assert!(result.is_some());
+            let archs = result.unwrap();
+            assert_eq!(archs.len(), 1);
+            assert_eq!(archs[0], Arch::ScmpArchX86);
+        }
+
+        #[test]
+        fn test_convert_arch_map_arm() {
+            let arch_map = create_test_arch_map();
+            let arch_map_arr = arch_map.as_array().unwrap();
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::Arm,
+            );
+
+            assert!(result.is_some());
+            let archs = result.unwrap();
+            assert_eq!(archs.len(), 1);
+            assert_eq!(archs[0], Arch::ScmpArchArm);
+        }
+
+        #[test]
+        fn test_convert_arch_map_unsupported() {
+            let arch_map = create_test_arch_map();
+            let arch_map_arr = arch_map.as_array().unwrap();
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::Unsupported,
+            );
+
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn test_convert_arch_map_no_matching_entry() {
+            // Create archMap without matching architecture
+            let arch_map = json!([
+                {
+                    "architecture": "SCMP_ARCH_MIPS",
+                    "subArchitectures": []
+                }
+            ]);
+            let arch_map_arr = arch_map.as_array().unwrap();
+
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::X86_64,
+            );
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn test_convert_arch_map_without_sub_architectures() {
+            let arch_map = json!([
+                {
+                    "architecture": "SCMP_ARCH_X86_64"
+                }
+            ]);
+            let arch_map_arr = arch_map.as_array().unwrap();
+
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::X86_64,
+            );
+            assert!(result.is_some());
+            let archs = result.unwrap();
+            assert_eq!(archs.len(), 1);
+            assert_eq!(archs[0], Arch::ScmpArchX86_64);
+        }
+
+        #[test]
+        fn test_convert_arch_map_with_empty_sub_architectures() {
+            let arch_map = json!([
+                {
+                    "architecture": "SCMP_ARCH_X86_64",
+                    "subArchitectures": []
+                }
+            ]);
+            let arch_map_arr = arch_map.as_array().unwrap();
+
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::X86_64,
+            );
+            assert!(result.is_some());
+            let archs = result.unwrap();
+            assert_eq!(archs.len(), 1);
+        }
+
+        #[test]
+        fn test_convert_arch_map_with_invalid_sub_architecture() {
+            // Invalid sub-architecture should be filtered out
+            let arch_map = json!([
+                {
+                    "architecture": "SCMP_ARCH_X86_64",
+                    "subArchitectures": [
+                        "SCMP_ARCH_X86",
+                        "INVALID_ARCH",
+                        "SCMP_ARCH_X32"
+                    ]
+                }
+            ]);
+            let arch_map_arr = arch_map.as_array().unwrap();
+
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                arch_map_arr,
+                HostArch::X86_64,
+            );
+            assert!(result.is_some());
+            let archs = result.unwrap();
+            // INVALID_ARCH should be filtered out
+            assert_eq!(archs.len(), 3);
+            assert_eq!(archs[0], Arch::ScmpArchX86_64);
+            assert_eq!(archs[1], Arch::ScmpArchX86);
+            assert_eq!(archs[2], Arch::ScmpArchX32);
+        }
+
+        #[test]
+        fn test_convert_arch_map_empty_array() {
+            let arch_map: Vec<serde_json::Value> = vec![];
+
+            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+                &arch_map,
+                HostArch::X86_64,
+            );
+            assert!(result.is_none());
+        }
+    }
+}

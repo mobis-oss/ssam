@@ -1,0 +1,13 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "quotactl-rs",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "quotactl_rs",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:bitflags",
+        "@crates//:libc",
+    ],
+)

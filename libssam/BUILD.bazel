@@ -1,0 +1,75 @@
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@protobuf//bazel/common:proto_common.bzl", "proto_common")
+
+cargo_build_script(
+    name = "build_script",
+    edition = "2024",
+    srcs = ["build.rs"],
+    data = [
+        "data/default_seccomp.json",
+        "data/remocon-responses.schema.json",
+        "data/ssam.remocon.proto",
+    ],
+    build_script_env = {
+        "PROTOC": "$(execpath //bazel/tools:protoc)",
+    },
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:itertools",
+        "@crates//:proc-macro2",
+        "@crates//:quote",
+        "@crates//:schemars",
+        "@crates//:serde_json",
+        "@crates//:syn",
+        "@crates//:tonic-build",
+        "@crates//:tonic-prost-build",
+        "@crates//:typify",
+    ],
+    tools = [
+        "//bazel/tools:protoc",
+    ],
+)
+
+rust_library(
+    name = "libssam",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    compile_data = ["data/package_config_spec.toml"],
+    deps = [
+        ":build_script",
+        "@crates//:anyhow",
+        "@crates//:bincode",
+        "@crates//:derive_more",
+        "@crates//:jiff",
+        "@crates//:log",
+        "@crates//:oci-spec",
+        "@crates//:prost",
+        "@crates//:rsa",
+        "@crates//:semver",
+        "@crates//:serde",
+        "@crates//:serde-big-array",
+        "@crates//:serde_json",
+        "@crates//:strum",
+        "@crates//:thiserror",
+        "@crates//:toml",
+        "@crates//:tonic",
+        "@crates//:tonic-prost",
+        "@crates//:zip",
+    ],
+    proc_macro_deps = [
+        "//proc_macros:proc_macros",
+        "@crates//:strum_macros",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "libssam_test",
+    crate = ":libssam",
+    deps = [
+        "@crates//:tempfile",
+    ],
+    visibility = ["//visibility:public"],
+)

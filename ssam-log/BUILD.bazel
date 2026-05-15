@@ -1,0 +1,16 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "ssam-log",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "ssam_log",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:simplelog",
+    ],
+)

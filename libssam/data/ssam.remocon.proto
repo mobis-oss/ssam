@@ -1,0 +1,86 @@
+// Copyright 2025-2026 Hyundai Mobis Co., Ltd.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package ssamd.remocon;
+
+message StartPackageRequest {
+    // Empty list means "all installed packages".
+    // This semantic is intentional; the CLI enforces --all flag for safety.
+    repeated string package_names = 1;
+}
+
+message StopPackageRequest {
+    // Empty list means "all installed packages".
+    // This semantic is intentional; the CLI enforces --all flag for safety.
+    repeated string package_names = 1;
+}
+
+message InstallPackageRequest {
+    string package_path = 1;
+    bool force = 2;
+    bool remove_data = 3;
+}
+
+message RemovePackageRequest {
+    string package_name = 1;
+}
+
+message PackageInformationRequest {
+    string package_name = 1;
+}
+
+message StartPackageResponse {
+    string result = 1;
+}
+
+message StopPackageResponse {
+    string result = 1;
+}
+
+message InstallPackageResponse {
+    string result = 1;
+}
+
+message RemovePackageResponse {
+    string result = 1;
+}
+
+message ListPackagesStatusResponse {
+    string result = 1;
+}
+
+message TimeLineInformationResponse {
+    string result = 1;
+}
+
+message PackageInformationResponse {
+    string result = 1;
+}
+
+message InspectLocalPackageRequest {
+    string package_path = 1;
+}
+
+message InspectLocalPackageResponse {
+    string result = 1;
+}
+
+message AllPackageInformationResponse {
+    string result = 1;
+}
+
+service Remocon {
+    rpc StartPackage(StartPackageRequest) returns (StartPackageResponse);
+    rpc StopPackage(StopPackageRequest) returns (StopPackageResponse);
+    rpc InstallPackage(InstallPackageRequest) returns (InstallPackageResponse);
+    rpc RemovePackage(RemovePackageRequest) returns (RemovePackageResponse);
+    rpc ListPackagesStatus(google.protobuf.Empty) returns (ListPackagesStatusResponse);
+    rpc GetTimelineInfo(google.protobuf.Empty) returns (TimeLineInformationResponse);
+    rpc GetPackageInfo(PackageInformationRequest) returns (PackageInformationResponse);
+    rpc InspectLocalPackage(InspectLocalPackageRequest) returns (InspectLocalPackageResponse);
+    rpc GetAllPackageInfo(google.protobuf.Empty) returns (AllPackageInformationResponse);
+}

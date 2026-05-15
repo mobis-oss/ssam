@@ -1,0 +1,10 @@
+[common]
+# Test configuration for ssamd
+bundled_packages_dir = "/var/lib/ssamd/bundled"
+downloaded_packages_dir = "/var/lib/ssamd/downloaded"
+packages_data_root = "/var/lib/ssamd/data"
+packages_overlayfs_root = ""
+packages_mnt_root = "/var/lib/ssamd/mnt"
+public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
+packages_cgroup = ""
+packages_ext = "ssam"

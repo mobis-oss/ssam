@@ -1,0 +1,21 @@
+[package]
+name = "ssam-wrap"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libssam.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rsa.workspace = true
+strum.workspace = true
+oci-spec.workspace = true
+serde_json.workspace = true
+fs_extra = "1.3.0"
+linux-raw-sys.workspace = true
+
+[build-dependencies]
+anyhow.workspace = true
+serde_json.workspace = true

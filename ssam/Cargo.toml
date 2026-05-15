@@ -1,0 +1,24 @@
+[package]
+name = "ssam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libssam.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tonic.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+term_size = "0.3.2"
+expandtabs-rs = "0.1.0"
+bincode.workspace = true
+prost-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", features = ["net"] }

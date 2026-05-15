@@ -1,0 +1,33 @@
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+cargo_build_script(
+    name = "build_script",
+    edition = "2024",
+    srcs = ["build.rs"],
+    data = ["config/runtime_template.json"],
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_binary(
+    name = "ssam-wrap",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/main.rs",
+    edition = "2024",
+    deps = [
+        ":build_script",
+        "//libssam:libssam",
+        "@crates//:anyhow",
+        "@crates//:clap",
+        "@crates//:rsa",
+        "@crates//:strum",
+        "@crates//:oci-spec",
+        "@crates//:serde_json",
+        "@crates//:fs_extra",
+        "@crates//:linux-raw-sys",
+    ],
+    visibility = ["//visibility:public"],
+)

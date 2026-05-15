@@ -1,0 +1,23 @@
+[package]
+name = "package_name"
+description = "A short description of the package"
+version = "0.0.1"
+#:Opt:# package.autostart
+autostart = true  # default is true
+
+[container]
+#:Opt:# container.storage_limit
+storage_limit = 1000 # Kilobytes
+#:Opt:# container.data_dirs
+data_dirs = "/container/path1:container/path2:container/path3"
+
+[container.security]
+seccomp = true # default is true
+mac = true # default is true
+
+[service]
+service_type = "simple"
+#:Opt:# service.bus_name
+bus_name = "my.bus.interface.name"
+#:Opt:# service.remain_after_exit
+remain_after_exit = false

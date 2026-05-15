@@ -1,0 +1,533 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssam.example.com/schemas/remocon-responses.schema.json",
+  "title": "SSAM RPC Response Schemas",
+  "description": "JSON Schema definitions for SSAM ssamd RPC responses",
+  "$defs": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1",
+      "description": "Schema version for all RPC responses"
+    },
+    "duration": {
+      "type": "object",
+      "description": "Standard Rust Duration serialization (secs + nanos)",
+      "properties": {
+        "secs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nanos": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ],
+      "additionalProperties": false
+    },
+    "packageStatusEntry": {
+      "type": "object",
+      "description": "Single package status entry",
+      "properties": {
+        "package_name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "examples": [
+            "Ready",
+            "Running",
+            "Broken"
+          ]
+        }
+      },
+      "required": [
+        "package_name",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "timelineEvent": {
+      "type": "object",
+      "description": "Single timeline event from ssam-log",
+      "properties": {
+        "pkg": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "duration_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "started",
+            "completed"
+          ]
+        }
+      },
+      "required": [
+        "pkg",
+        "phase",
+        "duration_ns",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "timelineData": {
+      "type": "object",
+      "description": "Timeline data for GetTimelineInfo response (ssam-log based)",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/timelineEvent"
+          }
+        },
+        "ssamd_uptime": {
+          "$ref": "#/$defs/duration"
+        }
+      },
+      "required": [
+        "events",
+        "ssamd_uptime"
+      ],
+      "additionalProperties": false
+    },
+    "quotaInformation": {
+      "type": "object",
+      "description": "Quota limits for package",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "enabled",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "packageInfo": {
+      "type": "object",
+      "description": "Package metadata (essential fields only)",
+      "properties": {
+        "package_name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_name",
+        "version",
+        "description"
+      ]
+    },
+    "packageInfoResponse": {
+      "type": "object",
+      "description": "Package info response (unified normal and broken)",
+      "properties": {
+        "broken": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "metadata": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/packageInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quota": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/quotaInformation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "package_path": {
+          "type": "string"
+        },
+        "error_summary": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_details": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "broken",
+        "name",
+        "status",
+        "package_path"
+      ],
+      "additionalProperties": false
+    },
+    "startStopResult": {
+      "type": "object",
+      "required": ["package_name", "success"],
+      "properties": {
+        "package_name": { "type": "string" },
+        "success": { "type": "boolean" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "installResponse": {
+      "type": "object",
+      "description": "Install response payload with installed package metadata",
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/packageInfo"
+        }
+      },
+      "required": [
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    "jsonResultSuccess": {
+      "type": "object",
+      "description": "Generic success response wrapper",
+      "properties": {
+        "schema_version": {
+          "$ref": "#/$defs/schemaVersion"
+        },
+        "success": {
+          "type": "boolean",
+          "const": true
+        },
+        "data": {}
+      },
+      "required": [
+        "schema_version",
+        "success"
+      ],
+      "additionalProperties": false
+    },
+    "jsonResultSuccessEmpty": {
+      "type": "object",
+      "description": "Success response with no data",
+      "properties": {
+        "schema_version": {
+          "$ref": "#/$defs/schemaVersion"
+        },
+        "success": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "success"
+      ],
+      "additionalProperties": false
+    },
+    "jsonResultFailure": {
+      "type": "object",
+      "description": "Generic failure response wrapper",
+      "properties": {
+        "schema_version": {
+          "$ref": "#/$defs/schemaVersion"
+        },
+        "success": {
+          "type": "boolean",
+          "const": false
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "success",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "list": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/packageStatusEntry"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
+    "pkg-info": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/packageInfoResponse"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
+    "all-pkg-info": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/packageInfoResponse"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
+    "timeline-info": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/timelineData"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
+    "start": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "required": ["data"],
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/startStopResult"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
+    "stop": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "required": ["data"],
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/startStopResult"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
+    "install": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/installResponse"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
+    "remove": {
+       "oneOf": [
+         {
+           "$ref": "#/$defs/jsonResultSuccessEmpty"
+         },
+         {
+           "$ref": "#/$defs/jsonResultFailure"
+         }
+       ]
+     },
+    "inspectLocalPackageResponse": {
+      "type": "object",
+      "description": "Inspect local package file response (no status/quota)",
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/packageInfo"
+        },
+        "package_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "metadata",
+        "package_path"
+      ]
+    },
+    "inspect-local-pkg": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/inspectLocalPackageResponse"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    }
+   },
+  "type": "object",
+  "properties": {
+    "rpc_schemas": {
+      "type": "object",
+      "properties": {
+        "list": {
+          "$ref": "#/$defs/list"
+        },
+        "pkg-info": {
+          "$ref": "#/$defs/pkg-info"
+        },
+        "all-pkg-info": {
+          "$ref": "#/$defs/all-pkg-info"
+        },
+        "timeline-info": {
+          "$ref": "#/$defs/timeline-info"
+        },
+        "start": {
+          "$ref": "#/$defs/start"
+        },
+        "stop": {
+          "$ref": "#/$defs/stop"
+        },
+        "install": {
+          "$ref": "#/$defs/install"
+        },
+        "remove": {
+          "$ref": "#/$defs/remove"
+        },
+        "inspect-local-pkg": {
+          "$ref": "#/$defs/inspect-local-pkg"
+        }
+      }
+    }
+  }
+}

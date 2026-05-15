@@ -1,0 +1,7 @@
+/target
+/llvm-coverage
+.idea
+
+# Bazel build directories
+/bazel-*
+.bazelrc.user

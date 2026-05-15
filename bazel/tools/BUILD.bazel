@@ -1,0 +1,31 @@
+"""Protoc wrapper for Linux platforms (x86_64 and aarch64)"""
+
+# Linux x86_64 platform
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# Linux ARM64 platform
+config_setting(
+    name = "linux_aarch64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# Prebuilt protoc alias
+alias(
+    name = "protoc",
+    actual = select({
+        ":linux_x86_64": "@prebuilt_protoc.linux_x86_64//:bin/protoc",
+        ":linux_aarch64": "@prebuilt_protoc.linux_aarch_64//:bin/protoc",
+        # Fallback: source-built protoc
+        "//conditions:default": "@com_google_protobuf//:protoc",
+    }),
+    visibility = ["//visibility:public"],
+)
