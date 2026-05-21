@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Hyundai Mobis Co., Ltd.
+// Copyright 2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::mpsc;
