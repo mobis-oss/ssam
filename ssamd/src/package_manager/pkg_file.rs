@@ -219,14 +219,13 @@ impl PackageTransactionActor {
             return Err(e);
         }
 
-        if remove_data {
-            if let Err(e) = self.purge_volume(&package_name).await {
+        if remove_data
+            && let Err(e) = self.purge_volume(&package_name).await {
                 self.rollback_file_ops(&mode, &dest)
                     .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
                     .ok();
                 return Err(e);
             }
-        }
 
         let volume = match self.acquire_volume(volume_meta).await {
             Ok(v) => v,

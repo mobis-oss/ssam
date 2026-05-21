@@ -435,7 +435,7 @@ impl PackageManagerActor {
                 self.package_store
                     .insert(package_name.to_owned(), restored)
                     .await;
-                log::info!("Restored package '{package_name}' from {package_path:?}",);
+                log::info!("Restored package '{package_name}' from {package_path:?}");
             }
             Err(e) => {
                 log::error!(

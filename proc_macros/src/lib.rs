@@ -156,7 +156,7 @@ fn generate_proxy_getters(
         add_proxy_getters(
             &mut proxy_getters,
             val,
-            &[section.to_string()],
+            std::slice::from_ref(section),
             &[format_ident!("{}", section)],
             optional_keys,
             &format!("{new_prefix}."),
@@ -179,7 +179,7 @@ fn add_proxy_getters(
         // Recursively process nested tables
         for (k, v) in table {
             let mut new_path = field_path.to_owned();
-            new_path.push(k.to_string());
+            new_path.push(k.clone());
             let mut new_idents = field_idents.to_owned();
             new_idents.push(format_ident!("{}", k));
 

@@ -215,7 +215,7 @@ fn build_pkgfs_image(
     let (image_file_name, mkfs_args) = image_type.into();
     let pkgfs_src_path = pkgfs_src_path.as_ref();
 
-    println!("Building Package filesystem image: {image_file_name} with {mkfs_args:?}",);
+    println!("Building Package filesystem image: {image_file_name} with {mkfs_args:?}");
 
     workspace.prepare_intermediate_dir()?;
     let image_file_path = workspace.intermediate_dir.join(image_file_name);
