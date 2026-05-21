@@ -541,6 +541,17 @@ impl PackageFile {
                 }
             })?;
 
+        // File layout: [zip data | payloads_info | payloads_size_field | footer]
+        let max_payloads_size = pkg_file_size.saturating_sub(footer_len + payloads_size_len);
+        if payloads_size > max_payloads_size {
+            return Err(PackageParseError::ParseFailed {
+                source: anyhow!(
+                    "Declared payloads size ({payloads_size}) exceeds \
+                     available file space ({max_payloads_size})"
+                ),
+            });
+        }
+
         let payloads_offset =
             pkg_file_size.saturating_sub(footer_len + payloads_size_len + payloads_size);
 
@@ -1332,6 +1343,76 @@ pub(crate) mod tests {
                 PackageParseError::InvalidFormatVersion { .. }
             ),
             "Expected InvalidFormatVersion error for unknown version 0.3.0"
+        );
+    }
+
+    #[test]
+    fn load_payloads_info_rejects_oversized_payloads_size() {
+        let temp_dir = tempdir().unwrap();
+        let test_file_path = temp_dir.path().join("oversized.ssam");
+        let public_key_path = temp_dir.path().join("pub.pem");
+
+        let private_key_path = temp_dir.path().join("priv.pem");
+        create_test_keys(&private_key_path, &public_key_path);
+
+        {
+            let mut file = File::create(&test_file_path).unwrap();
+            file.write_all(b"some_padding_data").unwrap();
+
+            let oversized: u64 = 0xFFFF_FFFF_FFFF_0000;
+            let encoded_size =
+                bincode::encode_to_vec(oversized, SSAM_SERIALIZATION_CONFIG).unwrap();
+            file.write_all(&encoded_size).unwrap();
+
+            write_footer(&mut file).unwrap();
+        }
+
+        let mut file = File::open(&test_file_path).unwrap();
+        let result = PackageFile::load_payloads_info(&mut file, &public_key_path);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PackageParseError::ParseFailed { .. }),
+            "Expected ParseFailed for oversized payloads_size, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn load_payloads_info_rejects_payloads_size_slightly_over_file() {
+        let temp_dir = tempdir().unwrap();
+        let test_file_path = temp_dir.path().join("slightly_over.ssam");
+        let public_key_path = temp_dir.path().join("pub.pem");
+
+        let private_key_path = temp_dir.path().join("priv.pem");
+        create_test_keys(&private_key_path, &public_key_path);
+
+        let padding = b"padding_data_for_test";
+        {
+            let mut file = File::create(&test_file_path).unwrap();
+            file.write_all(padding).unwrap();
+
+            let footer_len = SSAM_PKG_FOOTER_LEN as u64;
+            let size_field_len = size_of::<PayloadSizeType>() as u64;
+            let total_file_size = padding.len() as u64 + size_field_len + footer_len;
+            let max_valid = total_file_size.saturating_sub(footer_len + size_field_len);
+            let just_over = max_valid + 1;
+
+            let encoded_size =
+                bincode::encode_to_vec(just_over, SSAM_SERIALIZATION_CONFIG).unwrap();
+            file.write_all(&encoded_size).unwrap();
+
+            write_footer(&mut file).unwrap();
+        }
+
+        let mut file = File::open(&test_file_path).unwrap();
+        let result = PackageFile::load_payloads_info(&mut file, &public_key_path);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PackageParseError::ParseFailed { .. }),
+            "Expected ParseFailed for payloads_size slightly over file capacity, got: {err:?}"
         );
     }
 }

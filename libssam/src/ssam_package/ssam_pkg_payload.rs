@@ -15,6 +15,7 @@ use rsa::{
     pkcs8::DecodePrivateKey,
     pkcs8::DecodePublicKey,
     sha2::{Digest, Sha256},
+    traits::PublicKeyParts,
 };
 use std::fmt::Write as _;
 
@@ -22,6 +23,83 @@ use strum::IntoEnumIterator;
 
 use super::PackageParseError;
 use crate::config::SSAM_SERIALIZATION_CONFIG;
+
+const STREAMING_CHUNK_SIZE: usize = 64 * 1024;
+
+fn seek_to_payload(
+    reader: &mut (impl Read + Seek),
+    offset: PayloadOffset,
+    size: usize,
+    file_size: u64,
+) -> Result<(), PackageParseError> {
+    if offset.saturating_add(size as u64) > file_size {
+        return Err(PackageParseError::ParseFailed {
+            source: anyhow!(
+                "Payload region (offset={offset}, size={size}) exceeds file size {file_size}"
+            ),
+        });
+    }
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| PackageParseError::Io {
+            message: "Failed to seek package file.".to_string(),
+            source: e.into(),
+        })?;
+    Ok(())
+}
+
+fn read_payload(
+    reader: &mut (impl Read + Seek),
+    offset: PayloadOffset,
+    size: usize,
+    file_size: u64,
+    max_allowed_size: usize,
+) -> Result<Vec<u8>, PackageParseError> {
+    if size > max_allowed_size {
+        return Err(PackageParseError::ParseFailed {
+            source: anyhow!("Payload size {size} exceeds maximum allowed size {max_allowed_size}"),
+        });
+    }
+    seek_to_payload(reader, offset, size, file_size)?;
+    let mut buf = vec![0; size];
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| PackageParseError::Io {
+            message: "Failed to read package file.".to_string(),
+            source: e.into(),
+        })?;
+    Ok(buf)
+}
+
+fn update_hasher(
+    reader: &mut (impl Read + Seek),
+    offset: PayloadOffset,
+    size: usize,
+    file_size: u64,
+    hasher: &mut Sha256,
+    buf: &mut [u8],
+) -> Result<(), PackageParseError> {
+    let chunk_size = buf.len();
+    if chunk_size == 0 {
+        return Err(PackageParseError::ParseFailed {
+            source: anyhow!("Streaming buffer must not be empty"),
+        });
+    }
+    seek_to_payload(reader, offset, size, file_size)?;
+    let mut remaining = size;
+    while remaining > 0 {
+        let n = remaining.min(chunk_size);
+        reader
+            .read_exact(&mut buf[..n])
+            .map_err(|e| PackageParseError::Io {
+                message: "Failed to read package file.".to_string(),
+                source: e.into(),
+            })?;
+        hasher.update(&buf[..n]);
+        remaining -= n;
+    }
+    Ok(())
+}
 
 #[derive(
     Debug,
@@ -168,37 +246,14 @@ impl Payloads {
         ssam_payloads: &Self,
         public_key: impl AsRef<Path>,
     ) -> Result<(), PackageParseError> {
-        #[inline]
-        fn seek_and_read(
-            reader: &mut File,
-            offset: PayloadOffset,
-            size: PayloadSize,
-        ) -> Result<Vec<u8>, PackageParseError> {
-            reader
-                .seek(SeekFrom::Start(offset))
-                .with_context(|| format!("Seeking to payload at offset {offset}"))
-                .map_err(|source| PackageParseError::Io {
-                    message: "Failed to seek package file.".to_string(),
-                    source,
-                })?;
-            let buf_size = usize::try_from(size)
-                .with_context(|| format!("Converting payload size {size} (u64) to usize"))
-                .map_err(|source| PackageParseError::Io {
-                    message: format!("Payload size {size} exceeds usize"),
-                    source,
-                })?;
-            let mut buf = vec![0; buf_size];
-            reader
-                .read_exact(&mut buf)
-                .with_context(|| {
-                    format!("Reading {buf_size} bytes of payload data at offset {offset}")
-                })
-                .map_err(|source| PackageParseError::Io {
-                    message: "Failed to read package file.".to_string(),
-                    source,
-                })?;
-            Ok(buf)
-        }
+        let file_size = pkg_fp
+            .metadata()
+            .context("Querying file metadata for payload size validation")
+            .map_err(|source| PackageParseError::Io {
+                message: "Failed to get package file metadata.".to_string(),
+                source,
+            })?
+            .len();
 
         let public_key = RsaPublicKey::read_public_key_pem_file(&public_key).map_err(|e| {
             PackageParseError::ParseFailed {
@@ -206,16 +261,24 @@ impl Payloads {
             }
         })?;
 
-        let mut hasher = Sha256::new();
+        let max_signature_size = public_key.size();
         let signature;
         if let Some(Payload::INTERNAL((offset, size))) = ssam_payloads.get(PayloadType::Signature) {
-            signature = seek_and_read(pkg_fp, *offset, *size)?;
+            let size = usize::try_from(*size)
+                .with_context(|| format!("Signature payload size {size} exceeds addressable range"))
+                .map_err(|source| PackageParseError::Io {
+                    message: "Signature payload size too large".to_string(),
+                    source,
+                })?;
+            signature = read_payload(pkg_fp, *offset, size, file_size, max_signature_size)?;
         } else {
             return Err(PackageParseError::ParseFailed {
                 source: anyhow!("Missing signature payload"),
             });
         }
 
+        let mut hasher = Sha256::new();
+        let mut hash_buf = vec![0u8; STREAMING_CHUNK_SIZE];
         for (payload_type, payload) in ssam_payloads {
             let payload_conf = SSAM_PAYLOAD_CONFIGURATION
                 .get(payload_type)
@@ -231,8 +294,15 @@ impl Payloads {
                     source: anyhow!("Missing payload for {payload_type}"),
                 })?;
             if let Payload::INTERNAL((offset, size)) = payload {
-                let buffer = seek_and_read(pkg_fp, *offset, *size)?;
-                hasher.update(&buffer);
+                let size = usize::try_from(*size)
+                    .with_context(|| {
+                        format!("Payload size {size} for {payload_type} exceeds addressable range")
+                    })
+                    .map_err(|source| PackageParseError::Io {
+                        message: format!("Payload size too large for {payload_type}"),
+                        source,
+                    })?;
+                update_hasher(pkg_fp, *offset, size, file_size, &mut hasher, &mut hash_buf)?;
             } else {
                 return Err(PackageParseError::ParseFailed {
                     source: anyhow!("Expected internal payload for {payload_type}"),
@@ -295,6 +365,8 @@ impl PayloadConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
 
     #[test]
@@ -486,5 +558,186 @@ mod tests {
         ];
 
         assert_eq!(types, expected);
+    }
+
+    #[test]
+    fn seek_to_payload_rejects_region_past_eof() {
+        let mut cursor = Cursor::new([0u8; 10]);
+        let result = seek_to_payload(&mut cursor, 5, 10, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn seek_to_payload_rejects_overflow() {
+        let mut cursor = Cursor::new([0u8; 100]);
+        let result = seek_to_payload(&mut cursor, u64::MAX, 1, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn seek_to_payload_accepts_exact_boundary() {
+        let mut cursor = Cursor::new([0u8; 10]);
+        let result = seek_to_payload(&mut cursor, 0, 10, 10);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn seek_to_payload_accepts_nonzero_offset() {
+        let mut cursor = Cursor::new([0u8; 20]);
+        let result = seek_to_payload(&mut cursor, 10, 10, 20);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn read_payload_rejects_size_exceeding_max() {
+        let mut cursor = Cursor::new(b"small file content".to_vec());
+        let file_size = 18;
+
+        let result = read_payload(&mut cursor, 0, 8192, file_size, 1024);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PackageParseError::ParseFailed { .. }),
+            "Expected ParseFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_payload_succeeds_at_exact_boundary() {
+        let data = b"exactly16bytes!!";
+        let mut cursor = Cursor::new(data.to_vec());
+        let file_size = data.len() as u64;
+
+        let result = read_payload(&mut cursor, 0, data.len(), file_size, data.len());
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), data.to_vec());
+    }
+
+    #[test]
+    fn read_payload_rejects_region_past_eof() {
+        let mut cursor = Cursor::new(b"short".to_vec());
+
+        let result = read_payload(&mut cursor, 0, 100, 5, 200);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PackageParseError::ParseFailed { .. }),
+            "Expected ParseFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_payload_reads_from_nonzero_offset() {
+        let data = b"HEADERpayload_data_here";
+        let mut cursor = Cursor::new(data.to_vec());
+        let file_size = data.len() as u64;
+
+        let result = read_payload(&mut cursor, 6, 17, file_size, 64);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"payload_data_here".to_vec());
+    }
+
+    #[test]
+    fn update_hasher_produces_correct_hash() {
+        let data = b"hello world streaming hash test data";
+        let mut cursor = Cursor::new(data.to_vec());
+        let file_size = data.len() as u64;
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
+        let result = update_hasher(&mut cursor, 0, data.len(), file_size, &mut hasher, &mut buf);
+        assert!(result.is_ok());
+
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(data);
+        assert_eq!(hasher.finalize(), expected_hasher.finalize());
+    }
+
+    #[test]
+    fn update_hasher_rejects_region_past_eof() {
+        let mut cursor = Cursor::new(b"short".to_vec());
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
+        let result = update_hasher(&mut cursor, 0, 9999, 5, &mut hasher, &mut buf);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_hasher_handles_multi_chunk_data() {
+        let data = vec![0xABu8; STREAMING_CHUNK_SIZE * 3 + 1000];
+        let mut cursor = Cursor::new(data.clone());
+        let file_size = data.len() as u64;
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
+        let result = update_hasher(&mut cursor, 0, data.len(), file_size, &mut hasher, &mut buf);
+        assert!(result.is_ok());
+
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(&data);
+        assert_eq!(hasher.finalize(), expected_hasher.finalize());
+    }
+
+    #[test]
+    fn update_hasher_handles_exact_chunk_boundary() {
+        let data = vec![0xCDu8; STREAMING_CHUNK_SIZE * 2];
+        let mut cursor = Cursor::new(data.clone());
+        let file_size = data.len() as u64;
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
+        let result = update_hasher(&mut cursor, 0, data.len(), file_size, &mut hasher, &mut buf);
+        assert!(result.is_ok());
+
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(&data);
+        assert_eq!(hasher.finalize(), expected_hasher.finalize());
+    }
+
+    #[test]
+    fn update_hasher_from_nonzero_offset() {
+        let data = b"SKIPthis_is_hashed";
+        let mut cursor = Cursor::new(data.to_vec());
+        let file_size = data.len() as u64;
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
+        let result = update_hasher(&mut cursor, 4, 14, file_size, &mut hasher, &mut buf);
+        assert!(result.is_ok());
+
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"this_is_hashed");
+        assert_eq!(hasher.finalize(), expected_hasher.finalize());
+    }
+
+    #[test]
+    fn update_hasher_zero_size() {
+        let mut cursor = Cursor::new(b"data".to_vec());
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
+        let result = update_hasher(&mut cursor, 0, 0, 4, &mut hasher, &mut buf);
+        assert!(result.is_ok());
+
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"");
+        assert_eq!(hasher.finalize(), expected_hasher.finalize());
+    }
+
+    #[test]
+    fn update_hasher_rejects_empty_buffer() {
+        let mut cursor = Cursor::new(b"data".to_vec());
+
+        let mut hasher = Sha256::new();
+        let mut buf = vec![];
+        let result = update_hasher(&mut cursor, 0, 4, 4, &mut hasher, &mut buf);
+
+        assert!(result.is_err());
     }
 }
