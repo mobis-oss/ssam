@@ -68,22 +68,25 @@ impl FormatVerity<'_> {
         } else {
             "--no-superblock".to_owned()
         };
+        let root_hash_file_str = root_hash_file
+            .as_ref()
+            .map(|p| format!("--root-hash-file={}", p.display()))
+            .unwrap_or_default();
+        let image_path_str = image_path.display().to_string();
 
-        let root_hash_file_str = match &root_hash_file {
-            Some(p) => format!("--root-hash-file={}", p.display()),
-            None => String::default(),
-        };
-
-        let args = format!(
-            "{block_size_str} {hash_offset_str} {superblock} {root_hash_file_str} {} {}",
-            image_path.display(),
-            image_path.display()
-        );
-        let args = extra_args
+        let mut args = extra_args;
+        args.extend(
+            [
+                block_size_str,
+                hash_offset_str,
+                superblock,
+                root_hash_file_str,
+                image_path_str.clone(),
+                image_path_str,
+            ]
             .into_iter()
-            .chain(args.split(' ').map(String::from))
-            .filter(|s| !s.is_empty())
-            .collect();
+            .filter(|s| !s.is_empty()),
+        );
         let cmd = VeritySetup {
             action: "format",
             args,
