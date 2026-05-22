@@ -79,12 +79,15 @@ impl VerityDevice {
         device_name: &str,
         targets: &[DMTargetInfo],
     ) -> anyhow::Result<DMDevice> {
+        // EBUSY: create_device failed, no device to clean up
         let device = match dm_control.create_device(device_name.to_string()) {
             Ok(dev) => dev,
             Err(e) => {
-                match e.downcast_ref::<rustix::io::Errno>() {
+                match e
+                    .chain()
+                    .find_map(|c| c.downcast_ref::<rustix::io::Errno>())
+                {
                     Some(&error_code) if error_code == rustix::io::Errno::BUSY => {
-                        // If the device is busy, we need to check if it already exists
                         let dev_list = dm_control.list_devices()?;
                         for dev in dev_list {
                             if dev == device_name {
@@ -101,12 +104,22 @@ impl VerityDevice {
             }
         };
 
-        dm_control
+        // Device created — clean up on any subsequent failure
+        let result = dm_control
             .load_table(Some(device_name), None, targets)
-            .context("Failed to load table")?;
-        dm_control
-            .resume_device(Some(device_name), None)
-            .context("Failed to resume device")?;
+            .context("Failed to load table")
+            .and_then(|()| {
+                dm_control
+                    .resume_device(Some(device_name), None)
+                    .context("Failed to resume device")
+            });
+
+        if let Err(e) = result {
+            if let Err(cleanup_err) = dm_control.remove_device(Some(device_name), None) {
+                log::warn!("Failed to remove device {device_name} during cleanup: {cleanup_err:?}");
+            }
+            return Err(e);
+        }
 
         Ok(device)
     }
