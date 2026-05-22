@@ -473,16 +473,14 @@ pub(crate) struct DMControl {
 }
 
 impl DMControl {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new() -> anyhow::Result<Self> {
         let file = File::options()
             .read(true)
             .write(true)
             .open(DM_CONTROL_PATH)
-            .unwrap_or_else(|e| {
-                panic!("Unable to open DM control device {DM_CONTROL_PATH} with error {e}")
-            });
+            .with_context(|| format!("Failed to open DM control device {DM_CONTROL_PATH}"))?;
 
-        Self { file }
+        Ok(Self { file })
     }
 
     fn ioctl<I: Ioctl>(&self, cmd: I) -> anyhow::Result<I::Output> {

@@ -67,7 +67,7 @@ impl VerityDevice {
         dev_path: &Path,
         verity_info: &PackageFsVerityInfo,
     ) -> anyhow::Result<Self> {
-        let dm_control: DMControl = DMControl::new();
+        let dm_control = DMControl::new()?;
         let target = Self::make_target(dev_path, verity_info)?;
         let dm_dev = Self::setup(&dm_control, name, &[target])?;
 
