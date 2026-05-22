@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::dm_control::{DMControl, DMDevice, DMTargetInfo};
+use super::dm_control::{DMControl, DMControlBackend, DMDevice, DMTargetInfo};
 
 #[repr(C, packed)]
 #[derive(Debug, bincode::Decode)]
@@ -75,7 +75,7 @@ impl VerityDevice {
     }
 
     fn setup(
-        dm_control: &DMControl,
+        dm_control: &(impl DMControlBackend + ?Sized),
         device_name: &str,
         targets: &[DMTargetInfo],
     ) -> anyhow::Result<DMDevice> {
@@ -465,6 +465,204 @@ mod tests {
             assert!(
                 err_msg.contains("256"),
                 "Error message should contain the buffer length: {err_msg}"
+            );
+        }
+    }
+
+    mod setup_tests {
+        use super::super::super::dm_control::DeviceNum;
+        use super::*;
+        use std::cell::Cell;
+
+        enum CreateDeviceResult {
+            Ok,
+            Busy,
+        }
+
+        struct MockDMControl {
+            create_device_result: CreateDeviceResult,
+            load_table_fail: bool,
+            resume_device_fail: bool,
+            list_devices_result: Result<Vec<String>, &'static str>,
+            remove_device_called: Cell<bool>,
+        }
+
+        impl MockDMControl {
+            fn new(load_table_fail: bool, resume_device_fail: bool) -> Self {
+                Self {
+                    create_device_result: CreateDeviceResult::Ok,
+                    load_table_fail,
+                    resume_device_fail,
+                    list_devices_result: Ok(vec![]),
+                    remove_device_called: Cell::new(false),
+                }
+            }
+
+            fn with_busy(list_devices_result: Result<Vec<String>, &'static str>) -> Self {
+                Self {
+                    create_device_result: CreateDeviceResult::Busy,
+                    load_table_fail: false,
+                    resume_device_fail: false,
+                    list_devices_result,
+                    remove_device_called: Cell::new(false),
+                }
+            }
+        }
+
+        impl DMControlBackend for MockDMControl {
+            fn create_device(&self, device_name: String) -> anyhow::Result<DMDevice> {
+                match self.create_device_result {
+                    CreateDeviceResult::Ok => {
+                        Ok(DMDevice::new(DeviceNum::new(253, 0), device_name))
+                    }
+                    CreateDeviceResult::Busy => Err(anyhow::Error::from(rustix::io::Errno::BUSY)
+                        .context("Failed to perform ioctl (DevCreate)")),
+                }
+            }
+
+            fn load_table(
+                &self,
+                _device_name: Option<&str>,
+                _device_uuid: Option<&str>,
+                _targets: &[DMTargetInfo],
+            ) -> anyhow::Result<()> {
+                if self.load_table_fail {
+                    anyhow::bail!("simulated load_table failure")
+                }
+                Ok(())
+            }
+
+            fn resume_device(
+                &self,
+                _device_name: Option<&str>,
+                _device_uuid: Option<&str>,
+            ) -> anyhow::Result<()> {
+                if self.resume_device_fail {
+                    anyhow::bail!("simulated resume_device failure")
+                }
+                Ok(())
+            }
+
+            fn remove_device(
+                &self,
+                _device_name: Option<&str>,
+                _device_uuid: Option<&str>,
+            ) -> anyhow::Result<()> {
+                self.remove_device_called.set(true);
+                Ok(())
+            }
+
+            fn list_devices(&self) -> anyhow::Result<Vec<String>> {
+                match &self.list_devices_result {
+                    Ok(v) => Ok(v.clone()),
+                    Err(msg) => anyhow::bail!("{msg}"),
+                }
+            }
+        }
+
+        #[test]
+        fn test_setup_success() {
+            let mock = MockDMControl::new(false, false);
+            let targets = vec![DMTargetInfo::new(
+                0,
+                100,
+                "verity".to_string(),
+                "params".to_string(),
+            )];
+
+            let result = VerityDevice::setup(&mock, "test-dev", &targets);
+            assert!(result.is_ok());
+            assert!(!mock.remove_device_called.get());
+        }
+
+        #[test]
+        fn test_setup_calls_remove_device_on_load_table_failure() {
+            let mock = MockDMControl::new(true, false);
+            let targets = vec![DMTargetInfo::new(
+                0,
+                100,
+                "verity".to_string(),
+                "params".to_string(),
+            )];
+
+            let result = VerityDevice::setup(&mock, "test-dev", &targets);
+            assert!(result.is_err());
+            assert!(
+                mock.remove_device_called.get(),
+                "remove_device must be called when load_table fails"
+            );
+        }
+
+        #[test]
+        fn test_setup_calls_remove_device_on_resume_failure() {
+            let mock = MockDMControl::new(false, true);
+            let targets = vec![DMTargetInfo::new(
+                0,
+                100,
+                "verity".to_string(),
+                "params".to_string(),
+            )];
+
+            let result = VerityDevice::setup(&mock, "test-dev", &targets);
+            assert!(result.is_err());
+            assert!(
+                mock.remove_device_called.get(),
+                "remove_device must be called when resume_device fails"
+            );
+        }
+
+        #[test]
+        fn test_setup_ebusy_device_already_exists() {
+            let mock =
+                MockDMControl::with_busy(Ok(vec!["other-dev".to_string(), "test-dev".to_string()]));
+            let targets = vec![DMTargetInfo::new(
+                0,
+                100,
+                "verity".to_string(),
+                "params".to_string(),
+            )];
+
+            let result = VerityDevice::setup(&mock, "test-dev", &targets);
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("already exists"),
+                "Expected 'already exists' error, got: {err_msg}"
+            );
+        }
+
+        #[test]
+        fn test_setup_ebusy_device_not_in_list() {
+            let mock = MockDMControl::with_busy(Ok(vec!["other-dev".to_string()]));
+            let targets = vec![DMTargetInfo::new(
+                0,
+                100,
+                "verity".to_string(),
+                "params".to_string(),
+            )];
+
+            let result = VerityDevice::setup(&mock, "test-dev", &targets);
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("busy, but does not exist"),
+                "Expected 'busy, but does not exist' error, got: {err_msg}"
+            );
+        }
+
+        #[test]
+        fn test_setup_ebusy_list_devices_fails() {
+            let mock = MockDMControl::with_busy(Err("simulated list_devices failure"));
+            let targets = vec![DMTargetInfo::new(
+                0,
+                100,
+                "verity".to_string(),
+                "params".to_string(),
+            )];
+
+            let result = VerityDevice::setup(&mock, "test-dev", &targets);
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("list_devices failure"),
+                "Expected list_devices error to propagate, got: {err_msg}"
             );
         }
     }

@@ -467,6 +467,27 @@ impl DMTargetInfo {
     }
 }
 
+pub(crate) trait DMControlBackend {
+    fn create_device(&self, device_name: String) -> anyhow::Result<DMDevice>;
+    fn load_table(
+        &self,
+        device_name: Option<&str>,
+        device_uuid: Option<&str>,
+        targets: &[DMTargetInfo],
+    ) -> anyhow::Result<()>;
+    fn resume_device(
+        &self,
+        device_name: Option<&str>,
+        device_uuid: Option<&str>,
+    ) -> anyhow::Result<()>;
+    fn remove_device(
+        &self,
+        device_name: Option<&str>,
+        device_uuid: Option<&str>,
+    ) -> anyhow::Result<()>;
+    fn list_devices(&self) -> anyhow::Result<Vec<String>>;
+}
+
 #[derive(Debug)]
 pub(crate) struct DMControl {
     file: File,
@@ -474,11 +495,15 @@ pub(crate) struct DMControl {
 
 impl DMControl {
     pub(crate) fn new() -> anyhow::Result<Self> {
+        Self::open(DM_CONTROL_PATH)
+    }
+
+    fn open(path: &str) -> anyhow::Result<Self> {
         let file = File::options()
             .read(true)
             .write(true)
-            .open(DM_CONTROL_PATH)
-            .with_context(|| format!("Failed to open DM control device {DM_CONTROL_PATH}"))?;
+            .open(path)
+            .with_context(|| format!("Failed to open DM control device {path}"))?;
 
         Ok(Self { file })
     }
@@ -521,8 +546,10 @@ impl DMControl {
 
         Ok(result)
     }
+}
 
-    pub(crate) fn create_device(&self, device_name: String) -> anyhow::Result<DMDevice> {
+impl DMControlBackend for DMControl {
+    fn create_device(&self, device_name: String) -> anyhow::Result<DMDevice> {
         let dm_data = DMData::empty_data();
         let io_hdr = gen_io_hdr(Some(&device_name), None, DM_READONLY_FLAG, &dm_data)?;
         let result = self.send_cmd::<{ DmOpcodes::DevCreate as u32 }>(io_hdr, dm_data)?;
@@ -531,7 +558,7 @@ impl DMControl {
         Ok(DMDevice::new(dev_num, device_name))
     }
 
-    pub(crate) fn load_table(
+    fn load_table(
         &self,
         device_name: Option<&str>,
         device_uuid: Option<&str>,
@@ -544,7 +571,7 @@ impl DMControl {
         Ok(())
     }
 
-    pub(crate) fn resume_device(
+    fn resume_device(
         &self,
         device_name: Option<&str>,
         device_uuid: Option<&str>,
@@ -556,7 +583,7 @@ impl DMControl {
         Ok(())
     }
 
-    pub(crate) fn remove_device(
+    fn remove_device(
         &self,
         device_name: Option<&str>,
         device_uuid: Option<&str>,
@@ -568,7 +595,7 @@ impl DMControl {
         Ok(())
     }
 
-    pub(crate) fn list_devices(&self) -> anyhow::Result<Vec<String>> {
+    fn list_devices(&self) -> anyhow::Result<Vec<String>> {
         let dm_data = DMData::empty_data();
         let io_hdr = gen_io_hdr(None, None, DM_READONLY_FLAG, &dm_data)?;
         let result = self.send_cmd::<{ DmOpcodes::ListDevices as u32 }>(io_hdr, dm_data)?;
@@ -1126,6 +1153,21 @@ mod tests {
             let result_ioctl = result_payload.as_dm_ioctl();
             assert_eq!(result_ioctl.version, DM_VERSION);
             assert_eq!(result_ioctl.data_size, 512);
+        }
+    }
+
+    mod dm_control_new_tests {
+        use super::*;
+
+        #[test]
+        fn test_open_returns_error_for_nonexistent_path() {
+            let result = DMControl::open("/nonexistent/path/control");
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("/nonexistent/path/control"),
+                "Error should contain the path: {err_msg}"
+            );
         }
     }
 }
