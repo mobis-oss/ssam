@@ -294,7 +294,7 @@ mod systemd_dbus {
             if let Ok(result) = result {
                 result.context("JobRemovedSignalWatcher has been stopped or not initialized")
             } else {
-                log::warn!("Start has timed out for job: {job_path}");
+                log::warn!("Stop has timed out for job: {job_path}");
                 self.job_removed_watcher_actor
                     .ask(watcher_messages::CancelWatchSignal {
                         job_path: job_path.to_owned(),
