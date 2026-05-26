@@ -9,6 +9,7 @@ license.workspace = true
 proc_macros.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
 log.workspace = true
 tonic.workspace = true
 prost.workspace = true

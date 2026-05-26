@@ -48,7 +48,12 @@ pub enum FsType {
 }
 
 pub trait SuperBlock {
-    fn block_size(&self) -> u32;
+    /// Returns the filesystem block size in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the on-disk block size field is out of the valid range.
+    fn block_size(&self) -> anyhow::Result<u32>;
     fn fs_type(&self) -> FsType;
 }
 
@@ -69,7 +74,7 @@ mod erofs {
     use super::{SuperBlock, SuperBlockReader};
     use serde::Deserialize;
 
-    #[derive(Debug, Deserialize, bincode::Decode)]
+    #[derive(Debug, Deserialize, bincode::Decode, bytemuck::Zeroable)]
     #[repr(C)]
     pub(crate) struct ErofsSuperBlock {
         magic: u32,
@@ -100,9 +105,20 @@ mod erofs {
 
     const EROFS_SUPER_MAGIC: u32 = 0xE0F5_E1E2;
 
+    // Kernel validates blkszbits <= PAGE_SHIFT (12 on x86_64, up to 16 on ARM64
+    // with 64 KiB pages). We accept the maximum across all supported targets
+    // since ssam-wrap cross-builds packages. Values >= 32 overflow `2u32.pow()`.
+    const EROFS_MAX_BLKSZBITS: u8 = 16;
+
     impl SuperBlock for ErofsSuperBlock {
-        fn block_size(&self) -> u32 {
-            2u32.pow(u32::from(self.blkszbits))
+        fn block_size(&self) -> anyhow::Result<u32> {
+            anyhow::ensure!(
+                self.blkszbits <= EROFS_MAX_BLKSZBITS,
+                "EROFS blkszbits {} exceeds maximum {}",
+                self.blkszbits,
+                EROFS_MAX_BLKSZBITS,
+            );
+            Ok(2u32.pow(u32::from(self.blkszbits)))
         }
 
         fn fs_type(&self) -> FsType {
@@ -115,12 +131,61 @@ mod erofs {
             self.magic == EROFS_SUPER_MAGIC
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use bytemuck::Zeroable;
+
+        use super::*;
+
+        fn make_sb(magic: u32, blkszbits: u8) -> ErofsSuperBlock {
+            let mut sb = ErofsSuperBlock::zeroed();
+            sb.magic = magic;
+            sb.blkszbits = blkszbits;
+            sb
+        }
+
+        #[test]
+        fn verify_accepts_valid_magic() {
+            assert!(make_sb(EROFS_SUPER_MAGIC, 12).verify());
+        }
+
+        #[test]
+        fn verify_rejects_bad_magic() {
+            assert!(!make_sb(0xDEAD_BEEF, 12).verify());
+        }
+
+        #[test]
+        fn block_size_valid() {
+            assert_eq!(make_sb(EROFS_SUPER_MAGIC, 12).block_size().unwrap(), 4096);
+            assert_eq!(
+                make_sb(EROFS_SUPER_MAGIC, EROFS_MAX_BLKSZBITS)
+                    .block_size()
+                    .unwrap(),
+                65536
+            );
+        }
+
+        #[test]
+        fn block_size_rejects_overflow() {
+            // 2u32.pow(32) overflows u32
+            const EROFS_OVERFLOW_BLKSZBITS: u8 = 32;
+
+            assert!(
+                make_sb(EROFS_SUPER_MAGIC, EROFS_MAX_BLKSZBITS + 1)
+                    .block_size()
+                    .is_err()
+            );
+            assert!(make_sb(EROFS_SUPER_MAGIC, EROFS_OVERFLOW_BLKSZBITS).block_size().is_err());
+            assert!(make_sb(EROFS_SUPER_MAGIC, u8::MAX).block_size().is_err());
+        }
+    }
 }
 
 mod ext4 {
     use super::{FsType, SuperBlock, SuperBlockReader};
     use serde::Deserialize;
-    #[derive(Debug, Deserialize, bincode::Decode)]
+    #[derive(Debug, Deserialize, bincode::Decode, bytemuck::Zeroable)]
     #[repr(C)]
     // Field names mirror the Linux ext4 superblock struct (s_ prefix is part of the kernel ABI).
     #[allow(clippy::struct_field_names)]
@@ -233,9 +298,20 @@ mod ext4 {
 
     const EXT4_SUPER_MAGIC: u16 = 0xEF53;
 
+    // Kernel (fs/ext4/super.c) rejects s_log_block_size > EXT4_MAX_BLOCK_LOG_SIZE (6),
+    // which corresponds to a maximum block size of 1024 << 6 = 65536 bytes (64 KiB).
+    // Values >= 22 would overflow u32 (1024 << 22 = 2^32).
+    const EXT4_MAX_S_LOG_BLOCK_SIZE: u32 = 6;
+
     impl SuperBlock for Ext4SuperBlock {
-        fn block_size(&self) -> u32 {
-            1024 << self.s_log_block_size
+        fn block_size(&self) -> anyhow::Result<u32> {
+            anyhow::ensure!(
+                self.s_log_block_size <= EXT4_MAX_S_LOG_BLOCK_SIZE,
+                "ext4 s_log_block_size {} exceeds maximum {}",
+                self.s_log_block_size,
+                EXT4_MAX_S_LOG_BLOCK_SIZE,
+            );
+            Ok(1024u32 << self.s_log_block_size)
         }
 
         fn fs_type(&self) -> FsType {
@@ -246,6 +322,55 @@ mod ext4 {
     impl SuperBlockReader for Ext4SuperBlock {
         fn verify(&self) -> bool {
             self.s_magic == EXT4_SUPER_MAGIC
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use bytemuck::Zeroable;
+
+        use super::*;
+
+        fn make_sb(magic: u16, log_block_size: u32) -> Ext4SuperBlock {
+            let mut sb = Ext4SuperBlock::zeroed();
+            sb.s_magic = magic;
+            sb.s_log_block_size = log_block_size;
+            sb
+        }
+
+        #[test]
+        fn verify_accepts_valid_magic() {
+            assert!(make_sb(EXT4_SUPER_MAGIC, 0).verify());
+        }
+
+        #[test]
+        fn verify_rejects_bad_magic() {
+            assert!(!make_sb(0x0000, 0).verify());
+        }
+
+        #[test]
+        fn block_size_valid() {
+            assert_eq!(make_sb(EXT4_SUPER_MAGIC, 0).block_size().unwrap(), 1024);
+            assert_eq!(
+                make_sb(EXT4_SUPER_MAGIC, EXT4_MAX_S_LOG_BLOCK_SIZE)
+                    .block_size()
+                    .unwrap(),
+                65536
+            );
+        }
+
+        #[test]
+        fn block_size_rejects_overflow() {
+            // 1024 << 22 == 2^32: u32 overflow point
+            const EXT4_OVERFLOW_LOG_BLOCK_SIZE: u32 = 22;
+
+            assert!(
+                make_sb(EXT4_SUPER_MAGIC, EXT4_MAX_S_LOG_BLOCK_SIZE + 1)
+                    .block_size()
+                    .is_err()
+            );
+            assert!(make_sb(EXT4_SUPER_MAGIC, EXT4_OVERFLOW_LOG_BLOCK_SIZE).block_size().is_err());
+            assert!(make_sb(EXT4_SUPER_MAGIC, u32::MAX).block_size().is_err());
         }
     }
 }

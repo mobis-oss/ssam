@@ -55,7 +55,7 @@ impl FormatVerity<'_> {
     ) -> anyhow::Result<Self> {
         let fs_superblock = superblock::FileSystemSuperBlockBroker::new(image_path)?;
 
-        let block_size = u64::from(fs_superblock.block_size());
+        let block_size = u64::from(fs_superblock.block_size()?);
         let block_size_str = format!("--data-block-size={block_size}");
         // dm-verity hash area starts after data area; align data size up to block
         // boundary so hash tree begins at a valid block-aligned offset.

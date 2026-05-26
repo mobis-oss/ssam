@@ -41,6 +41,7 @@ rust_library(
         ":build_script",
         "@crates//:anyhow",
         "@crates//:bincode",
+        "@crates//:bytemuck",
         "@crates//:derive_more",
         "@crates//:jiff",
         "@crates//:log",
