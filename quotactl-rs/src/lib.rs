@@ -955,7 +955,7 @@ pub mod xfs_quota {
             QuotaType::Group => DqFlags::FS_GROUP_QUOTA,
             QuotaType::Project => DqFlags::FS_PROJ_QUOTA,
         };
-        let mut flags_val: u16 = u16::from(flags.bits());
+        let mut flags_val: libc::c_uint = libc::c_uint::from(flags.bits());
         let addr = (&raw mut flags_val).cast::<libc::c_char>();
 
         raw_quotactl(op, Some(special), 0, addr)
@@ -1332,12 +1332,14 @@ mod xfs_tests {
             assert_eq!(special.unwrap(), Path::new("/mnt/xfs"));
             assert_eq!(id, 0);
             assert!(!addr.is_null());
-            let flags_ptr = addr.cast::<u16>();
+            let flags_ptr = addr.cast::<u32>();
             let flags_val = unsafe { *flags_ptr };
             assert_eq!(
                 flags_val,
-                u16::from(xfs_quota::DqFlags::FS_PROJ_QUOTA.bits())
+                u32::from(xfs_quota::DqFlags::FS_PROJ_QUOTA.bits())
             );
+            // Verify upper bits are zero (no uninitialized stack data)
+            assert_eq!(flags_val & 0xFFFF_FF00, 0);
             Ok(())
         });
         let path = Path::new("/mnt/xfs");
