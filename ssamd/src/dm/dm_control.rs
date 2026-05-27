@@ -15,7 +15,7 @@ use defs::{
 use rustix::io::Result;
 use rustix::ioctl::{Ioctl, IoctlOutput, Opcode, ioctl as rustix_ioctl, opcode};
 use std::fs::File;
-use std::mem::size_of;
+use std::mem::{align_of, size_of};
 use std::ops::Deref;
 use std::os::fd::AsFd;
 use std::os::raw::c_char;
@@ -395,13 +395,26 @@ impl DmIoctlPayload {
         unsafe { &*(self.inner.as_ptr().cast::<dm_ioctl>()) }
     }
 
-    pub(crate) fn as_data_slice<T>(&self) -> &[T] {
+    pub(crate) fn as_data_slice<T>(&self) -> anyhow::Result<&[T]> {
+        const {
+            assert!(
+                align_of::<T>() == 1,
+                "as_data_slice requires T with alignment 1"
+            );
+        }
         let ioctl = self.as_dm_ioctl();
         let start = ioctl.data_start as usize;
         let end = ioctl.data_size as usize;
-        let data = &self.inner[start..end];
+        let data = self.inner.get(start..end).with_context(|| {
+            format!(
+                "dm_ioctl data range [{start}..{end}) out of bounds (buffer len: {})",
+                self.inner.len()
+            )
+        })?;
         let len = data.len() / size_of::<T>();
-        unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<T>(), len) }
+        // SAFETY: alignment verified at compile time (const assert above),
+        // bounds verified by .get() returning Some, len <= data.len().
+        Ok(unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<T>(), len) })
     }
 }
 
@@ -601,7 +614,7 @@ impl DMControlBackend for DMControl {
         let io_hdr = gen_io_hdr(None, None, DM_READONLY_FLAG, &dm_data)?;
         let result = self.send_cmd::<{ DmOpcodes::ListDevices as u32 }>(io_hdr, dm_data)?;
 
-        let list_devices = get_list_devices(result.as_data_slice::<c_char>());
+        let list_devices = get_list_devices(result.as_data_slice::<c_char>()?);
         Ok(list_devices)
     }
 }
@@ -1073,9 +1086,9 @@ mod tests {
                 .set_target_count(1)
                 .set_data_size(dm_data.data_size().unwrap());
             let payload = DmIoctlPayload::new(&io_hdr, &dm_data);
-            let data_slice: &[c_char] = payload.as_data_slice();
+            let data_slice: &[c_char] = payload.as_data_slice().unwrap();
             assert!(!data_slice.is_empty());
-            let data_slice_u8: &[u8] = payload.as_data_slice();
+            let data_slice_u8: &[u8] = payload.as_data_slice().unwrap();
             assert!(!data_slice_u8.is_empty());
         }
         #[test]
