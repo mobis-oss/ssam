@@ -252,11 +252,7 @@ fn main() -> anyhow::Result<()> {
 
     let verity_info =
         veritysetup::FormatVerity::new(&pkgfs_image_file, Some(&root_hash_filepath), true, vec![])?
-            .run()
-            .unwrap_or_else(|e| {
-                eprintln!("{e}");
-                process::exit(1);
-            });
+            .run()?;
 
     let pkgfs_type = superblock::FileSystemSuperBlockBroker::new(&pkgfs_image_file)?.fs_type();
 
