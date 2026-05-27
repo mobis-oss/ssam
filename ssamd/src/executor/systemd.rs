@@ -5,7 +5,7 @@ use std::str::FromStr as _;
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context as _;
-use futures_util::StreamExt as _;
+use futures_util::{Stream, StreamExt as _};
 use libssam::container::ContainerServiceType;
 use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
 use rsactor::{Actor, ActorRef, message_handlers};
@@ -736,6 +736,72 @@ impl From<UnitActiveState> for ExecutionStatus {
     }
 }
 
+trait FailureInfoSource {
+    async fn failure_info(&self) -> anyhow::Result<FailureInfo>;
+}
+
+#[derive(derive_more::Deref)]
+struct SystemdServiceProxy<'a>(&'a zbus_systemd::systemd1::ServiceProxy<'a>);
+
+impl FailureInfoSource for SystemdServiceProxy<'_> {
+    async fn failure_info(&self) -> anyhow::Result<FailureInfo> {
+        let result = self.result().await?;
+        let exitcode = self.exec_main_code().await?;
+        Ok(FailureInfo { result, exitcode })
+    }
+}
+
+async fn active_state_from_str(
+    state: &str,
+    source: &impl FailureInfoSource,
+) -> anyhow::Result<UnitActiveState> {
+    let state = if state == "failed" {
+        let failure_info = source.failure_info().await?;
+        UnitActiveState::Failed(failure_info)
+    } else {
+        UnitActiveState::from_str(state)
+            .with_context(|| format!("Cannot convert activestate {state} to ActiveState"))?
+    };
+    Ok(state)
+}
+
+async fn run_active_state_monitor(
+    stream: impl Stream<Item = anyhow::Result<String>>,
+    failure_source: &impl FailureInfoSource,
+    canceler: CancellationToken,
+    state_converter: ActorRef<ActiveStateConverterActor>,
+    unit_name: &str,
+) -> anyhow::Result<()> {
+    let mut stream = std::pin::pin!(stream);
+    let mut cached_state = UnitActiveState::Inactive;
+    loop {
+        tokio::select! {
+            () = canceler.cancelled() => {
+                log::debug!("ActiveStateHandler task has been canceled");
+                break;
+            },
+            item = stream.next() => {
+                let Some(result) = item else {
+                    anyhow::bail!(
+                        "D-Bus ActiveState property stream closed unexpectedly for {unit_name}"
+                    );
+                };
+                // get() failure is effectively impossible: ActiveState is always
+                // a String and the D-Bus connection outlives this monitor.
+                let state_str = result?;
+                let state = active_state_from_str(&state_str, failure_source)
+                    .await
+                    .with_context(|| format!("Cannot convert ActiveState for unit {unit_name}"))?;
+                if cached_state != state {
+                    cached_state = state.clone();
+                    state_converter.tell(UnitActiveStateChangedMsg { state }).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ActiveStateHandler<'a> {
     unit_proxy: zbus_systemd::systemd1::UnitProxy<'a>,
@@ -762,34 +828,28 @@ impl ActiveStateHandler<'_> {
 
         let service_proxy_on_recv = service_proxy.clone();
         let unit_name = unit_name.to_owned();
-        let mut stream = unit_proxy.receive_active_state_changed().await;
+        let stream = unit_proxy.receive_active_state_changed().await;
         let cancel_token = CancellationToken::new();
         let canceler = cancel_token.clone();
-        tokio::spawn(async move {
-            let mut cached_state = UnitActiveState::Inactive;
-            loop {
-                tokio::select! {
-                    () = canceler.cancelled() => {
-                        log::debug!("ActiveStateHandler task has been canceled");
-                        break;
-                    },
-                    Some(msg) = stream.next() => {
-                        let state = msg
-                            .get()
-                            .await
-                            .context("Failed to get initial active state")?;
-                        let state = Self::active_state_from_str(state.as_str(), &service_proxy_on_recv)
-                            .await
-                            .context(format!("Cannot convert ActiveState for unit {unit_name}"))?;
 
-                        if cached_state != state {
-                            cached_state = state.clone();
-                            state_converter.tell(UnitActiveStateChangedMsg { state }).await?;
-                        }
-                    }
-                }
+        tokio::spawn(async move {
+            let state_stream = stream.then(|msg| async move {
+                msg.get()
+                    .await
+                    .context("Failed to get active state property")
+            });
+            let source = SystemdServiceProxy(&service_proxy_on_recv);
+            if let Err(e) = run_active_state_monitor(
+                state_stream,
+                &source,
+                canceler,
+                state_converter,
+                &unit_name,
+            )
+            .await
+            {
+                log::error!("ActiveState monitor for {unit_name} failed: {e:#}");
             }
-            Ok::<_, anyhow::Error>(())
         });
         Ok(Self {
             unit_proxy,
@@ -798,32 +858,10 @@ impl ActiveStateHandler<'_> {
         })
     }
 
-    async fn get_failure_result(
-        service_proxy: &zbus_systemd::systemd1::ServiceProxy<'_>,
-    ) -> anyhow::Result<FailureInfo> {
-        let result = service_proxy.result().await?;
-        let exitcode = service_proxy.exec_main_code().await?;
-        Ok(FailureInfo { result, exitcode })
-    }
-
-    async fn active_state_from_str(
-        state: &str,
-        service_proxy: &zbus_systemd::systemd1::ServiceProxy<'_>,
-    ) -> anyhow::Result<UnitActiveState> {
-        let state = if state == "failed" {
-            let failure_info = Self::get_failure_result(service_proxy).await?;
-            UnitActiveState::Failed(failure_info)
-        } else {
-            UnitActiveState::from_str(state)
-                .context(format!("Cannot convert activestate {state} to ActiveState"))?
-        };
-        Ok(state)
-    }
-
     async fn get_active_state(&self) -> anyhow::Result<UnitActiveState> {
         let state = self.unit_proxy.active_state().await?;
-        let state = Self::active_state_from_str(state.as_str(), &self.service_proxy).await?;
-        Ok(state)
+        let source = SystemdServiceProxy(&self.service_proxy);
+        active_state_from_str(state.as_str(), &source).await
     }
 }
 
@@ -839,6 +877,17 @@ mod tests {
     use super::*;
     use rsactor::spawn;
     use tokio::sync::mpsc;
+
+    struct MockServiceProxy;
+
+    impl FailureInfoSource for MockServiceProxy {
+        async fn failure_info(&self) -> anyhow::Result<FailureInfo> {
+            Ok(FailureInfo {
+                result: "exit-code".to_string(),
+                exitcode: 1,
+            })
+        }
+    }
 
     #[tokio::test]
     async fn test_active_state_converter_handle_unit_active_state_changed() {
@@ -1054,5 +1103,149 @@ mod tests {
         let status = inactive_status();
         let result = map_job_result("test.service", JobResult::Timeout, status);
         assert!(matches!(result, ExecutionResult::Timeout));
+    }
+
+    #[tokio::test]
+    async fn test_run_active_state_monitor_exits_on_stream_closure() {
+        use futures_util::stream;
+        use std::time::Duration;
+
+        let (tx, _rx) = mpsc::channel::<ExecutionStatus>(10);
+        let (converter, _handle) = spawn::<ActiveStateConverterActor>(tx);
+        let cancel_token = CancellationToken::new();
+
+        let state_stream = stream::empty::<anyhow::Result<String>>();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_active_state_monitor(
+                state_stream,
+                &MockServiceProxy,
+                cancel_token,
+                converter,
+                "test.service",
+            ),
+        )
+        .await;
+
+        assert!(result.is_ok(), "Should not hang when stream closes");
+        assert!(
+            result.unwrap().is_err(),
+            "Should return Err on unexpected stream closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_active_state_monitor_deduplicates_and_forwards() {
+        use futures_util::stream;
+
+        let (tx, mut rx) = mpsc::channel::<ExecutionStatus>(10);
+        let (converter, _handle) = spawn::<ActiveStateConverterActor>(tx);
+        let cancel_token = CancellationToken::new();
+
+        let state_stream = stream::iter(vec![
+            Ok("active".to_string()),
+            Ok("active".to_string()),
+            Ok("inactive".to_string()),
+        ]);
+
+        let result = run_active_state_monitor(
+            state_stream,
+            &MockServiceProxy,
+            cancel_token,
+            converter,
+            "test.service",
+        )
+        .await;
+        assert!(result.is_err());
+
+        assert!(matches!(rx.recv().await, Some(ExecutionStatus::Active(_))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(ExecutionStatus::Inactive(_))
+        ));
+        assert_eq!(rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
+    }
+
+    #[tokio::test]
+    async fn test_run_active_state_monitor_propagates_stream_error() {
+        use futures_util::stream;
+
+        let (tx, _rx) = mpsc::channel::<ExecutionStatus>(10);
+        let (converter, _handle) = spawn::<ActiveStateConverterActor>(tx);
+        let cancel_token = CancellationToken::new();
+
+        let state_stream = stream::iter(vec![
+            Ok("active".to_string()),
+            Err(anyhow::anyhow!("D-Bus connection lost")),
+        ]);
+
+        let result = run_active_state_monitor(
+            state_stream,
+            &MockServiceProxy,
+            cancel_token,
+            converter,
+            "test.service",
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("D-Bus connection lost")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_active_state_monitor_respects_cancellation() {
+        use std::time::Duration;
+
+        let (tx, _rx) = mpsc::channel::<ExecutionStatus>(10);
+        let (converter, _handle) = spawn::<ActiveStateConverterActor>(tx);
+        let cancel_token = CancellationToken::new();
+        let canceler = cancel_token.clone();
+
+        cancel_token.cancel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_active_state_monitor(
+                futures_util::stream::pending(),
+                &MockServiceProxy,
+                canceler,
+                converter,
+                "test.service",
+            ),
+        )
+        .await;
+
+        assert!(result.is_ok(), "Should exit immediately on cancellation");
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_active_state_monitor_handles_failed_state() {
+        use futures_util::stream;
+
+        let (tx, mut rx) = mpsc::channel::<ExecutionStatus>(10);
+        let (converter, _handle) = spawn::<ActiveStateConverterActor>(tx);
+        let cancel_token = CancellationToken::new();
+
+        let state_stream = stream::iter(vec![Ok("failed".to_string())]);
+
+        let result = run_active_state_monitor(
+            state_stream,
+            &MockServiceProxy,
+            cancel_token,
+            converter,
+            "test.service",
+        )
+        .await;
+        // Stream exhausted after delivering "failed" → bail on None
+        assert!(result.is_err());
+
+        let status = rx.recv().await.unwrap();
+        assert!(matches!(status, ExecutionStatus::Active(_)));
     }
 }
