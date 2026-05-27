@@ -24,13 +24,13 @@ pub(super) fn parse_data_dirs(data_dirs_str: Option<String>) -> Option<Vec<PathB
     })
 }
 
-pub(crate) trait QuotaEntryBackend {
+pub trait QuotaEntryBackend {
     fn set_block_limits(&self, soft_limit: u64, hard_limit: u64) -> anyhow::Result<()>;
     fn set_project_quota(&self, path: &Path, enabled: bool) -> anyhow::Result<()>;
 }
 
 #[derive(Debug)]
-pub(crate) struct DefaultQuotaEntryBackend {
+pub struct DefaultQuotaEntryBackend {
     inner: Ext4QuotaEntry,
 }
 
@@ -80,7 +80,7 @@ impl<T: QuotaEntryBackend> QuotaInfo<T> {
 }
 
 #[derive(Debug)]
-pub(crate) struct DataDirectory<T: QuotaEntryBackend> {
+pub struct DataDirectory<T: QuotaEntryBackend> {
     pub(super) path: PathBuf,
     pub(super) data_dirs: Option<Vec<PathBuf>>,
     pub(super) quota_info: Option<QuotaInfo<T>>,

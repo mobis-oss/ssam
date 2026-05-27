@@ -3,10 +3,8 @@
 
 mod data_directory;
 
-pub(crate) use data_directory::{
-    DataDirMetadata, DataDirectory, DataDirectoryManager, DefaultQuotaEntryBackend, Ext4Quota,
-    QuotaInfo,
-};
+pub(crate) use data_directory::{DataDirMetadata, DataDirectoryManager, Ext4Quota, QuotaInfo};
+pub use data_directory::{DataDirectory, DefaultQuotaEntryBackend};
 
 use crate::configuration;
 use crate::mount::{LoopDeviceAttacher, mount_pkgfs, unmount_pkgfs};
@@ -254,9 +252,6 @@ pub struct PackageVolume {
 }
 
 impl PackageVolume {
-    // DataDirectory is pub(crate) but PackageVolume::new is pub for integration tests.
-    // The private_interfaces lint is suppressed intentionally here.
-    #[allow(private_interfaces)]
     pub fn new(
         package_name: String,
         pkgfs: impl PackageFsBackend + 'static,
