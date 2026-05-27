@@ -308,7 +308,8 @@ impl DMData {
                 .map(|&b| c_char::from_ne_bytes([b]))
                 .collect();
             let target_type_len = target.target_type.len().min(15usize);
-            target_spec.target_type[..target_type_len].copy_from_slice(target_type.as_ref());
+            target_spec.target_type[..target_type_len]
+                .copy_from_slice(&target_type[..target_type_len]);
             target_spec.next =
                 u32::try_from(size_of::<dm_target_spec>() + target.params.len() + 1usize)
                     .context("dm_target_spec next offset overflows u32")?;
