@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
+
+use anyhow::Context;
 
 // ---------------------------------------------------------------------------
 // Internal channel types
@@ -18,14 +21,23 @@ enum TimelineCommand {
 
 pub struct TimelineBackend {
     sender: mpsc::Sender<TimelineCommand>,
+    _thread: JoinHandle<()>,
 }
 
 impl TimelineBackend {
-    #[must_use]
-    pub fn new() -> Self {
+    /// # Errors
+    ///
+    /// Returns an error if the OS fails to spawn the accumulate thread.
+    pub fn new() -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::channel::<TimelineCommand>();
-        std::thread::spawn(move || accumulate(&rx));
-        Self { sender: tx }
+        let handle = thread::Builder::new()
+            .name("ssam-timeline".into())
+            .spawn(move || accumulate(&rx))
+            .context("failed to spawn timeline accumulate thread")?;
+        Ok(Self {
+            sender: tx,
+            _thread: handle,
+        })
     }
 
     #[must_use]
@@ -46,12 +58,6 @@ impl TimelineBackend {
         if self.sender.send(TimelineCommand::Record(value)).is_err() {
             log::warn!("timeline: accumulate thread is gone; event dropped");
         }
-    }
-}
-
-impl Default for TimelineBackend {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -123,7 +129,7 @@ mod tests {
 
     #[test]
     fn accumulates_started() {
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         log_to_backend(&backend, "pkg-a", "mount", 1_000_000, "started");
         let events = backend.get_all();
         assert_eq!(events.len(), 1);
@@ -135,7 +141,7 @@ mod tests {
 
     #[test]
     fn accumulates_completed() {
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         log_to_backend(&backend, "pkg-b", "setup", 2_000_000, "completed");
         let events = backend.get_all();
         assert_eq!(events.len(), 1);
@@ -145,7 +151,7 @@ mod tests {
 
     #[test]
     fn multiple_packages() {
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         log_to_backend(&backend, "alpha", "mount", 100, "started");
         log_to_backend(&backend, "beta", "setup", 200, "completed");
         let events = backend.get_all();
@@ -156,7 +162,7 @@ mod tests {
 
     #[test]
     fn non_destructive_read() {
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         log_to_backend(&backend, "pkg-c", "phase1", 500, "started");
         let first = backend.get_all();
         let second = backend.get_all();
@@ -166,7 +172,7 @@ mod tests {
 
     #[test]
     fn invalid_log_without_event_field_ignored() {
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         log::Log::log(
             &backend,
             &log::Record::builder()
@@ -181,7 +187,7 @@ mod tests {
 
     #[test]
     fn kv_event_is_accepted() {
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         let event = make_event_value("pkg-kv", "phase", 7, "started");
         let key_values = [("event", log::kv::Value::from_serde(&event))];
         log::Log::log(
@@ -201,7 +207,7 @@ mod tests {
 
     #[test]
     fn unknown_shape_kv_event_is_stored_as_value() {
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         let payload = serde_json::json!({"foo": "bar"});
         let key_values = [("event", log::kv::Value::from_serde(&payload))];
         log::Log::log(
@@ -221,8 +227,20 @@ mod tests {
     #[test]
     fn record_event_after_thread_exit_does_not_panic() {
         let (tx, rx) = std::sync::mpsc::channel::<TimelineCommand>();
-        drop(rx);
-        let dead_backend = TimelineBackend { sender: tx };
+        let handle = std::thread::Builder::new()
+            .name("ssam-timeline-test".into())
+            .spawn(move || {
+                drop(rx);
+            })
+            .unwrap();
+        handle.join().unwrap();
+        let dead_backend = TimelineBackend {
+            sender: tx,
+            _thread: std::thread::Builder::new()
+                .name("ssam-timeline-noop".into())
+                .spawn(|| {})
+                .unwrap(),
+        };
         dead_backend.record_event(serde_json::json!({
             "pkg": "x",
             "phase": "y",

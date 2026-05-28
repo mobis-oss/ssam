@@ -28,7 +28,7 @@ static TIMELINE_BACKEND: OnceLock<Arc<TimelineBackend>> = OnceLock::new();
 /// let _ = ssam_log::init(log::LevelFilter::Info);
 /// ```
 pub fn init(level: log::LevelFilter) -> anyhow::Result<()> {
-    let timeline = Arc::new(TimelineBackend::new());
+    let timeline = Arc::new(TimelineBackend::new()?);
     TIMELINE_BACKEND
         .set(Arc::clone(&timeline))
         .map_err(|_| anyhow::anyhow!("TIMELINE_BACKEND already initialized"))?;
@@ -72,7 +72,7 @@ mod tests {
     fn timeline_backend_records_and_retrieves_events() {
         use crate::backend::timeline::TimelineBackend;
 
-        let backend = TimelineBackend::new();
+        let backend = TimelineBackend::new().unwrap();
         let event = serde_json::json!({
             "pkg": "test-pkg",
             "phase": "mount",

@@ -42,7 +42,7 @@ mod tests {
     use super::*;
 
     fn make_router() -> (Arc<TimelineBackend>, Router) {
-        let backend = Arc::new(TimelineBackend::new());
+        let backend = Arc::new(TimelineBackend::new().unwrap());
         let router = Router::new(Arc::clone(&backend), log::LevelFilter::max());
         (backend, router)
     }
