@@ -143,6 +143,8 @@ impl Remocon for RemoconImpl {
         }))
     }
 
+    // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
+    #[allow(clippy::unnecessary_debug_formatting)]
     async fn install_package(
         &self,
         request: Request<InstallPackageRequest>,
@@ -155,9 +157,17 @@ impl Remocon for RemoconImpl {
         let force = request.get_ref().force;
         let remove_data = request.get_ref().remove_data;
 
+        let path = PathBuf::from(package_path);
+        if !path.is_absolute() {
+            let result = JsonResult::<InstallResponse>::failure(format!(
+                "Package path must be absolute: {path:?}"
+            ));
+            return Ok(Response::new(InstallPackageResponse { result }));
+        }
+
         let result_inner = self
             .package_manager
-            .install_package(PathBuf::from(package_path), force, remove_data)
+            .install_package(path, force, remove_data)
             .await;
 
         let result = into_json_result(
@@ -1329,6 +1339,33 @@ pub(crate) mod tests {
         let reason = get_json_reason(json_result);
         assert!(reason.is_some());
         assert!(reason.unwrap().contains("Failed to install package"));
+    }
+
+    #[tokio::test]
+    async fn test_install_package_rejects_relative_path() {
+        crate::configuration::ensure_test_init();
+        let (remocon, _mock_manager) = create_test_remocon();
+
+        let request = Request::new(InstallPackageRequest {
+            package_path: "relative/path/package.ssam".to_string(),
+            force: false,
+            remove_data: false,
+        });
+
+        let response = remocon.install_package(request).await;
+        assert!(response.is_ok());
+
+        let json_result = &response.unwrap().into_inner().result;
+        assert!(!check_json_success(json_result));
+        let reason = get_json_reason(json_result);
+        assert!(
+            reason
+                .as_ref()
+                .unwrap()
+                .contains("Package path must be absolute"),
+            "expected 'Package path must be absolute' in reason, got: {}",
+            reason.unwrap()
+        );
     }
 
     #[tokio::test]
