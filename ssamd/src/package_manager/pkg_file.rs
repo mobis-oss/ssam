@@ -184,11 +184,10 @@ impl PackageTransactionActor {
                     format!("File rollback failed (rename {bp:?} → {installed_path:?})")
                 })
             }
-            InstallMode::UpgradeBundled => self
+            InstallMode::UpgradeBundled | InstallMode::Fresh => self
                 .remove_file_if_exists(dest)
                 .with_context(|| format!("File rollback failed (remove {dest:?})"))
                 .map(|_| ()),
-            InstallMode::Fresh => Ok(()),
         }
     }
 
