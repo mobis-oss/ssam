@@ -109,7 +109,9 @@ impl Daemon {
                 }
             }
             pm.teardown().await;
-            shutdown_sender.send(()).unwrap();
+            if shutdown_sender.send(()).is_err() {
+                log::debug!("Shutdown receiver already dropped; server may have exited early");
+            }
         });
 
         log::debug!("Now client can send control messages");
