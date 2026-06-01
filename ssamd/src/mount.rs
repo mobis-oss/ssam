@@ -687,7 +687,11 @@ pub(crate) async fn mount_pkgfs(
             pkgfs_path.display()
         )
     })?;
-    let loop_dev_path = loop_dev.path().ok_or(io::Error::last_os_error())?;
+    // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
+    #[allow(clippy::unnecessary_debug_formatting)]
+    let loop_dev_path = loop_dev.path().with_context(|| {
+        format!("{pkg_name}: loop device for {pkgfs_path:?} has no associated path after attach")
+    })?;
 
     #[cfg(feature = "dm-verity")]
     // This variable must be kept alive until mount_device() is finished.
