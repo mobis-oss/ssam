@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/ssam-logo.png" alt="SSAM Logo" width="256">
+</p>
+
 # SSAM
 * [쌈](https://en.wikipedia.org/wiki/Ssam)
 * SSAM은 Automotive 등과 같은 시스템 리소스가 한정적인 Embedded 환경에서 빠른 Container-native app의 실행과 실행 시점의 지속적인 무결성 보장을 지원하기 위해 개발한 솔루션입니다.

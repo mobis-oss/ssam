@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/ssam-logo.png" alt="SSAM Logo" width="256">
+</p>
+
 # SSAM
 * [Ssam](https://en.wikipedia.org/wiki/Ssam)
 * SSAM is a solution developed to enable fast execution of container-native apps and continuous runtime integrity verification in resource-constrained embedded environments such as automotive systems.
