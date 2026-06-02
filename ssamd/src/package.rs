@@ -291,8 +291,13 @@ impl PackageTransitioner for DefaultPackageTransitioner {
     async fn teardown(&self) -> anyhow::Result<()> {
         log::debug!("Teardown package {}", self.package_name);
 
-        if let Some(executor) = self.executor.cell.get() {
-            let _ = executor.clone().teardown().await;
+        if let Some(executor) = self.executor.cell.get()
+            && let Err(e) = executor.clone().teardown().await
+        {
+            log::warn!(
+                "{}: executor teardown failed (continuing with unmount): {e:#}",
+                self.package_name
+            );
         }
 
         self.pkgfs_handle
