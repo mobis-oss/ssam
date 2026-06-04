@@ -248,33 +248,21 @@ pub(crate) mod tests {
 
     pub(crate) mod package_fs_metadata_test {
         use super::*;
-        use libssam::ssam_package::PackageFilesystem;
-        use libssam::ssam_package::ssam_pkg_payload::Payload;
+        use libssam::ssam_package::{PackageFilesystem, PackageFsVerityInfo};
         use libssam::superblock::FsType;
         use std::path::PathBuf;
 
         pub(crate) struct MockPackageFile {
             pub(crate) package_name: String,
-            pub(crate) payload: Payload,
-            pub(crate) pkgfs_type: FsType,
-            pub(crate) verity_info: libssam::ssam_package::PackageFsVerityInfo,
+            pub(crate) pkgfs: PackageFilesystem,
         }
 
         impl MockPackageFile {
-            // Must match signature of mount::unmount_pkgfs (swapped in via cfg alias):
-            // callers use `?` on the return value, so Result<()> cannot be removed.
+            // Trait `PackageFileInfo::pkgfs` returns Result; this mock never
+            // fails internally but must match the signature.
             #[allow(clippy::unnecessary_wraps)]
             pub(crate) fn pkgfs(&self) -> anyhow::Result<PackageFilesystem> {
-                Ok(PackageFilesystem {
-                    payload: self.payload.clone(),
-                    pkgfs_type: self.pkgfs_type,
-                    verity_info: libssam::ssam_package::PackageFsVerityInfo {
-                        data_size: self.verity_info.data_size,
-                        hash_size: self.verity_info.hash_size,
-                        root_hash: self.verity_info.root_hash.clone(),
-                        hash_offset: self.verity_info.hash_offset,
-                    },
-                })
+                Ok(self.pkgfs.clone())
             }
 
             pub(crate) fn get_package_name(&self) -> &str {
@@ -300,18 +288,25 @@ pub(crate) mod tests {
             }
         }
 
+        pub(crate) fn default_test_verity() -> PackageFsVerityInfo {
+            PackageFsVerityInfo {
+                data_size: 4096,
+                hash_size: 2048,
+                root_hash: "abcd1234567890".to_string(),
+                hash_offset: 8192,
+            }
+        }
+
         pub(crate) fn create_test_ssam_package_file() -> MockPackageFile {
             crate::configuration::ensure_test_init();
             MockPackageFile {
                 package_name: "test-package".to_string(),
-                payload: Payload::Internal((1024, 8192 + 2048)),
-                pkgfs_type: FsType::Ext4,
-                verity_info: libssam::ssam_package::PackageFsVerityInfo {
-                    data_size: 4096,
-                    hash_size: 2048,
-                    root_hash: "abcd1234567890".to_string(),
-                    hash_offset: 8192,
-                },
+                pkgfs: PackageFilesystem::new(
+                    1024,
+                    8192 + 2048,
+                    FsType::Ext4,
+                    default_test_verity(),
+                ),
             }
         }
 
@@ -374,7 +369,8 @@ pub(crate) mod tests {
 
             for fs_type in fs_types {
                 let mut pkg_file = create_test_ssam_package_file();
-                pkg_file.pkgfs_type = fs_type;
+                pkg_file.pkgfs =
+                    PackageFilesystem::new(1024, 8192 + 2048, fs_type, default_test_verity());
 
                 let result = PackageFsMetadata::new(&test_path, &pkg_file);
                 assert!(result.is_ok());
@@ -393,9 +389,12 @@ pub(crate) mod tests {
             let test_path = PathBuf::from("/test/package/path");
 
             let mut pkg_file = create_test_ssam_package_file();
-            pkg_file.payload = Payload::Internal((2048, 16384 + 4096));
-            pkg_file.verity_info.hash_offset = 16384;
-            pkg_file.verity_info.hash_size = 4096;
+            let verity = PackageFsVerityInfo {
+                hash_offset: 16384,
+                hash_size: 4096,
+                ..default_test_verity()
+            };
+            pkg_file.pkgfs = PackageFilesystem::new(2048, 16384 + 4096, FsType::Ext4, verity);
 
             let result = PackageFsMetadata::new(&test_path, &pkg_file);
             assert!(result.is_ok());

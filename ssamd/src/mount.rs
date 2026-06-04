@@ -1068,24 +1068,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_pkgfs_info_length_comes_from_payload() {
+    fn test_pkgfs_info_length_matches_metadata() {
         use crate::package_volume::PackageFsMetadata;
-        use crate::package_volume::tests::package_fs_metadata_test::create_test_ssam_package_file;
-        use libssam::ssam_package::ssam_pkg_payload::Payload;
+        use crate::package_volume::tests::package_fs_metadata_test::{
+            create_test_ssam_package_file, default_test_verity,
+        };
+        use libssam::ssam_package::{PackageFilesystem, PackageFsVerityInfo};
+        use libssam::superblock::FsType;
         use std::path::PathBuf;
 
         let test_path = PathBuf::from("/test/package/path");
 
-        // Default mock: Payload::Internal((1024, 8192 + 2048))
+        // Default mock: offset 1024, length 8192 + 2048
         let pkg_file = create_test_ssam_package_file();
         let meta = PackageFsMetadata::new(&test_path, &pkg_file).unwrap();
         assert_eq!(meta.packagefs_info.length, 8192 + 2048);
 
-        // Override payload size — length must follow Payload, not be recomputed.
+        // Override payload size — length must follow the mock, not be recomputed.
         let mut pkg_file2 = create_test_ssam_package_file();
-        pkg_file2.payload = Payload::Internal((2048, 16_384 + 4_096));
-        pkg_file2.verity_info.hash_offset = 16_384;
-        pkg_file2.verity_info.hash_size = 4_096;
+        let verity = PackageFsVerityInfo {
+            hash_offset: 16_384,
+            hash_size: 4_096,
+            ..default_test_verity()
+        };
+        pkg_file2.pkgfs = PackageFilesystem::new(2048, 16_384 + 4_096, FsType::Ext4, verity);
         let meta2 = PackageFsMetadata::new(&test_path, &pkg_file2).unwrap();
         assert_eq!(meta2.packagefs_info.length, 16_384 + 4_096);
     }

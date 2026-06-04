@@ -4,7 +4,7 @@
 pub mod error;
 pub mod ssam_pkg_info;
 pub mod ssam_pkg_metadata;
-pub mod ssam_pkg_payload;
+pub(crate) mod ssam_pkg_payload;
 pub mod ssam_pkg_runtime_config;
 pub mod ssam_pkg_seccomp;
 
@@ -127,9 +127,9 @@ pub struct PkgfsExtent {
 
 #[derive(Debug, Clone)]
 pub struct PackageFilesystem {
-    pub payload: Payload,
-    pub pkgfs_type: FsType,
-    pub verity_info: PackageFsVerityInfo,
+    pub(crate) payload: Payload,
+    pub(crate) pkgfs_type: FsType,
+    pub(crate) verity_info: PackageFsVerityInfo,
 }
 
 impl PackageFilesystem {
