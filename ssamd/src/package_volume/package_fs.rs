@@ -3,8 +3,7 @@
 
 use crate::configuration;
 use crate::mount::{LoopDeviceAttacher, mount_pkgfs, unmount_pkgfs};
-use libssam::ssam_package::PackageFsVerityInfo;
-use libssam::ssam_package::ssam_pkg_payload::Payload;
+use libssam::ssam_package::{PackageFsVerityInfo, PkgfsExtent};
 use libssam::superblock::FsType;
 use std::path::{Path, PathBuf};
 
@@ -44,15 +43,16 @@ impl PackageFsMetadata {
             Path::new(packages_overlayfs_root).join(package_name)
         };
 
-        let fstype = pkgfs_info.pkgfs_type;
+        let fstype = pkgfs_info.pkgfs_type();
 
-        let Payload::INTERNAL((pkgfs_offset, length)) = pkgfs_info.payload else {
-            return Err(anyhow::anyhow!(
-                "Failed to get package filesystem for package: {package_name}"
-            ));
-        };
+        let PkgfsExtent {
+            offset: pkgfs_offset,
+            length,
+        } = pkgfs_info.pkgfs_extent().ok_or_else(|| {
+            anyhow::anyhow!("Failed to get package filesystem for package: {package_name}")
+        })?;
 
-        let verity_info = pkgfs_info.verity_info;
+        let verity_info = pkgfs_info.verity_info().clone();
 
         let packagefs_info = PackageFsInfo {
             fstype,
@@ -304,7 +304,7 @@ pub(crate) mod tests {
             crate::configuration::ensure_test_init();
             MockPackageFile {
                 package_name: "test-package".to_string(),
-                payload: Payload::INTERNAL((1024, 8192 + 2048)),
+                payload: Payload::Internal((1024, 8192 + 2048)),
                 pkgfs_type: FsType::Ext4,
                 verity_info: libssam::ssam_package::PackageFsVerityInfo {
                     data_size: 4096,
@@ -393,7 +393,7 @@ pub(crate) mod tests {
             let test_path = PathBuf::from("/test/package/path");
 
             let mut pkg_file = create_test_ssam_package_file();
-            pkg_file.payload = Payload::INTERNAL((2048, 16384 + 4096));
+            pkg_file.payload = Payload::Internal((2048, 16384 + 4096));
             pkg_file.verity_info.hash_offset = 16384;
             pkg_file.verity_info.hash_size = 4096;
 

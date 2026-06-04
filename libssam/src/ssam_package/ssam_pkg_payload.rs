@@ -128,9 +128,9 @@ type PayloadSize = u64;
 
 #[derive(Debug, Clone, PartialEq, bincode::Encode, bincode::Decode)]
 pub enum Payload {
-    INTERNAL((PayloadOffset, PayloadSize)),
-    EXTERNAL(PathBuf),
-    DATA(Vec<u8>),
+    Internal((PayloadOffset, PayloadSize)),
+    External(PathBuf),
+    Data(Vec<u8>),
 }
 
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
@@ -218,7 +218,7 @@ impl Payloads {
                 })?
                 .need_verify()
             {
-                if let Some(Payload::DATA(data)) = payload {
+                if let Some(Payload::Data(data)) = payload {
                     hasher.update(data);
                 } else {
                     bail!(
@@ -237,7 +237,7 @@ impl Payloads {
             })?
             .sign(Pkcs1v15Sign::new::<Sha256>(), &digest)
             .context("Failed to sign package")?;
-        self.set(PayloadType::Signature, Some(Payload::DATA(signature)));
+        self.set(PayloadType::Signature, Some(Payload::Data(signature)));
         Ok(())
     }
 
@@ -263,7 +263,7 @@ impl Payloads {
 
         let max_signature_size = public_key.size();
         let signature;
-        if let Some(Payload::INTERNAL((offset, size))) = ssam_payloads.get(PayloadType::Signature) {
+        if let Some(Payload::Internal((offset, size))) = ssam_payloads.get(PayloadType::Signature) {
             let size = usize::try_from(*size)
                 .with_context(|| format!("Signature payload size {size} exceeds addressable range"))
                 .map_err(|source| PackageParseError::Io {
@@ -293,7 +293,7 @@ impl Payloads {
                 .ok_or_else(|| PackageParseError::ParseFailed {
                     source: anyhow!("Missing payload for {payload_type}"),
                 })?;
-            if let Payload::INTERNAL((offset, size)) = payload {
+            if let Payload::Internal((offset, size)) = payload {
                 let size = usize::try_from(*size)
                     .with_context(|| {
                         format!("Payload size {size} for {payload_type} exceeds addressable range")
@@ -375,20 +375,20 @@ mod tests {
         let data_sets = [
             (
                 PayloadType::Metadata,
-                Payload::DATA(b"metadata content".to_vec()),
+                Payload::Data(b"metadata content".to_vec()),
             ),
             (
                 PayloadType::RuntimeConfig,
-                Payload::EXTERNAL(PathBuf::from("/path/to/runtime.json")),
+                Payload::External(PathBuf::from("/path/to/runtime.json")),
             ),
             (
                 PayloadType::SeccompPolicy,
-                Payload::DATA(b"seccomp policy content".to_vec()),
+                Payload::Data(b"seccomp policy content".to_vec()),
             ),
-            (PayloadType::Signature, Payload::INTERNAL((1024, 256))),
+            (PayloadType::Signature, Payload::Internal((1024, 256))),
             (
                 PayloadType::PackageFilesystem,
-                Payload::EXTERNAL(PathBuf::from("/path/to/filesystem.img")),
+                Payload::External(PathBuf::from("/path/to/filesystem.img")),
             ),
         ];
 
@@ -419,11 +419,11 @@ mod tests {
         let b = BTreeMap::from_iter([
             (
                 PayloadType::Metadata,
-                Payload::DATA(b"partial metadata".to_vec()),
+                Payload::Data(b"partial metadata".to_vec()),
             ),
             (
                 PayloadType::PackageFilesystem,
-                Payload::EXTERNAL(PathBuf::from("/path/to/fs.img")),
+                Payload::External(PathBuf::from("/path/to/fs.img")),
             ),
         ]);
         let mut ssam_payloads = Payloads::init();
@@ -457,27 +457,27 @@ mod tests {
         let payloads = Payloads::init()
             .set_mut(
                 PayloadType::Metadata,
-                Some(Payload::DATA(b"test metadata".to_vec())),
+                Some(Payload::Data(b"test metadata".to_vec())),
             )
             .set_mut(
                 PayloadType::RuntimeConfig,
-                Some(Payload::EXTERNAL(PathBuf::from("/config.json"))),
+                Some(Payload::External(PathBuf::from("/config.json"))),
             )
-            .set_mut(PayloadType::Signature, Some(Payload::INTERNAL((0, 128))));
+            .set_mut(PayloadType::Signature, Some(Payload::Internal((0, 128))));
 
         for payload_type in PayloadType::iter() {
             match payload_type {
                 PayloadType::Metadata => {
                     let payload = payloads.get(payload_type).unwrap();
-                    assert_eq!(payload, &Payload::DATA(b"test metadata".to_vec()));
+                    assert_eq!(payload, &Payload::Data(b"test metadata".to_vec()));
                 }
                 PayloadType::RuntimeConfig => {
                     let payload = payloads.get(payload_type).unwrap();
-                    assert_eq!(payload, &Payload::EXTERNAL(PathBuf::from("/config.json")));
+                    assert_eq!(payload, &Payload::External(PathBuf::from("/config.json")));
                 }
                 PayloadType::Signature => {
                     let payload = payloads.get(payload_type).unwrap();
-                    assert_eq!(payload, &Payload::INTERNAL((0, 128)));
+                    assert_eq!(payload, &Payload::Internal((0, 128)));
                 }
                 _ => assert!(
                     payloads.get(payload_type).is_none(),
@@ -492,15 +492,15 @@ mod tests {
         let payloads = Payloads::init()
             .set_mut(
                 PayloadType::PackageFilesystem,
-                Some(Payload::DATA(b"filesystem".to_vec())),
+                Some(Payload::Data(b"filesystem".to_vec())),
             )
             .set_mut(
                 PayloadType::Metadata,
-                Some(Payload::DATA(b"metadata".to_vec())),
+                Some(Payload::Data(b"metadata".to_vec())),
             )
             .set_mut(
                 PayloadType::Signature,
-                Some(Payload::DATA(b"signature".to_vec())),
+                Some(Payload::Data(b"signature".to_vec())),
             );
 
         let expected_order: Vec<PayloadType> = PayloadType::iter().collect();
@@ -514,23 +514,23 @@ mod tests {
 
     #[test]
     fn test_payload_types() {
-        let internal = Payload::INTERNAL((0, 100));
-        if let Payload::INTERNAL((offset, size)) = internal {
+        let internal = Payload::Internal((0, 100));
+        if let Payload::Internal((offset, size)) = internal {
             assert_eq!(offset, 0);
             assert_eq!(size, 100);
         } else {
             panic!("Expected INTERNAL variant");
         }
 
-        let external = Payload::EXTERNAL(PathBuf::from("/test/path"));
-        if let Payload::EXTERNAL(path) = external {
+        let external = Payload::External(PathBuf::from("/test/path"));
+        if let Payload::External(path) = external {
             assert_eq!(path, PathBuf::from("/test/path"));
         } else {
             panic!("Expected EXTERNAL variant");
         }
 
-        let data = Payload::DATA(b"test data".to_vec());
-        if let Payload::DATA(content) = data {
+        let data = Payload::Data(b"test data".to_vec());
+        if let Payload::Data(content) = data {
             assert_eq!(content, b"test data".to_vec());
         } else {
             panic!("Expected DATA variant");

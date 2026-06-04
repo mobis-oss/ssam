@@ -119,11 +119,62 @@ pub struct PackageFile {
     payloads: Payloads,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PkgfsExtent {
+    pub offset: u64,
+    pub length: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct PackageFilesystem {
     pub payload: Payload,
     pub pkgfs_type: FsType,
     pub verity_info: PackageFsVerityInfo,
+}
+
+impl PackageFilesystem {
+    /// Constructs a [`PackageFilesystem`] for an image already embedded in a
+    /// package file at the given offset and length. Primarily intended for
+    /// cross-crate test mocks that need to fabricate a filesystem handle
+    /// without depending on the internal payload representation.
+    #[must_use]
+    pub fn new(
+        offset: u64,
+        length: u64,
+        pkgfs_type: FsType,
+        verity_info: PackageFsVerityInfo,
+    ) -> Self {
+        Self {
+            payload: Payload::Internal((offset, length)),
+            pkgfs_type,
+            verity_info,
+        }
+    }
+
+    /// Returns the location of the filesystem image inside the package file,
+    /// or [`None`] if the payload is not an embedded image.
+    #[must_use]
+    pub fn pkgfs_extent(&self) -> Option<PkgfsExtent> {
+        match &self.payload {
+            Payload::Internal((offset, length)) => Some(PkgfsExtent {
+                offset: *offset,
+                length: *length,
+            }),
+            Payload::External(_) | Payload::Data(_) => None,
+        }
+    }
+
+    /// Returns the filesystem type of the package image.
+    #[must_use]
+    pub fn pkgfs_type(&self) -> FsType {
+        self.pkgfs_type
+    }
+
+    /// Returns the dm-verity metadata for the package image.
+    #[must_use]
+    pub fn verity_info(&self) -> &PackageFsVerityInfo {
+        &self.verity_info
+    }
 }
 
 impl PackageFile {
@@ -269,7 +320,7 @@ impl PackageFile {
                 })?;
 
             // Parameters would be handled per Payload
-            if let Payload::INTERNAL((offset, size)) = payload {
+            if let Payload::Internal((offset, size)) = payload {
                 // TODO: Make more generic to handle different payload types with PayloadConfig
                 match payload_type {
                     PayloadType::Metadata => {
@@ -358,7 +409,7 @@ impl PackageFile {
         let mut ssam_payloads = Payloads::init()
             .set_mut(
                 PayloadType::Metadata,
-                Some(Payload::DATA(
+                Some(Payload::Data(
                     self.metadata
                         .serialize()
                         .context("Failed to serialize PackageMetadata")?,
@@ -366,7 +417,7 @@ impl PackageFile {
             )
             .set_mut(
                 PayloadType::RuntimeConfig,
-                Some(Payload::DATA(
+                Some(Payload::Data(
                     self.runtime_config
                         .serialize()
                         .context("Failed to serialize PackageRuntimeConfig")?,
@@ -374,7 +425,7 @@ impl PackageFile {
             )
             .set_mut(
                 PayloadType::SeccompPolicy,
-                Some(Payload::DATA(self.seccomp_policy.serialize())),
+                Some(Payload::Data(self.seccomp_policy.serialize())),
             )
             .set_mut(
                 PayloadType::PackageFilesystem,
@@ -440,12 +491,12 @@ impl PackageFile {
                 .as_ref()
                 .with_context(|| format!("Payload for {payload_type} does NOT exist!"))?;
             match payload {
-                Payload::DATA(payload) => {
+                Payload::Data(payload) => {
                     package_zip
                         .write_all(payload)
                         .with_context(|| format!("Failed to write payload {payload_type}"))?;
                 }
-                Payload::EXTERNAL(path) => {
+                Payload::External(path) => {
                     let mut f = File::open(path).with_context(|| {
                         format!("Failed to open external payload file {}", path.display())
                     })?;
@@ -456,7 +507,7 @@ impl PackageFile {
                         )
                     })?;
                 }
-                Payload::INTERNAL(_) => {
+                Payload::Internal(_) => {
                     bail!("Unsupported payload type for {payload_type}: {payload:?}");
                 }
             }
@@ -482,7 +533,7 @@ impl PackageFile {
             let data_start = payload
                 .data_start()
                 .with_context(|| format!("Failed to get data start for {payload_type}"))?;
-            let p = Payload::INTERNAL((data_start, payload.size()));
+            let p = Payload::Internal((data_start, payload.size()));
             package_payloads.set(payload_type, Some(p));
         }
 
@@ -574,7 +625,7 @@ impl PackageFilesystem {
         verity_info: PackageFsVerityInfo,
     ) -> Self {
         PackageFilesystem {
-            payload: Payload::EXTERNAL(pkgfs_image.as_ref().to_path_buf()),
+            payload: Payload::External(pkgfs_image.as_ref().to_path_buf()),
             pkgfs_type,
             verity_info,
         }
@@ -893,7 +944,7 @@ pub(crate) mod tests {
 
         let payloads = Payloads::init().set_mut(
             PayloadType::PackageFilesystem,
-            Some(Payload::DATA(b"pkgfs_data".to_vec())),
+            Some(Payload::Data(b"pkgfs_data".to_vec())),
         );
 
         let package_file = PackageFile::new(metadata, runtime_config, seccomp_policy, payloads);
@@ -1032,7 +1083,7 @@ pub(crate) mod tests {
         assert_eq!(filesystem.pkgfs_type, FsType::Ext4);
         assert_eq!(filesystem.verity_info.root_hash, "hash_root_test");
         assert_eq!(filesystem.verity_info.hash_offset, 0u64);
-        assert!(matches!(filesystem.payload, Payload::EXTERNAL(ref p) if p == &pkgfs_path));
+        assert!(matches!(filesystem.payload, Payload::External(ref p) if p == &pkgfs_path));
     }
 
     #[test]
@@ -1157,7 +1208,7 @@ pub(crate) mod tests {
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init().set_mut(
             PayloadType::PackageFilesystem,
-            Some(Payload::EXTERNAL(pkgfs)),
+            Some(Payload::External(pkgfs)),
         );
 
         let mut package_file = PackageFileBuilder::new();

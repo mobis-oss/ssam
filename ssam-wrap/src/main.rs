@@ -279,7 +279,7 @@ fn main() -> anyhow::Result<()> {
     println!("* Signed with key: {private_key_filename}");
     println!(
         "* Root hash for dm-verity: {}",
-        pkgfs_info.verity_info.root_hash
+        pkgfs_info.verity_info().root_hash
     );
     Ok(())
 }

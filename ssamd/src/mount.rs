@@ -1076,14 +1076,14 @@ pub(crate) mod tests {
 
         let test_path = PathBuf::from("/test/package/path");
 
-        // Default mock: Payload::INTERNAL((1024, 8192 + 2048))
+        // Default mock: Payload::Internal((1024, 8192 + 2048))
         let pkg_file = create_test_ssam_package_file();
         let meta = PackageFsMetadata::new(&test_path, &pkg_file).unwrap();
         assert_eq!(meta.packagefs_info.length, 8192 + 2048);
 
         // Override payload size — length must follow Payload, not be recomputed.
         let mut pkg_file2 = create_test_ssam_package_file();
-        pkg_file2.payload = Payload::INTERNAL((2048, 16_384 + 4_096));
+        pkg_file2.payload = Payload::Internal((2048, 16_384 + 4_096));
         pkg_file2.verity_info.hash_offset = 16_384;
         pkg_file2.verity_info.hash_size = 4_096;
         let meta2 = PackageFsMetadata::new(&test_path, &pkg_file2).unwrap();
