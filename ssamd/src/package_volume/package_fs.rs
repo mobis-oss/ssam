@@ -406,6 +406,29 @@ pub(crate) mod tests {
         }
 
         #[test]
+        fn test_package_fs_metadata_rejects_external_payload() {
+            let test_path = PathBuf::from("/test/package/path");
+
+            let mut pkg_file = create_test_ssam_package_file();
+            pkg_file.pkgfs = PackageFilesystem::from_source(
+                Path::new("/nonexistent/external.img"),
+                FsType::Ext4,
+                default_test_verity(),
+            );
+
+            let err = PackageFsMetadata::new(&test_path, &pkg_file).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Failed to get package filesystem"),
+                "unexpected error message: {msg}"
+            );
+            assert!(
+                msg.contains("test-package"),
+                "error message must include package name, got: {msg}"
+            );
+        }
+
+        #[test]
         fn test_package_fs_metadata_with_empty_package_name() {
             let test_path = PathBuf::from("/test/package/path");
 

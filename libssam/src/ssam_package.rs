@@ -1466,4 +1466,32 @@ pub(crate) mod tests {
             "Expected ParseFailed for payloads_size slightly over file capacity, got: {err:?}"
         );
     }
+
+    #[test]
+    fn package_filesystem_new_exposes_supplied_values_via_accessors() {
+        let verity = make_verity("root_hash_xyz", 4096);
+        let fs = PackageFilesystem::new(1024, 8192, FsType::Ext4, verity);
+
+        let extent = fs
+            .pkgfs_extent()
+            .expect("Internal payload must yield extent");
+        assert_eq!(extent.offset, 1024);
+        assert_eq!(extent.length, 8192);
+        assert_eq!(fs.pkgfs_type(), FsType::Ext4);
+        assert_eq!(fs.verity_info().root_hash, "root_hash_xyz");
+        assert_eq!(fs.verity_info().hash_offset, 4096);
+    }
+
+    #[test]
+    fn package_filesystem_external_payload_has_no_extent() {
+        let fs = PackageFilesystem::from_source(
+            Path::new("/nonexistent/pkgfs.img"),
+            FsType::Erofs,
+            make_verity("h", 0),
+        );
+
+        assert_eq!(fs.pkgfs_extent(), None);
+        assert_eq!(fs.pkgfs_type(), FsType::Erofs);
+        assert_eq!(fs.verity_info().root_hash, "h");
+    }
 }
