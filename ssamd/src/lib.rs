@@ -7,12 +7,12 @@ pub mod configuration;
 mod dm;
 mod executor;
 pub mod ext4quota;
-mod mount;
+pub(crate) mod mount;
 pub mod package;
 pub mod package_manager;
 pub mod package_volume;
 mod remocon_server_impl;
-mod utils;
+pub(crate) mod utils;
 
 use anyhow::Context;
 use cgroups_rs::fs::{cgroup::Cgroup, hierarchies};

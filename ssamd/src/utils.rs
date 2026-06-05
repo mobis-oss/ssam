@@ -1,6 +1,169 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod actor_supervisor {
+    use std::any::type_name;
+    use std::fmt::Display;
+
+    use rsactor::{Actor, ActorRef, ActorResult};
+
+    /// Policy defines ONLY the action on failure.
+    /// Logging is the supervisor's (`spawn_with`) concern — NOT the policy's.
+    pub trait FailurePolicy: Send + 'static {
+        /// Action to take after failure is logged. Called only on failure.
+        fn invoke();
+    }
+
+    pub struct ExitOnFailure;
+
+    impl FailurePolicy for ExitOnFailure {
+        fn invoke() {
+            std::process::exit(1);
+        }
+    }
+
+    pub struct IgnoreOnFailure;
+
+    impl FailurePolicy for IgnoreOnFailure {
+        fn invoke() {} // no-op: logging already done by supervisor
+    }
+
+    pub trait SupervisedActor: Actor + 'static
+    where
+        Self::Error: Display + Send,
+    {
+        type FailurePolicy: FailurePolicy;
+    }
+
+    pub fn spawn_with<A>(args: A::Args) -> ActorRef<A>
+    where
+        A: SupervisedActor,
+        A::Error: Display + Send,
+    {
+        let (actor_ref, handle) = rsactor::spawn::<A>(args);
+        tokio::spawn(async move {
+            let result = handle.await;
+            let name = type_name::<A>();
+            match &result {
+                Ok(ActorResult::Failed { error, phase, .. }) => {
+                    log::error!("actor '{name}' failed in {phase}: {error}");
+                    A::FailurePolicy::invoke();
+                }
+                Err(join_err) if join_err.is_panic() => {
+                    log::error!("actor '{name}' panicked: {join_err}");
+                    A::FailurePolicy::invoke();
+                }
+                _ => {
+                    log::info!("actor '{name}' terminated");
+                }
+            }
+        });
+        actor_ref
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rsactor::FailurePhase;
+        use tokio::task::JoinError;
+
+        struct TestActor;
+
+        impl Actor for TestActor {
+            type Args = ();
+            type Error = anyhow::Error;
+
+            async fn on_start((): Self::Args, _: &ActorRef<Self>) -> Result<Self, Self::Error> {
+                Ok(Self)
+            }
+        }
+
+        impl SupervisedActor for TestActor {
+            type FailurePolicy = IgnoreOnFailure;
+        }
+
+        fn failed(phase: FailurePhase) -> ActorResult<TestActor> {
+            ActorResult::Failed {
+                actor: None,
+                error: anyhow::anyhow!("simulated actor failure"),
+                phase,
+                killed: false,
+            }
+        }
+
+        fn completed(killed: bool) -> ActorResult<TestActor> {
+            ActorResult::Completed {
+                actor: TestActor,
+                killed,
+            }
+        }
+
+        async fn panic_join_error() -> JoinError {
+            tokio::spawn(async {
+                panic!("simulated supervised-task panic");
+            })
+            .await
+            .expect_err("a panicking task must resolve to a JoinError")
+        }
+
+        async fn cancelled_join_error() -> JoinError {
+            let handle = tokio::spawn(std::future::pending::<()>());
+            handle.abort();
+            handle
+                .await
+                .expect_err("an aborted task must resolve to a JoinError")
+        }
+
+        fn is_failure<T: Actor>(result: &Result<ActorResult<T>, JoinError>) -> bool {
+            match result {
+                Ok(ActorResult::Failed { .. }) => true,
+                Err(join_err) if join_err.is_panic() => true,
+                _ => false,
+            }
+        }
+
+        #[test]
+        fn classifies_actor_failure_in_every_phase() {
+            for phase in [
+                FailurePhase::OnStart,
+                FailurePhase::OnRun,
+                FailurePhase::OnStop,
+                FailurePhase::OnRunThenOnStop,
+            ] {
+                assert!(
+                    is_failure::<TestActor>(&Ok(failed(phase))),
+                    "ActorResult::Failed in {phase} must be treated as a failure"
+                );
+            }
+        }
+
+        #[test]
+        fn classifies_completion_as_non_failure() {
+            assert!(!is_failure::<TestActor>(&Ok(completed(false))));
+            assert!(!is_failure::<TestActor>(&Ok(completed(true))));
+        }
+
+        #[tokio::test]
+        async fn classifies_panic_as_failure() {
+            assert!(is_failure::<TestActor>(&Err(panic_join_error().await)));
+        }
+
+        #[tokio::test]
+        async fn classifies_cancellation_as_non_failure() {
+            assert!(!is_failure::<TestActor>(&Err(cancelled_join_error().await)));
+        }
+
+        #[tokio::test]
+        async fn spawn_with_returns_live_supervised_actor() {
+            let actor_ref = spawn_with::<TestActor>(());
+            actor_ref
+                .stop()
+                .await
+                .expect("graceful stop of a supervised actor should succeed");
+        }
+    }
+}
+
 use std::{os::unix::fs::DirBuilderExt, path::Path};
 
 use anyhow::Context;
@@ -39,6 +202,7 @@ const MAX_DISPLAY_LEN: usize = 40;
 
 /// Truncates a string with ellipsis if it exceeds `MAX_DISPLAY_LEN` characters.
 /// Shows first 10 and last 7 characters with "..." in between.
+#[must_use]
 pub fn ellipsis(s: &str) -> String {
     let char_count = s.chars().count();
     if char_count <= MAX_DISPLAY_LEN {

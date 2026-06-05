@@ -5,6 +5,8 @@ use crate::configuration;
 #[cfg(feature = "dm-verity")]
 use crate::dm::VerityDevice;
 use crate::package_volume::PackageFsMetadata;
+
+use crate::utils::actor_supervisor::{SupervisedActor, spawn_with};
 use anyhow::Context;
 use derive_more::Deref;
 use rsactor::{Actor, ActorRef, message_handlers};
@@ -324,6 +326,18 @@ impl Actor for LoopDeviceControlActor {
         Ok(Self { control })
     }
 }
+#[cfg(not(test))]
+use crate::utils::actor_supervisor::ExitOnFailure;
+
+#[cfg(test)]
+use crate::utils::actor_supervisor::IgnoreOnFailure;
+
+impl SupervisedActor for LoopDeviceControlActor {
+    #[cfg(not(test))]
+    type FailurePolicy = ExitOnFailure;
+    #[cfg(test)]
+    type FailurePolicy = IgnoreOnFailure;
+}
 
 #[message_handlers]
 impl LoopDeviceControlActor {
@@ -490,14 +504,21 @@ pub(crate) trait LoopDeviceAttacher {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LoopDeviceControl {
+pub struct LoopDeviceControl {
     control_actor: ActorRef<LoopDeviceControlActor>,
 }
 
 impl LoopDeviceControl {
+    #[must_use]
     pub fn new() -> Self {
-        let (control_actor, _) = rsactor::spawn::<LoopDeviceControlActor>(());
+        let control_actor = spawn_with::<LoopDeviceControlActor>(());
         Self { control_actor }
+    }
+}
+
+impl Default for LoopDeviceControl {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
