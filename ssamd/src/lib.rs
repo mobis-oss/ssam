@@ -20,12 +20,12 @@ use futures_util::FutureExt;
 
 use once_cell::sync::Lazy;
 use remocon_server_impl::RemoconImpl;
-use rsactor::spawn;
 
 use std::{fs, net::Ipv4Addr, os::unix::fs::DirBuilderExt, path::Path, sync::Arc, time::Instant};
 use tokio::sync::oneshot;
 
-use crate::package_manager::PackageManagerService;
+use package_manager::PackageManagerService;
+use utils::actor_supervisor::spawn_with;
 
 fn package_cgroup_exists() -> bool {
     let packages_cgroup = configuration::packages_cgroup();
@@ -65,7 +65,7 @@ impl Daemon {
         let actor =
             package_manager::PackageManagerActor::new(bundled_dir_str, downloaded_dir_str).await?;
 
-        let (actor_ref, _handle) = spawn(actor);
+        let actor_ref = spawn_with::<package_manager::PackageManagerActor>(actor);
 
         // Refer to include/systemd/sd-daemon.h or man sd_notify(3) for detail
         sd_notify::notify(&[sd_notify::NotifyState::Ready])?;

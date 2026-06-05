@@ -34,6 +34,7 @@ mod constants {
 }
 
 mod systemd_dbus {
+    use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor, spawn_with};
     use anyhow::Context;
     use futures_util::StreamExt;
     use rsactor::{Actor, ActorRef, ActorWeak, message_handlers};
@@ -162,6 +163,10 @@ mod systemd_dbus {
         }
     }
 
+    impl SupervisedActor for JobRemovedSignalWatcherActor {
+        type FailurePolicy = IgnoreOnFailure;
+    }
+
     #[derive(Debug, Display)]
     pub(crate) enum JobResult {
         Success,
@@ -191,6 +196,10 @@ mod systemd_dbus {
         job_removed_watcher_actor: ActorRef<JobRemovedSignalWatcherActor>,
     }
 
+    impl SupervisedActor for SystemdManagerActor {
+        type FailurePolicy = IgnoreOnFailure;
+    }
+
     #[message_handlers]
     impl SystemdManagerActor {
         async fn new(connection: &zbus::Connection) -> anyhow::Result<Self> {
@@ -211,7 +220,8 @@ mod systemd_dbus {
                 .await
                 .context("Failed to create JobRemovedStream")?;
             let job_removed_watcher = JobRemovedSignalWatcherActor::new(stream);
-            let (job_removed_watcher, _) = rsactor::spawn(job_removed_watcher);
+            let job_removed_watcher =
+                spawn_with::<JobRemovedSignalWatcherActor>(job_removed_watcher);
 
             Ok(Self {
                 manager_proxy,
@@ -318,7 +328,7 @@ mod systemd_dbus {
                 .get_or_try_init(|| async {
                     let connection = SharedSystemDConnection::new().await?;
                     let manager_interface = SystemdManagerActor::new(&connection).await?;
-                    let (actor_ref, _handle) = rsactor::spawn(manager_interface);
+                    let actor_ref = spawn_with::<SystemdManagerActor>(manager_interface);
                     Ok::<_, anyhow::Error>(actor_ref)
                 })
                 .await?;

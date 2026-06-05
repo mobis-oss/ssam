@@ -9,6 +9,7 @@ use crate::package_manager::message::{
 use crate::package_manager::parser::PackageParseResult;
 use crate::package_manager::store::{PackageStore, PackageStoreBackend};
 use crate::package_volume::{PackageVolumeManagerActor, PackageVolumeMetadata};
+use crate::utils::actor_supervisor::{ExitOnFailure, SupervisedActor, spawn_with};
 use anyhow::Context;
 use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{BrokenPackageInfo, BrokenReason, PackageInfoResult};
@@ -151,6 +152,10 @@ pub struct PackageManagerActor {
     transaction_actor: ActorRef<PackageTransactionActor>,
 }
 
+impl SupervisedActor for PackageManagerActor {
+    type FailurePolicy = ExitOnFailure;
+}
+
 struct InstallInfo {
     package_name: String,
     package_file: PackageFile,
@@ -184,9 +189,9 @@ impl PackageManagerActor {
 
         let package_store = PackageStore::new(HashMapPackageStore::new());
 
-        let (volume_manager_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(());
+        let volume_manager_ref = spawn_with::<PackageVolumeManagerActor>(());
         let actor = PackageTransactionActor::new(volume_manager_ref, DefaultPackageFileBackend);
-        let (transaction_actor, _) = rsactor::spawn::<PackageTransactionActor>(actor);
+        let transaction_actor = spawn_with::<PackageTransactionActor>(actor);
 
         let pm = PackageManagerActor {
             bundled_dir,

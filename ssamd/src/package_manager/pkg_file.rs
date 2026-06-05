@@ -4,6 +4,7 @@
 use crate::package::{Package, PackageContext};
 use crate::package_volume::messages::{AcquireVolume, PurgeVolume};
 use crate::package_volume::{PackageVolume, PackageVolumeManagerActor, PackageVolumeMetadata};
+use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor};
 use anyhow::Context;
 use rsactor::{Actor, ActorRef, message_handlers};
 use std::path::{Path, PathBuf};
@@ -64,6 +65,10 @@ impl PackageTransactionActor {
             .await
             .context("Failed to communicate with PackageVolumeManager Actor")?
     }
+}
+
+impl SupervisedActor for PackageTransactionActor {
+    type FailurePolicy = IgnoreOnFailure;
 }
 
 pub(crate) mod message {
@@ -218,13 +223,12 @@ impl PackageTransactionActor {
             return Err(e);
         }
 
-        if remove_data
-            && let Err(e) = self.purge_volume(&package_name).await {
-                self.rollback_file_ops(&mode, &dest)
-                    .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
-                    .ok();
-                return Err(e);
-            }
+        if remove_data && let Err(e) = self.purge_volume(&package_name).await {
+            self.rollback_file_ops(&mode, &dest)
+                .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
+                .ok();
+            return Err(e);
+        }
 
         let volume = match self.acquire_volume(volume_meta).await {
             Ok(v) => v,

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::configuration;
+use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor};
 
 pub trait PackageFileInfo {
     /// Returns the package filesystem metadata.
@@ -169,6 +170,10 @@ impl Actor for PackageVolumeManagerActor {
             volumes: HashMap::new(),
         })
     }
+}
+
+impl SupervisedActor for PackageVolumeManagerActor {
+    type FailurePolicy = IgnoreOnFailure;
 }
 
 #[message_handlers]

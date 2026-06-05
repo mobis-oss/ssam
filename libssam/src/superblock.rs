@@ -176,7 +176,11 @@ mod erofs {
                     .block_size()
                     .is_err()
             );
-            assert!(make_sb(EROFS_SUPER_MAGIC, EROFS_OVERFLOW_BLKSZBITS).block_size().is_err());
+            assert!(
+                make_sb(EROFS_SUPER_MAGIC, EROFS_OVERFLOW_BLKSZBITS)
+                    .block_size()
+                    .is_err()
+            );
             assert!(make_sb(EROFS_SUPER_MAGIC, u8::MAX).block_size().is_err());
         }
     }
@@ -369,7 +373,11 @@ mod ext4 {
                     .block_size()
                     .is_err()
             );
-            assert!(make_sb(EXT4_SUPER_MAGIC, EXT4_OVERFLOW_LOG_BLOCK_SIZE).block_size().is_err());
+            assert!(
+                make_sb(EXT4_SUPER_MAGIC, EXT4_OVERFLOW_LOG_BLOCK_SIZE)
+                    .block_size()
+                    .is_err()
+            );
             assert!(make_sb(EXT4_SUPER_MAGIC, u32::MAX).block_size().is_err());
         }
     }
