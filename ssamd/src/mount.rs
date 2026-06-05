@@ -311,18 +311,30 @@ mod loop_attach {
     }
 }
 
+trait LoopControlOpener: Send + 'static {
+    fn open(&self) -> anyhow::Result<loopdev::LoopControl>;
+}
+
+struct DefaultLoopControlOpener;
+
+impl LoopControlOpener for DefaultLoopControlOpener {
+    fn open(&self) -> anyhow::Result<loopdev::LoopControl> {
+        loopdev::LoopControl::open().context("Failed to open LoopControl")
+    }
+}
+
 #[derive(Debug)]
 struct LoopDeviceControlActor {
     control: loopdev::LoopControl,
 }
 
 impl Actor for LoopDeviceControlActor {
-    type Args = ();
+    type Args = Box<dyn LoopControlOpener>;
 
     type Error = anyhow::Error;
 
-    async fn on_start((): Self::Args, _: &ActorRef<Self>) -> anyhow::Result<Self> {
-        let control = loopdev::LoopControl::open().context("Failed to open LoopControl")?;
+    async fn on_start(opener: Self::Args, _: &ActorRef<Self>) -> anyhow::Result<Self> {
+        let control = opener.open()?;
         Ok(Self { control })
     }
 }
@@ -511,7 +523,8 @@ pub struct LoopDeviceControl {
 impl LoopDeviceControl {
     #[must_use]
     pub fn new() -> Self {
-        let control_actor = spawn_with::<LoopDeviceControlActor>(());
+        let control_actor =
+            spawn_with::<LoopDeviceControlActor>(Box::new(DefaultLoopControlOpener));
         Self { control_actor }
     }
 }
@@ -811,6 +824,32 @@ pub(crate) fn findmnt(target: impl AsRef<Path>) -> anyhow::Result<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    struct FailingLoopControlOpener;
+
+    impl LoopControlOpener for FailingLoopControlOpener {
+        fn open(&self) -> anyhow::Result<loopdev::LoopControl> {
+            anyhow::bail!("injected LoopControl::open failure")
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_control_open_failure_surfaces_as_onstart_failure() {
+        // Spawn directly rather than through spawn_with: the supervisor consumes
+        // the JoinHandle, so a direct spawn is the only way to observe the
+        // ActorResult instead of the supervisor's logging side effect.
+        let (_actor_ref, handle) =
+            rsactor::spawn::<LoopDeviceControlActor>(Box::new(FailingLoopControlOpener));
+
+        match handle.await.expect("supervised actor task must not panic") {
+            rsactor::ActorResult::Failed { phase, .. } => {
+                assert_eq!(phase, rsactor::FailurePhase::OnStart);
+            }
+            rsactor::ActorResult::Completed { .. } => {
+                panic!("expected on_start failure, got successful completion")
+            }
+        }
+    }
 
     mod findmnt_test {
         use super::*;
