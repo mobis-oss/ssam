@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-mod fs_ops;
 pub mod parser;
 mod pkg_file;
 mod store;
@@ -142,7 +141,7 @@ use pkg_file::PackageTransactionActor;
 use pkg_file::message::InstallMode;
 use store::HashMapPackageStore;
 
-use fs_ops::DefaultPackageFileBackend;
+use pkg_file::DefaultPackageFileBackend;
 
 #[derive(Actor)]
 pub struct PackageManagerActor {
@@ -858,7 +857,7 @@ impl PackageManagerActor {
     fn new_with_fs_ops(
         bundled_dir: PathBuf,
         downloaded_dir: PathBuf,
-        fs_ops: impl fs_ops::PackageFileBackend + 'static,
+        fs_ops: impl pkg_file::PackageFileBackend + 'static,
     ) -> Self {
         let package_store = PackageStore::new(HashMapPackageStore::new());
         let (volume_manager_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(());
@@ -876,7 +875,7 @@ impl PackageManagerActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_ops::PackageFileBackend;
+    use pkg_file::PackageFileBackend;
     use std::sync::{Arc, Mutex};
 
     type CallLog<T> = Arc<Mutex<Vec<T>>>;
