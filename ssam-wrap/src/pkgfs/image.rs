@@ -10,6 +10,7 @@ use super::execute_command;
 
 mod rootfs {
     use anyhow::{Context, Result};
+    use libssam::config::PackageConfigSpec;
     use oci_spec::runtime::{Mount, Spec};
 
     use std::fs;
@@ -42,9 +43,10 @@ mod rootfs {
         spec.mounts().as_ref().map(Vec::as_slice)
     }
 
-    fn is_systemd_notify_type() -> bool {
-        println!("TODO!: Implement actual systemd notify type check!!!");
-        false
+    fn is_systemd_notify_type(package_config_str: &str) -> bool {
+        let package_config: PackageConfigSpec =
+            toml::from_str(&package_config_str).expect("Failed to parse package config");
+        package_config.get_service_service_type() == "notify"
     }
 
     const BASE_MANDATORY_MOUNTS: [&str; 2] = ["/dev", "/dev/pts"];
@@ -136,23 +138,30 @@ mod rootfs {
         Ok(())
     }
 
-    fn ensure_mounts_config(
-        rootfs: &Rootfs,
-        oci_runtime_conf_file: impl AsRef<Path>,
-    ) -> Result<()> {
+    fn ensure_mounts_config(rootfs: &Rootfs, workspace: &crate::Workspace) -> Result<()> {
+        let oci_runtime_conf_file = workspace.runtime_config.as_path();
         let oci_runtime_conf = load_spec(&oci_runtime_conf_file)?;
         let mounts = get_mounts(&oci_runtime_conf).ok_or(anyhow::anyhow!(
             "No mounts found at {}",
-            oci_runtime_conf_file.as_ref().display()
+            oci_runtime_conf_file.display()
         ))?;
-        let systemd_notify = is_systemd_notify_type();
+
+        let package_config_str =
+            fs::read_to_string(&workspace.package_config).with_context(|| {
+                format!(
+                    "Unable to read package config file: {}",
+                    workspace.package_config.display()
+                )
+            })?;
+
+        let systemd_notify = is_systemd_notify_type(&package_config_str);
         let mandatory = mounts_list(&BASE_MANDATORY_MOUNTS, systemd_notify);
         let optional = mounts_list(&BASE_OPTIONAL_MOUNTS, !systemd_notify);
         let mount_dests = mount_destinations(mounts);
 
         if let Some(missing) = find_missing_path(&mandatory, &mount_dests) {
             anyhow::bail!(
-                "Required mount '{}' is missing from config.json mounts. Please add it.",
+                "Required definition of mount '{}' is missing in runtime config - config.json.",
                 missing.display()
             );
         }
@@ -162,13 +171,10 @@ mod rootfs {
         Ok(())
     }
 
-    pub fn prepare(
-        rootfs: impl AsRef<Path>,
-        oci_runtime_conf_file: impl AsRef<Path>,
-    ) -> Result<()> {
+    pub fn prepare(rootfs: impl AsRef<Path>, workspace: &crate::Workspace) -> Result<()> {
         let rootfs = Rootfs::new(rootfs);
 
-        ensure_mounts_config(&rootfs, oci_runtime_conf_file)?;
+        ensure_mounts_config(&rootfs, workspace)?;
         Ok(())
     }
 }
@@ -261,6 +267,6 @@ pub fn create(
         pkgfs_src.display()
     );
 
-    rootfs::prepare(pkgfs_src, &workspace.runtime_config)?;
+    rootfs::prepare(pkgfs_src, &workspace)?;
     build_pkgfs_image(workspace, pkgfs_src, image_type)
 }

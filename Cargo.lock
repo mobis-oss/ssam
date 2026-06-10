@@ -2674,6 +2674,7 @@ dependencies = [
  "rsa",
  "serde_json",
  "strum 0.28.0",
+ "toml",
 ]
 
 [[package]]
