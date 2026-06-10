@@ -45,7 +45,7 @@ mod rootfs {
 
     fn is_systemd_notify_type(package_config_str: &str) -> bool {
         let package_config: PackageConfigSpec =
-            toml::from_str(&package_config_str).expect("Failed to parse package config");
+            toml::from_str(package_config_str).expect("Failed to parse package config");
         package_config.get_service_service_type() == "notify"
     }
 
@@ -140,7 +140,7 @@ mod rootfs {
 
     fn ensure_mounts_config(rootfs: &Rootfs, workspace: &crate::Workspace) -> Result<()> {
         let oci_runtime_conf_file = workspace.runtime_config.as_path();
-        let oci_runtime_conf = load_spec(&oci_runtime_conf_file)?;
+        let oci_runtime_conf = load_spec(oci_runtime_conf_file)?;
         let mounts = get_mounts(&oci_runtime_conf).ok_or(anyhow::anyhow!(
             "No mounts found at {}",
             oci_runtime_conf_file.display()
@@ -267,6 +267,6 @@ pub fn create(
         pkgfs_src.display()
     );
 
-    rootfs::prepare(pkgfs_src, &workspace)?;
+    rootfs::prepare(pkgfs_src, workspace)?;
     build_pkgfs_image(workspace, pkgfs_src, image_type)
 }
