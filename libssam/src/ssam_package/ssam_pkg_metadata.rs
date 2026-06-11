@@ -94,7 +94,7 @@ impl PackageMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PackageConfigSpec, Security};
+    use crate::config::{Network, PackageConfigSpec, Security};
     use crate::ssam_package::tests::make_verity;
 
     fn create_test_metadata() -> PackageMetadata {
@@ -112,6 +112,7 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
+                network: Network { mode: None },
             },
             service: crate::config::Service {
                 service_type: "notify".to_string(),
@@ -255,6 +256,7 @@ mod tests {
                         seccomp: true,
                         mac: true,
                     },
+                    network: crate::config::Network { mode: None },
                 },
                 service: crate::config::Service {
                     service_type: "notify".to_string(),
@@ -287,6 +289,7 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
+                network: crate::config::Network { mode: None },
             },
             service: crate::config::Service {
                 service_type: "notify".to_string(),

@@ -41,7 +41,7 @@ type PayloadSizeType = u64;
 const SSAM_PKG_MAGIC_LEN: usize = 24;
 const SSAM_PKG_FORMAT_VERSION_LEN: usize = 8;
 const SSAM_PKG_MAGIC: &[u8; SSAM_PKG_MAGIC_LEN] = b"MIRAEPLATFORMGAEBALGROUP";
-const SSAM_PKG_FORMAT_VERSION: &[u8; SSAM_PKG_FORMAT_VERSION_LEN] = b"0.2.0\0\0\0";
+const SSAM_PKG_FORMAT_VERSION: &[u8; SSAM_PKG_FORMAT_VERSION_LEN] = b"0.3.0\0\0\0";
 const SSAM_PKG_FOOTER_LEN: usize = SSAM_PKG_MAGIC_LEN + SSAM_PKG_FORMAT_VERSION_LEN;
 
 /// Read N bytes from the end of file at given offset.
@@ -690,7 +690,7 @@ impl PackageFileBuilder {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::config::{Container, Package, PackageConfigSpec, Security, Service};
+    use crate::config::{Container, Network, Package, PackageConfigSpec, Security, Service};
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use rsa::{RsaPrivateKey, RsaPublicKey, rand_core};
     use std::fs::{self, File};
@@ -721,6 +721,7 @@ pub(crate) mod tests {
                     seccomp: true,
                     mac: true,
                 },
+                network: Network { mode: None },
             },
             service: Service {
                 service_type: "notify".to_string(),
@@ -800,6 +801,8 @@ pub(crate) mod tests {
                 [container.security]
                 seccomp = true
                 mac = true
+
+                [container.network]
 
                 [service]
                 service_type = "notify"
@@ -1381,7 +1384,7 @@ pub(crate) mod tests {
         {
             let mut file = File::create(&test_file_path).unwrap();
             file.write_all(b"some_package_data").unwrap();
-            file.write_all(b"0.3.0\0\0\0").unwrap();
+            file.write_all(b"0.2.0\0\0\0").unwrap();
             file.write_all(SSAM_PKG_MAGIC).unwrap();
         }
 
@@ -1393,7 +1396,7 @@ pub(crate) mod tests {
                 result.unwrap_err(),
                 PackageParseError::InvalidFormatVersion { .. }
             ),
-            "Expected InvalidFormatVersion error for unknown version 0.3.0"
+            "Expected InvalidFormatVersion error for unknown version 0.2.0"
         );
     }
 

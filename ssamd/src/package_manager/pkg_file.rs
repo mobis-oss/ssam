@@ -362,6 +362,8 @@ storage_limit = 100
 seccomp = false
 mac = false
 
+[container.network]
+
 [service]
 service_type = "simple"
 "#,

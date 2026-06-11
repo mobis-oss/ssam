@@ -132,7 +132,7 @@ impl fmt::Display for PackageInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Container, Package, Security, Service};
+    use crate::config::{Container, Network, Package, Security, Service};
     use crate::ssam_package::{PackageConfigSpec, PackageFsVerityInfo};
 
     #[test]
@@ -161,6 +161,7 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
+                network: Network { mode: None },
             },
             service: Service {
                 service_type: "notify".to_string(),
@@ -268,6 +269,7 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
+                network: Network { mode: None },
             },
             service: Service {
                 service_type: "notify".to_string(),

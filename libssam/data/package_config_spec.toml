@@ -15,6 +15,10 @@ data_dirs = "/container/path1:container/path2:container/path3"
 seccomp = true # default is true
 mac = true # default is true
 
+[container.network]
+#:Opt:# container.network.mode
+mode = "host"
+
 [service]
 service_type = "simple"
 #:Opt:# service.bus_name

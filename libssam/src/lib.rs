@@ -60,6 +60,14 @@ pub mod container {
         Notify,
         Idle,
     }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, Display)]
+    #[strum(serialize_all = "lowercase")]
+    pub enum NetworkMode {
+        Host,
+        None,
+        Bridge,
+    }
 }
 
 pub mod superblock;
@@ -122,6 +130,8 @@ mod tests {
                 [container.security]
                 seccomp = true
                 mac = true
+
+                [container.network]
 
                 [service]
                 service_type = "notify"

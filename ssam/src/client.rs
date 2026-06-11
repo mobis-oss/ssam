@@ -277,6 +277,7 @@ impl MockClient {
                     seccomp: true,
                     mac: true,
                 },
+                network: libssam::config::Network { mode: None },
             },
             service: libssam::config::Service {
                 service_type: "notify".to_owned(),
@@ -569,6 +570,7 @@ mod grpc_fake_server {
                                     seccomp: true,
                                     mac: true,
                                 },
+                                network: libssam::config::Network { mode: None },
                             },
                             service: libssam::config::Service {
                                 service_type: "notify".to_owned(),
@@ -646,6 +648,7 @@ mod grpc_fake_server {
                         seccomp: true,
                         mac: true,
                     },
+                    network: libssam::config::Network { mode: None },
                 },
                 service: libssam::config::Service {
                     service_type: "notify".to_owned(),
@@ -706,6 +709,7 @@ mod grpc_fake_server {
                         seccomp: true,
                         mac: true,
                     },
+                    network: libssam::config::Network { mode: None },
                 },
                 service: libssam::config::Service {
                     service_type: "notify".to_owned(),
