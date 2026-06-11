@@ -68,9 +68,13 @@ pub(crate) mod oci {
     use std::path::{Path, PathBuf};
 
     use anyhow::Context;
+    use libssam::container::NetworkMode;
     use libssam::ssam_package::PackageSeccompPolicy;
     use libssam::utils::PrettyJsonWriter;
-    use oci_spec::runtime::{Arch, Linux, LinuxSeccomp, Mount, MountBuilder, RootBuilder};
+    use oci_spec::runtime::{
+        Arch, Linux, LinuxNamespace, LinuxNamespaceBuilder, LinuxNamespaceType, LinuxSeccomp,
+        Mount, MountBuilder, RootBuilder,
+    };
     use tempfile::TempDir;
 
     use crate::package_volume::PackageVolume;
@@ -145,6 +149,7 @@ pub(crate) mod oci {
         pub(crate) fn new(
             oci_runtime_conf_tmpl: &oci_spec::runtime::Spec,
             security_config: &ContainerSecurityConfig,
+            network_mode: NetworkMode,
             cgroups_path: &str,
             package_name: &str,
             pkg_volume: &PackageVolume,
@@ -165,6 +170,9 @@ pub(crate) mod oci {
                 log::info!("{package_name}: seccomp is disabled by configuration");
             }
             linux.set_seccomp(seccomp);
+
+            let namespaces = linux.namespaces_mut().get_or_insert_with(Vec::new);
+            Self::configure_network_namespace(namespaces, network_mode, package_name)?;
 
             let process = oci_runtime_conf
                 .process_mut()
@@ -217,6 +225,41 @@ pub(crate) mod oci {
                 ))?;
 
             Ok(Self { path })
+        }
+
+        // TODO: ssam-wrap will validate that runtime.json does not contain a
+        // pre-configured network namespace when package config specifies network
+        // mode. If both are present, ssam-wrap should reject the package at build
+        // time rather than silently overriding here.
+        fn configure_network_namespace(
+            namespaces: &mut Vec<LinuxNamespace>,
+            network_mode: NetworkMode,
+            package_name: &str,
+        ) -> anyhow::Result<()> {
+            namespaces.retain(|ns| ns.typ() != LinuxNamespaceType::Network);
+
+            match network_mode {
+                NetworkMode::Host => {
+                    log::warn!(
+                        "{package_name}: host network mode enabled, \
+                         container network isolation disabled"
+                    );
+                }
+                NetworkMode::None => {
+                    let ns = LinuxNamespaceBuilder::default()
+                        .typ(LinuxNamespaceType::Network)
+                        .build()
+                        .context("Failed to build network namespace entry")?;
+                    namespaces.push(ns);
+                }
+                NetworkMode::Bridge => {
+                    anyhow::bail!(
+                        "bridge network mode is not yet supported. \
+                         Use 'none' or 'host' instead."
+                    );
+                }
+            }
+            Ok(())
         }
 
         pub(crate) fn set_cgroups_path(spec: &mut oci_spec::runtime::Spec, cgroups_path: PathBuf) {
@@ -536,6 +579,7 @@ mod tests {
         let result = TransientRuntimeConfig::new(
             &oci_spec,
             &security_config,
+            libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package",
             &package_volume,
@@ -603,6 +647,7 @@ mod tests {
         let result = TransientRuntimeConfig::new(
             &oci_spec,
             &security_config,
+            libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package",
             &package_volume,
@@ -651,6 +696,7 @@ mod tests {
         let result = TransientRuntimeConfig::new(
             &oci_spec,
             &security_config,
+            libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package-no-seccomp",
             &package_volume,
@@ -699,6 +745,7 @@ mod tests {
         let result = TransientRuntimeConfig::new(
             &oci_spec,
             &security_config,
+            libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package-with-seccomp",
             &package_volume,
@@ -781,6 +828,7 @@ mod tests {
             let runtime_config = TransientRuntimeConfig::new(
                 &oci_spec,
                 &security_config,
+                libssam::container::NetworkMode::None,
                 "/sys/fs/cgroup/system.slice",
                 "test-container",
                 &package_volume,
@@ -859,6 +907,7 @@ mod tests {
             let runtime_config = TransientRuntimeConfig::new(
                 &oci_spec,
                 &security_config,
+                libssam::container::NetworkMode::None,
                 "/sys/fs/cgroup/system.slice",
                 "test-container",
                 &package_volume,
@@ -1159,6 +1208,241 @@ mod tests {
                 HostArch::X86_64,
             );
             assert!(result.is_none());
+        }
+    }
+
+    mod network_mode_tests {
+        use super::*;
+        use libssam::container::NetworkMode;
+        use oci_spec::runtime::{LinuxNamespaceBuilder, LinuxNamespaceType, SpecBuilder};
+
+        fn create_test_oci_spec_with_network_ns() -> Spec {
+            let process = ProcessBuilder::default()
+                .args(vec!["sh".to_string()])
+                .build()
+                .expect("Failed to build process");
+
+            let root = RootBuilder::default()
+                .path("/")
+                .build()
+                .expect("Failed to build root");
+
+            let namespaces = vec![
+                LinuxNamespaceBuilder::default()
+                    .typ(LinuxNamespaceType::Pid)
+                    .build()
+                    .expect("Failed to build pid namespace"),
+                LinuxNamespaceBuilder::default()
+                    .typ(LinuxNamespaceType::Network)
+                    .build()
+                    .expect("Failed to build network namespace"),
+                LinuxNamespaceBuilder::default()
+                    .typ(LinuxNamespaceType::Mount)
+                    .build()
+                    .expect("Failed to build mount namespace"),
+            ];
+
+            let linux = LinuxBuilder::default()
+                .namespaces(namespaces)
+                .build()
+                .expect("Failed to build linux config");
+
+            SpecBuilder::default()
+                .version("1.0.2")
+                .process(process)
+                .root(root)
+                .linux(linux)
+                .build()
+                .expect("Failed to build OCI spec")
+        }
+
+        #[test]
+        fn test_host_network_mode_removes_network_namespace() {
+            let oci_spec = create_test_oci_spec_with_network_ns();
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mount_point = temp_dir.path().join("mount");
+            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+            let package_volume = create_test_package_volume_real(&mount_point)
+                .expect("Failed to create test PackageVolume");
+
+            let security_config = ContainerSecurityConfig {
+                seccomp_policy: None,
+                mac_enabled: false,
+            };
+
+            let result = TransientRuntimeConfig::new(
+                &oci_spec,
+                &security_config,
+                NetworkMode::Host,
+                "/sys/fs/cgroup/system.slice",
+                "test-host-net",
+                &package_volume,
+            );
+
+            assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+            let config = result.unwrap();
+            let config_file = config.dir_path().join("config.json");
+            let content = fs::read_to_string(&config_file).expect("Should read config file");
+            let config_json: serde_json::Value =
+                serde_json::from_str(&content).expect("Should parse config.json");
+
+            let linux = config_json.get("linux").expect("Should have linux section");
+            let namespaces = linux
+                .get("namespaces")
+                .and_then(|v| v.as_array())
+                .expect("Should have namespaces");
+
+            let has_network_ns = namespaces.iter().any(|ns| {
+                ns.get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == "network")
+            });
+            assert!(
+                !has_network_ns,
+                "Host mode should remove network namespace, got: {namespaces:?}"
+            );
+
+            let has_pid_ns = namespaces.iter().any(|ns| {
+                ns.get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == "pid")
+            });
+            assert!(has_pid_ns, "Non-network namespaces should remain");
+        }
+
+        #[test]
+        fn test_none_network_mode_ensures_network_namespace_present() {
+            let oci_spec = create_test_oci_spec();
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mount_point = temp_dir.path().join("mount");
+            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+            let package_volume = create_test_package_volume_real(&mount_point)
+                .expect("Failed to create test PackageVolume");
+
+            let security_config = ContainerSecurityConfig {
+                seccomp_policy: None,
+                mac_enabled: false,
+            };
+
+            let result = TransientRuntimeConfig::new(
+                &oci_spec,
+                &security_config,
+                NetworkMode::None,
+                "/sys/fs/cgroup/system.slice",
+                "test-none-net",
+                &package_volume,
+            );
+
+            assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+            let config = result.unwrap();
+            let config_file = config.dir_path().join("config.json");
+            let content = fs::read_to_string(&config_file).expect("Should read config file");
+            let config_json: serde_json::Value =
+                serde_json::from_str(&content).expect("Should parse config.json");
+
+            let linux = config_json.get("linux").expect("Should have linux section");
+            let namespaces = linux
+                .get("namespaces")
+                .and_then(|v| v.as_array())
+                .expect("None mode should create namespaces list");
+
+            let has_network_ns = namespaces.iter().any(|ns| {
+                ns.get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == "network")
+            });
+            assert!(
+                has_network_ns,
+                "None mode must ensure network namespace exists for isolation, got: {namespaces:?}"
+            );
+        }
+
+        #[test]
+        fn test_none_network_mode_does_not_duplicate_existing_namespace() {
+            let oci_spec = create_test_oci_spec_with_network_ns();
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mount_point = temp_dir.path().join("mount");
+            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+            let package_volume = create_test_package_volume_real(&mount_point)
+                .expect("Failed to create test PackageVolume");
+
+            let security_config = ContainerSecurityConfig {
+                seccomp_policy: None,
+                mac_enabled: false,
+            };
+
+            let result = TransientRuntimeConfig::new(
+                &oci_spec,
+                &security_config,
+                NetworkMode::None,
+                "/sys/fs/cgroup/system.slice",
+                "test-none-dup",
+                &package_volume,
+            );
+
+            assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+            let config = result.unwrap();
+            let config_file = config.dir_path().join("config.json");
+            let content = fs::read_to_string(&config_file).expect("Should read config file");
+            let config_json: serde_json::Value =
+                serde_json::from_str(&content).expect("Should parse config.json");
+
+            let linux = config_json.get("linux").expect("Should have linux section");
+            let namespaces = linux
+                .get("namespaces")
+                .and_then(|v| v.as_array())
+                .expect("Should have namespaces");
+
+            let network_ns_count = namespaces
+                .iter()
+                .filter(|ns| {
+                    ns.get("type")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t == "network")
+                })
+                .count();
+            assert_eq!(
+                network_ns_count, 1,
+                "Should not duplicate existing network namespace"
+            );
+        }
+
+        #[test]
+        fn test_bridge_network_mode_returns_error() {
+            let oci_spec = create_test_oci_spec();
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mount_point = temp_dir.path().join("mount");
+            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+            let package_volume = create_test_package_volume_real(&mount_point)
+                .expect("Failed to create test PackageVolume");
+
+            let security_config = ContainerSecurityConfig {
+                seccomp_policy: None,
+                mac_enabled: false,
+            };
+
+            let result = TransientRuntimeConfig::new(
+                &oci_spec,
+                &security_config,
+                NetworkMode::Bridge,
+                "/sys/fs/cgroup/system.slice",
+                "test-bridge-net",
+                &package_volume,
+            );
+
+            assert!(
+                result.is_err(),
+                "Bridge mode should return error since it's not implemented"
+            );
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("bridge network mode is not yet supported"),
+                "Error should indicate bridge is unsupported: {err_msg}"
+            );
         }
     }
 }

@@ -359,6 +359,13 @@ impl Package {
             .get_container_security_seccomp()
             .then(|| package_file.seccomp_policy());
 
+        let network_mode = metadata
+            .get_container_network_mode()
+            .map(|m| m.parse::<libssam::container::NetworkMode>())
+            .transpose()
+            .context("Invalid network mode in package config")?
+            .unwrap_or(libssam::container::NetworkMode::Host);
+
         let cgroups_path = executor::systemd::cgroups_path();
         let security_config = executor::oci::ContainerSecurityConfig {
             seccomp_policy,
@@ -367,6 +374,7 @@ impl Package {
         let runtime_config = executor::oci::TransientRuntimeConfig::new(
             package_file.runtime_config(),
             &security_config,
+            network_mode,
             cgroups_path,
             &pkg_name,
             pkg_volume,
