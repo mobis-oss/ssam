@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
-use clap::{Args, Parser};
+use clap::{Args, CommandFactory, FromArgMatches, Parser};
 use libssam::ssam_package::{PackageFile, PackageFilesystem};
 use libssam::superblock;
 use serde_json::Value;
@@ -53,7 +53,7 @@ struct Cli {
     )]
     prepare: Option<String>,
 
-    /// Specify package filesystem source
+    // Help message is set in main() at runtime
     #[arg(short = 's', long)]
     pkgfs_src: Option<String>,
 
@@ -210,7 +210,19 @@ impl Workspace {
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Cli::parse();
+    let supported_transports_help = format!(
+        "Specify package filesystem source.\nSupported container transports:\n{}",
+        pkgfs::SUPPORTED_CONTAINER_TRANSPORTS
+            .iter()
+            .map(|t| format!("  {t}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let args = Cli::from_arg_matches(
+        &Cli::command()
+            .mut_arg("pkgfs_src", |a| a.long_help(supported_transports_help))
+            .get_matches(),
+    )?;
     let workspace = Workspace::new(&args.workspace);
 
     // TODO

@@ -26,6 +26,18 @@ pub enum ImageType {
     ErofsLz4hc,
 }
 
+/* Part of Skopeo available transports are supported.
+Refer to the following for detail:
+- https://github.com/containers/image/blob/main/docs/containers-transports.5.md
+- https://man.archlinux.org/man/skopeo.1.en#IMAGE_NAMES */
+pub const SUPPORTED_CONTAINER_TRANSPORTS: &[&str] = &[
+    "docker://",
+    "docker-daemon:",
+    "docker-archive:",
+    "oci-archive:",
+    "oci:",
+];
+
 impl From<ImageType> for (&'static str, Vec<&'static str>) {
     fn from(image_type: ImageType) -> Self {
         match image_type {
@@ -90,7 +102,10 @@ pub fn prepare(workspace: &crate::Workspace, pkgfs_src: Option<&str>) -> anyhow:
                 .with_context(|| format!("Failed to remove pkgfs: {:#?}", workspace.pkgfs))?;
         }
 
-        if pkgfs_src.starts_with("docker://") || pkgfs_src.starts_with("docker-daemon:") {
+        if SUPPORTED_CONTAINER_TRANSPORTS
+            .iter()
+            .any(|prefix| pkgfs_src.starts_with(prefix))
+        {
             // If src is docker, creating pkgfs as a directory with the extracted rootfs
             docker::extract_rootfs(workspace, pkgfs_src)?;
         } else {
