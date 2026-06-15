@@ -49,6 +49,7 @@ pub enum PackagePhase {
     Parse,
     InitExecutor,
     Mount,
+    PrepareCommand,
     Start,
     Stop,
     Unmount,
@@ -116,23 +117,28 @@ impl PackageContext {
 #[derive(Debug)]
 struct ExecutorInitArgs {
     package_name: String,
-    command: Arc<dyn CommandArguments>,
     execution_type: executor::ExecutorType,
     state_sender: mpsc::Sender<ExecutionStatus>,
 }
 
 #[derive(Debug)]
 struct LazyExecutor {
+    command: Arc<dyn CommandArguments>,
     init_args: tokio::sync::RwLock<Option<ExecutorInitArgs>>,
     cell: tokio::sync::OnceCell<executor::PackageExecutor>,
 }
 
 impl LazyExecutor {
-    fn new(init_args: ExecutorInitArgs) -> Self {
+    fn new(command: Arc<dyn CommandArguments>, init_args: ExecutorInitArgs) -> Self {
         Self {
+            command,
             init_args: tokio::sync::RwLock::new(Some(init_args)),
             cell: tokio::sync::OnceCell::new(),
         }
+    }
+
+    fn command(&self) -> &Arc<dyn CommandArguments> {
+        &self.command
     }
 
     async fn get(&self) -> anyhow::Result<executor::PackageExecutor> {
@@ -146,14 +152,13 @@ impl LazyExecutor {
 
                     let ExecutorInitArgs {
                         package_name,
-                        command,
                         execution_type,
                         state_sender,
                     } = init_args;
 
                     executor::PackageExecutor::new(
                         package_name,
-                        command,
+                        self.command.clone(),
                         execution_type,
                         state_sender,
                     )
@@ -244,10 +249,22 @@ impl PackageTransitioner for DefaultPackageTransitioner {
             mount_result
         });
 
-        let (executor_result, mount_result) = tokio::try_join!(executor_handle, mount_handle)
-            .with_context(|| format!("{}: Cannot join the task on setup", self.package_name))?;
+        let command = Arc::clone(self.executor.command());
+        let prep_name = self.package_name.clone();
+        let prepare_handle = tokio::spawn(async move {
+            timeline_start(&prep_name, PackagePhase::PrepareCommand);
+            let r = command.prepare().await;
+            timeline_complete(&prep_name, PackagePhase::PrepareCommand);
+            r
+        });
+
+        let (executor_result, mount_result, prepare_result) =
+            tokio::try_join!(executor_handle, mount_handle, prepare_handle)
+                .with_context(|| format!("{}: Cannot join the task on setup", self.package_name))?;
         let _ = executor_result
             .with_context(|| format!("{}: Error on initialize LazyExecutor", self.package_name))?;
+        prepare_result
+            .with_context(|| format!("{}: Error on prepare container bundle", self.package_name))?;
 
         mount_result.with_context(|| format!("{}: Error on mount", self.package_name))
     }
@@ -355,33 +372,12 @@ impl Package {
         let package_file = context.package_file();
         let metadata = package_file.metadata();
 
-        let seccomp_policy = metadata
-            .get_container_security_seccomp()
-            .then(|| package_file.seccomp_policy());
-
-        let network_mode = metadata
-            .get_container_network_mode()
-            .map(|m| m.parse::<libssam::container::NetworkMode>())
-            .transpose()
-            .context("Invalid network mode in package config")?
-            .unwrap_or(libssam::container::NetworkMode::Host);
-
-        let cgroups_path = executor::systemd::cgroups_path();
-        let security_config = executor::oci::ContainerSecurityConfig {
-            seccomp_policy,
-            mac_enabled: *metadata.get_container_security_mac(),
-        };
-        let runtime_config = executor::oci::TransientRuntimeConfig::new(
-            package_file.runtime_config(),
-            &security_config,
-            network_mode,
-            cgroups_path,
-            &pkg_name,
+        let command: Arc<dyn CommandArguments> = Arc::new(ContainerCommand::from_package(
+            pkg_name.clone(),
+            ContainerRuntime::CRun,
+            package_file,
             pkg_volume,
-        )?;
-
-        let command =
-            ContainerCommand::new(pkg_name.clone(), ContainerRuntime::CRun, runtime_config);
+        )?);
 
         let service_info = executor::systemd::ServiceInfo::new_from_metadata(metadata)?;
 
@@ -389,12 +385,11 @@ impl Package {
 
         let init_args = ExecutorInitArgs {
             package_name: pkg_name.clone(),
-            command: Arc::new(command),
             execution_type,
             state_sender: sender,
         };
 
-        let executor = Arc::new(LazyExecutor::new(init_args));
+        let executor = Arc::new(LazyExecutor::new(command, init_args));
 
         let pkgfs_handle = pkg_volume.packagefs();
         let ops = DefaultPackageTransitioner::new(pkg_name.clone(), executor, pkgfs_handle);

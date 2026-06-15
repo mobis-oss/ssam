@@ -111,6 +111,9 @@ impl TransitionHandler for ToSettingUp {
             Ok(()) => PackageStatus::Ready,
             Err(e) => {
                 log::warn!("Package setup failed: {e}");
+                if let Err(ce) = ops.cleanup().await {
+                    log::warn!("Compensation cleanup after setup failure also failed: {ce:#}");
+                }
                 PackageStatus::Error(format!("{e:#}"))
             }
         };

@@ -77,8 +77,6 @@ pub(crate) mod oci {
     };
     use tempfile::TempDir;
 
-    use crate::package_volume::PackageVolume;
-
     /// Represents the host architecture mapped to seccomp architecture constants.
     /// Maps `std::env::consts::ARCH` values to corresponding `SCMP_ARCH_*` values.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,27 +139,28 @@ pub(crate) mod oci {
         ///
         /// # Arguments
         ///
-        /// * `oci_runtime_conf_tmpl` - The template OCI runtime specification.
+        /// * `oci_template` - The template OCI runtime specification.
         /// * `security_config` - The container security configuration.
         /// * `cgroups_path` - The base path for cgroups.
         /// * `package_name` - The name of the package.
-        /// * `pkg_volume` - The package volume containing mount point and data directory information.
+        /// * `mount_point` - The package rootfs mount point.
+        /// * `data_mounts` - The package data root and container destination paths.
         pub(crate) fn new(
-            oci_runtime_conf_tmpl: &oci_spec::runtime::Spec,
+            oci_template: oci_spec::runtime::Spec,
             security_config: &ContainerSecurityConfig,
             network_mode: NetworkMode,
             cgroups_path: &str,
             package_name: &str,
-            pkg_volume: &PackageVolume,
+            mount_point: &Path,
+            data_mounts: Option<&DataMountPaths>,
         ) -> anyhow::Result<Self> {
             let path = tempfile::tempdir().context("Failed to create temporary directory")?;
 
-            let mount_point = pkg_volume.get_mount_point();
             // just absolutize the rootfs path. the rootfs might not be mounted yet.
             let rootfs_path = std::path::absolute(mount_point).with_context(|| {
                 format!("Unable to absoluteize rootfs directory of {package_name}")
             })?;
-            let mut oci_runtime_conf = oci_runtime_conf_tmpl.clone();
+            let mut oci_runtime_conf = oci_template;
 
             let linux = oci_runtime_conf.linux_mut().get_or_insert(Linux::default());
 
@@ -198,11 +197,9 @@ pub(crate) mod oci {
                 .context("Failed to build OCI root configuration")?;
             oci_runtime_conf.set_root(Some(r));
 
-            if let Some((data_root, data_dirs)) = pkg_volume
-                .data_directory()
-                .and_then(|data_dir| data_dir.data_dirs().map(|dirs| (data_dir.path(), dirs)))
-            {
-                match Self::make_bind_mounts(data_root, data_dirs) {
+            if let Some(data_mounts) = data_mounts {
+                let dirs: Vec<&Path> = data_mounts.dirs.iter().map(PathBuf::as_path).collect();
+                match Self::make_bind_mounts(&data_mounts.root, dirs) {
                     Ok(bind_mounts) => {
                         for mnt in bind_mounts {
                             Self::append_mount(&mut oci_runtime_conf, mnt);
@@ -412,6 +409,62 @@ pub(crate) mod oci {
             self.path.path()
         }
     }
+
+    /// Owned snapshot of all inputs needed to create a container OCI bundle.
+    /// No file I/O. Clone-able so it can be moved to a blocking thread.
+    #[derive(Debug, Clone)]
+    pub(crate) struct ContainerBundleSpec {
+        pub(crate) oci_template: oci_spec::runtime::Spec,
+        pub(crate) seccomp_policy: Option<PackageSeccompPolicy>,
+        pub(crate) mac_enabled: bool,
+        pub(crate) network_mode: NetworkMode,
+        pub(crate) cgroups_path: String,
+        pub(crate) package_name: String,
+        pub(crate) mount_point: PathBuf,
+        pub(crate) data_mounts: Option<DataMountPaths>,
+    }
+
+    use crate::package_volume::{DataDirectory, QuotaEntryBackend};
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct DataMountPaths {
+        pub(crate) root: PathBuf,
+        pub(crate) dirs: Vec<PathBuf>,
+    }
+
+    impl DataMountPaths {
+        pub(crate) fn new<T: QuotaEntryBackend>(data_dir: &DataDirectory<T>) -> Self {
+            Self {
+                root: data_dir.path().to_path_buf(),
+                dirs: data_dir
+                    .data_dirs()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Path::to_path_buf)
+                    .collect(),
+            }
+        }
+    }
+
+    impl ContainerBundleSpec {
+        /// Synchronous file I/O. Must be called inside `spawn_blocking`.
+        pub(crate) fn into_runtime_config(self) -> anyhow::Result<TransientRuntimeConfig> {
+            let seccomp_policy = self.seccomp_policy;
+            let security = ContainerSecurityConfig {
+                seccomp_policy: seccomp_policy.as_ref(),
+                mac_enabled: self.mac_enabled,
+            };
+            TransientRuntimeConfig::new(
+                self.oci_template,
+                &security,
+                self.network_mode,
+                &self.cgroups_path,
+                &self.package_name,
+                self.mount_point.as_path(),
+                self.data_mounts.as_ref(),
+            )
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -421,52 +474,119 @@ pub(crate) trait CommandExecutorBackend: Send + Sync + std::fmt::Debug {
     async fn teardown(&self) -> anyhow::Result<()>;
 }
 
+#[async_trait::async_trait]
 pub(crate) trait CommandArguments: Send + Sync + std::fmt::Debug {
     fn get_start_args(&self) -> anyhow::Result<Vec<String>>;
     fn get_stop_args(&self) -> anyhow::Result<Vec<String>>;
+    async fn prepare(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) mod container {
+    use anyhow::Context as _;
+    use libssam::ssam_package::PackageFile;
+
+    use crate::package_volume::PackageVolume;
+
     use super::{CommandArguments, ContainerRuntime, oci};
+
     #[derive(Debug)]
     pub(crate) struct ContainerCommand {
         name: String,
         runtime: ContainerRuntime,
-        runtime_config: oci::TransientRuntimeConfig,
+        spec: oci::ContainerBundleSpec,
+        runtime_config: tokio::sync::OnceCell<oci::TransientRuntimeConfig>,
     }
 
     impl ContainerCommand {
         pub(crate) fn new(
             name: String,
             runtime: ContainerRuntime,
-            runtime_config: oci::TransientRuntimeConfig,
+            spec: oci::ContainerBundleSpec,
         ) -> Self {
             Self {
                 name,
                 runtime,
-                runtime_config,
+                spec,
+                runtime_config: tokio::sync::OnceCell::new(),
             }
         }
 
-        // Add a method to access runtime_config for testing
+        /// Constructs a `ContainerCommand` from package metadata and volume.
+        /// Extracts OCI config, security settings, network mode, and data paths.
+        pub(crate) fn from_package(
+            name: String,
+            runtime: ContainerRuntime,
+            package_file: &PackageFile,
+            pkg_volume: &PackageVolume,
+        ) -> anyhow::Result<Self> {
+            let metadata = package_file.metadata();
+
+            let seccomp_policy = metadata
+                .get_container_security_seccomp()
+                .then(|| package_file.seccomp_policy().clone());
+
+            let network_mode = metadata
+                .get_container_network_mode()
+                .map(|m| m.parse::<libssam::container::NetworkMode>())
+                .transpose()
+                .context("Invalid network mode in package config")?
+                .unwrap_or(libssam::container::NetworkMode::Host);
+
+            let cgroups_path = super::systemd::cgroups_path().to_owned();
+
+            let data_mounts = pkg_volume.data_directory().map(oci::DataMountPaths::new);
+
+            // Deref coercion: &PackageRuntimeConfig → &Box<Spec> → &Spec
+            let oci_runtime_spec: &oci_spec::runtime::Spec = package_file.runtime_config();
+
+            let spec = oci::ContainerBundleSpec {
+                oci_template: oci_runtime_spec.clone(),
+                seccomp_policy,
+                mac_enabled: *metadata.get_container_security_mac(),
+                network_mode,
+                cgroups_path,
+                package_name: name.clone(),
+                mount_point: pkg_volume.get_mount_point().to_path_buf(),
+                data_mounts,
+            };
+
+            Ok(Self::new(name, runtime, spec))
+        }
+
         #[cfg(test)]
-        pub(crate) fn runtime_config(&self) -> &oci::TransientRuntimeConfig {
+        pub(crate) fn runtime_config(&self) -> &tokio::sync::OnceCell<oci::TransientRuntimeConfig> {
             &self.runtime_config
         }
     }
 
+    #[async_trait::async_trait]
     impl CommandArguments for ContainerCommand {
-        fn get_start_args(&self) -> anyhow::Result<Vec<String>> {
-            let path = self.runtime_config.dir_path();
+        async fn prepare(&self) -> anyhow::Result<()> {
+            self.runtime_config
+                .get_or_try_init(|| async {
+                    let spec = self.spec.clone();
+                    tokio::task::spawn_blocking(move || spec.into_runtime_config())
+                        .await
+                        .context("join container bundle preparation task")?
+                })
+                .await?;
+            Ok(())
+        }
 
+        fn get_start_args(&self) -> anyhow::Result<Vec<String>> {
+            let path = self
+                .runtime_config
+                .get()
+                .context("not prepared")?
+                .dir_path();
             if !path.exists() {
                 anyhow::bail!("Bundle path does not exist: {}", path.display());
             }
-
             let bundle_path = path
                 .to_str()
-                .ok_or(anyhow::anyhow!("Invalid bundle path: {}", path.display()))?;
-
+                .ok_or_else(|| anyhow::anyhow!("Invalid bundle path: {}", path.display()))?;
             Ok(vec![
                 self.runtime.to_string(),
                 "run".to_owned(),
@@ -491,7 +611,7 @@ pub(crate) mod systemd;
 
 #[cfg(test)]
 mod tests {
-    use super::oci::{ContainerSecurityConfig, TransientRuntimeConfig};
+    use super::oci::{ContainerSecurityConfig, DataMountPaths, TransientRuntimeConfig};
     use crate::package_volume::{DataDirectory, PackageVolume};
     use libssam::ssam_package::PackageSeccompPolicy;
     use oci_spec::runtime::{LinuxBuilder, ProcessBuilder, RootBuilder, Spec};
@@ -577,12 +697,13 @@ mod tests {
 
         // Call the ACTUAL TransientRuntimeConfig::new function
         let result = TransientRuntimeConfig::new(
-            &oci_spec,
+            oci_spec,
             &security_config,
             libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package",
-            &package_volume,
+            package_volume.get_mount_point(),
+            None,
         );
 
         assert!(
@@ -643,14 +764,17 @@ mod tests {
             mac_enabled: true,
         };
 
+        let data_mounts = package_volume.data_directory().map(DataMountPaths::new);
+
         // Call the ACTUAL TransientRuntimeConfig::new function
         let result = TransientRuntimeConfig::new(
-            &oci_spec,
+            oci_spec,
             &security_config,
             libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package",
-            &package_volume,
+            package_volume.get_mount_point(),
+            data_mounts.as_ref(),
         );
 
         assert!(
@@ -694,12 +818,13 @@ mod tests {
 
         // Call TransientRuntimeConfig::new with seccomp_policy = None
         let result = TransientRuntimeConfig::new(
-            &oci_spec,
+            oci_spec,
             &security_config,
             libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package-no-seccomp",
-            &package_volume,
+            package_volume.get_mount_point(),
+            None,
         );
 
         assert!(
@@ -743,12 +868,13 @@ mod tests {
 
         // Call TransientRuntimeConfig::new with seccomp_policy = Some
         let result = TransientRuntimeConfig::new(
-            &oci_spec,
+            oci_spec,
             &security_config,
             libssam::container::NetworkMode::None,
             "/sys/fs/cgroup/system.slice",
             "test-package-with-seccomp",
-            &package_volume,
+            package_volume.get_mount_point(),
+            None,
         );
 
         assert!(
@@ -811,35 +937,26 @@ mod tests {
         use crate::executor::{CommandArguments, ContainerRuntime};
 
         fn create_test_container_command() -> ContainerCommand {
+            use crate::executor::oci::ContainerBundleSpec;
             let oci_spec = create_test_oci_spec();
             let seccomp_policy = create_test_seccomp_policy();
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-            let package_volume = create_test_package_volume_real(&mount_point)
-                .expect("Failed to create test PackageVolume");
-
-            let security_config = ContainerSecurityConfig {
-                seccomp_policy: Some(&seccomp_policy),
+            let spec = ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: Some(seccomp_policy),
                 mac_enabled: true,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-container".to_owned(),
+                mount_point,
+                data_mounts: None,
             };
-
-            let runtime_config = TransientRuntimeConfig::new(
-                &oci_spec,
-                &security_config,
-                libssam::container::NetworkMode::None,
-                "/sys/fs/cgroup/system.slice",
-                "test-container",
-                &package_volume,
-            )
-            .expect("Failed to create runtime config");
-
-            ContainerCommand::new(
-                "test-container".to_string(),
-                ContainerRuntime::CRun,
-                runtime_config,
-            )
+            // temp_dir drops here but mount_point PathBuf is copied into spec.
+            // std::path::absolute() does not require path to exist on disk.
+            ContainerCommand::new("test-container".to_string(), ContainerRuntime::CRun, spec)
         }
 
         #[test]
@@ -851,21 +968,20 @@ mod tests {
             assert!(format!("{executor:?}").contains("CRun"));
         }
 
-        #[test]
-        fn test_container_command_get_start_args() {
+        #[tokio::test]
+        async fn test_container_command_get_start_args() {
             let executor = create_test_container_command();
+
+            executor.prepare().await.expect("prepare should succeed");
 
             let start_args = executor.get_start_args().expect("Should get start args");
 
-            // Verify the start command structure
             assert_eq!(start_args.len(), 5);
             assert_eq!(start_args[0], "/usr/bin/crun");
             assert_eq!(start_args[1], "run");
             assert_eq!(start_args[2], "--bundle");
-            // start_args[3] is the bundle path
             assert_eq!(start_args[4], "test-container");
 
-            // Verify the bundle path exists (it should be created by TransientRuntimeConfig)
             let bundle_path = Path::new(&start_args[3]);
             assert!(
                 bundle_path.exists(),
@@ -887,57 +1003,89 @@ mod tests {
             assert_eq!(stop_args[3], "test-container");
         }
 
-        #[test]
-        fn test_container_command_get_start_args_bundle_not_exists() {
-            // Create a ContainerExecutor with a TransientRuntimeConfig that points to a non-existent path
-            let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let mount_point = temp_dir.path().join("mount");
-            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        #[tokio::test]
+        async fn test_container_command_get_start_args_bundle_not_exists() {
+            let executor = create_test_container_command();
 
-            let package_volume = create_test_package_volume_real(&mount_point)
-                .expect("Failed to create test PackageVolume");
+            executor.prepare().await.expect("prepare should succeed");
 
-            let oci_spec = create_test_oci_spec();
-            let seccomp_policy = create_test_seccomp_policy();
-            let security_config = ContainerSecurityConfig {
-                seccomp_policy: Some(&seccomp_policy),
-                mac_enabled: true,
-            };
-
-            let runtime_config = TransientRuntimeConfig::new(
-                &oci_spec,
-                &security_config,
-                libssam::container::NetworkMode::None,
-                "/sys/fs/cgroup/system.slice",
-                "test-container",
-                &package_volume,
-            )
-            .expect("Failed to create runtime config");
-
-            let executor = ContainerCommand::new(
-                "test-container".to_string(),
-                ContainerRuntime::CRun,
-                runtime_config,
-            );
-
-            // Remove the bundle directory to simulate error condition
-            let bundle_path = executor.runtime_config().dir_path();
+            let bundle_path = executor
+                .runtime_config()
+                .get()
+                .expect("bundle should be prepared")
+                .dir_path()
+                .to_path_buf();
             if bundle_path.exists() {
-                fs::remove_dir_all(bundle_path).expect("Failed to remove bundle dir");
+                fs::remove_dir_all(&bundle_path).expect("Failed to remove bundle dir");
             }
 
-            // Should return an error when bundle path doesn't exist
             let result = executor.get_start_args();
             assert!(
                 result.is_err(),
                 "Should fail when bundle path doesn't exist"
             );
-
             let error_msg = result.unwrap_err().to_string();
             assert!(
                 error_msg.contains("Bundle path does not exist"),
                 "Error should mention bundle path: {error_msg}"
             );
+        }
+
+        #[test]
+        fn test_container_command_unprepared_get_start_args_error() {
+            let executor = create_test_container_command();
+
+            let result = executor.get_start_args();
+
+            assert!(result.is_err(), "Should fail before prepare");
+            let error_msg = result.unwrap_err().to_string();
+            assert!(
+                error_msg.contains("not prepared"),
+                "Error should mention preparation state: {error_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_container_command_prepare_idempotent() {
+            let executor = create_test_container_command();
+
+            executor
+                .prepare()
+                .await
+                .expect("first prepare should succeed");
+            let first_path = executor
+                .runtime_config()
+                .get()
+                .expect("bundle should be prepared")
+                .dir_path()
+                .to_path_buf();
+
+            executor
+                .prepare()
+                .await
+                .expect("second prepare should succeed");
+            let second_path = executor
+                .runtime_config()
+                .get()
+                .expect("bundle should stay prepared")
+                .dir_path()
+                .to_path_buf();
+
+            assert_eq!(first_path, second_path);
+        }
+
+        #[tokio::test]
+        async fn test_container_command_prepared_get_start_args_valid() {
+            let executor = create_test_container_command();
+
+            executor.prepare().await.expect("prepare should succeed");
+            let start_args = executor.get_start_args().expect("Should get start args");
+
+            assert_eq!(start_args[0], "/usr/bin/crun");
+            assert_eq!(start_args[1], "run");
+            assert_eq!(start_args[2], "--bundle");
+            assert!(Path::new(&start_args[3]).exists());
+            assert_eq!(start_args[4], "test-container");
         }
 
         #[test]
@@ -955,7 +1103,7 @@ mod tests {
             assert!(debug_str.contains("ContainerCommand"));
             assert!(debug_str.contains("test-container"));
             assert!(debug_str.contains("CRun"));
-            assert!(debug_str.contains("TransientRuntimeConfig"));
+            assert!(debug_str.contains("ContainerBundleSpec"));
         }
     }
 
@@ -1272,12 +1420,13 @@ mod tests {
             };
 
             let result = TransientRuntimeConfig::new(
-                &oci_spec,
+                oci_spec,
                 &security_config,
                 NetworkMode::Host,
                 "/sys/fs/cgroup/system.slice",
                 "test-host-net",
-                &package_volume,
+                package_volume.get_mount_point(),
+                None,
             );
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
@@ -1327,12 +1476,13 @@ mod tests {
             };
 
             let result = TransientRuntimeConfig::new(
-                &oci_spec,
+                oci_spec,
                 &security_config,
                 NetworkMode::None,
                 "/sys/fs/cgroup/system.slice",
                 "test-none-net",
-                &package_volume,
+                package_volume.get_mount_point(),
+                None,
             );
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
@@ -1375,12 +1525,13 @@ mod tests {
             };
 
             let result = TransientRuntimeConfig::new(
-                &oci_spec,
+                oci_spec,
                 &security_config,
                 NetworkMode::None,
                 "/sys/fs/cgroup/system.slice",
                 "test-none-dup",
-                &package_volume,
+                package_volume.get_mount_point(),
+                None,
             );
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
@@ -1426,12 +1577,13 @@ mod tests {
             };
 
             let result = TransientRuntimeConfig::new(
-                &oci_spec,
+                oci_spec,
                 &security_config,
                 NetworkMode::Bridge,
                 "/sys/fs/cgroup/system.slice",
                 "test-bridge-net",
-                &package_volume,
+                package_volume.get_mount_point(),
+                None,
             );
 
             assert!(

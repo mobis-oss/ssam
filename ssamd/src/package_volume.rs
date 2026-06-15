@@ -4,7 +4,9 @@
 mod data_directory;
 mod package_fs;
 
-pub(crate) use data_directory::{DataDirMetadata, DataDirectoryManager, Ext4Quota, QuotaInfo};
+pub(crate) use data_directory::{
+    DataDirMetadata, DataDirectoryManager, Ext4Quota, QuotaEntryBackend, QuotaInfo,
+};
 pub use data_directory::{DataDirectory, DefaultQuotaEntryBackend};
 
 pub(crate) use package_fs::{
