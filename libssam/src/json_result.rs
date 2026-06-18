@@ -212,7 +212,10 @@ mod tests {
                         seccomp: true,
                         mac: true,
                     },
-                    network: crate::config::Network { mode: None },
+                    network: crate::config::Network {
+                        mode: None,
+                        interface_name: None,
+                    },
                 },
                 service: crate::config::Service {
                     service_type: "notify".to_string(),
@@ -695,7 +698,10 @@ mod tests {
                         seccomp: false,
                         mac: false,
                     },
-                    network: crate::config::Network { mode: None },
+                    network: crate::config::Network {
+                        mode: None,
+                        interface_name: None,
+                    },
                 },
                 service: crate::config::Service {
                     service_type: "simple".to_string(),

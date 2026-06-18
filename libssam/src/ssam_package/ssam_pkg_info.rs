@@ -161,7 +161,10 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: Network { mode: None },
+                network: Network {
+                    mode: None,
+                    interface_name: None,
+                },
             },
             service: Service {
                 service_type: "notify".to_string(),
@@ -269,7 +272,10 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: Network { mode: None },
+                network: Network {
+                    mode: None,
+                    interface_name: None,
+                },
             },
             service: Service {
                 service_type: "notify".to_string(),

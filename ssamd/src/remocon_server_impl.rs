@@ -483,7 +483,10 @@ pub(crate) mod tests {
                             seccomp: true,
                             mac: true,
                         },
-                        network: libssam::config::Network { mode: None },
+                        network: libssam::config::Network {
+                            mode: None,
+                            interface_name: None,
+                        },
                     },
                     service: libssam::config::Service {
                         service_type: "notify".to_string(),
@@ -934,7 +937,10 @@ pub(crate) mod tests {
                             seccomp: true,
                             mac: true,
                         },
-                        network: libssam::config::Network { mode: None },
+                        network: libssam::config::Network {
+                            mode: None,
+                            interface_name: None,
+                        },
                     },
                     service: libssam::config::Service {
                         service_type: "notify".to_string(),
@@ -999,7 +1005,10 @@ pub(crate) mod tests {
                             seccomp: true,
                             mac: true,
                         },
-                        network: libssam::config::Network { mode: None },
+                        network: libssam::config::Network {
+                            mode: None,
+                            interface_name: None,
+                        },
                     },
                     service: libssam::config::Service {
                         service_type: "notify".to_string(),
@@ -1067,7 +1076,10 @@ pub(crate) mod tests {
                             seccomp: true,
                             mac: true,
                         },
-                        network: libssam::config::Network { mode: None },
+                        network: libssam::config::Network {
+                            mode: None,
+                            interface_name: None,
+                        },
                     },
                     service: libssam::config::Service {
                         service_type: "notify".to_string(),
@@ -1259,7 +1271,10 @@ pub(crate) mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: libssam::config::Network { mode: None },
+                network: libssam::config::Network {
+                    mode: None,
+                    interface_name: None,
+                },
             },
             service: libssam::config::Service {
                 service_type: "simple".to_string(),
@@ -1565,7 +1580,10 @@ pub(crate) mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: libssam::config::Network { mode: None },
+                network: libssam::config::Network {
+                    mode: None,
+                    interface_name: None,
+                },
             },
             service: libssam::config::Service {
                 service_type: "simple".to_string(),
@@ -1764,7 +1782,10 @@ pub(crate) mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: libssam::config::Network { mode: None },
+                network: libssam::config::Network {
+                    mode: None,
+                    interface_name: None,
+                },
             },
             service: libssam::config::Service {
                 service_type: "forking".to_string(),
@@ -1839,7 +1860,10 @@ pub(crate) mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: libssam::config::Network { mode: None },
+                network: libssam::config::Network {
+                    mode: None,
+                    interface_name: None,
+                },
             },
             service: libssam::config::Service {
                 service_type: "oneshot".to_string(),

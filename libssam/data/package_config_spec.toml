@@ -17,7 +17,9 @@ mac = true # default is true
 
 [container.network]
 #:Opt:# container.network.mode
-mode = "host"
+mode = "host" # one of: host | bridge | none
+#:Opt:# container.network.interface_name
+interface_name = "eth0" # bridge mode only; ignored for host/none networking
 
 [service]
 service_type = "simple"
