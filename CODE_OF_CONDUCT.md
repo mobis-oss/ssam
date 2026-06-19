@@ -50,7 +50,7 @@ Examples of representing our community include:
 ## Enforcement
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to:
 
-📧 MOBIS_OSSrequest@mobis.com  
+📧 oss@mobis.com  
 
 All complaints will be reviewed and investigated promptly and fairly.
 
