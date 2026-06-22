@@ -8,6 +8,7 @@ mod dm;
 mod executor;
 pub mod ext4quota;
 pub(crate) mod mount;
+pub mod network;
 pub mod package;
 pub mod package_manager;
 pub mod package_volume;

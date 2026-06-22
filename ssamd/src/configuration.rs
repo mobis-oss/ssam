@@ -53,6 +53,23 @@ pub(crate) struct Common {
     pub(crate) rpc_bind_ip: Option<String>,
 }
 
+/// Daemon-global network configuration, parsed from the optional `[network]` TOML section
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkConfig {
+    /// Whether the daemon-managed bridge network is enabled. Gates only bridge
+    /// networking; host/none container network modes work regardless.
+    pub bridge_enabled: bool,
+
+    /// Linux bridge interface name (e.g. "ssam-br0")
+    pub bridge_name: String,
+
+    /// IPv4 subnet in CIDR notation (e.g. "172.20.0.0/16")
+    pub subnet: String,
+
+    /// Gateway address assigned to the bridge interface
+    pub gateway: std::net::Ipv4Addr,
+}
+
 /// Runtime configuration structure for TOML file
 #[derive(Debug, Clone, Deserialize)]
 struct RuntimeConfig {
