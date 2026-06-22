@@ -31,8 +31,9 @@ To address these limitations, a high-performance, security-enhanced container so
 ## Requirements
 
 ### Runtime requirements
-- Linux kernel: dm-verity, container, erofs, and ext4 project quota configurations required
+- Linux kernel: dm-verity, container, erofs, ext4 project quota, bridge networking (`bridge`/`veth`/network namespaces), and netfilter NAT (`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`) configurations required
 - OCI runtime: Tested with [`crun`](https://github.com/containers/crun).
+- Bridge network mode (`[container.network] mode = "bridge"`): [`nft`](https://www.netfilter.org/projects/nftables/) (nftables) required.
 
 ### Build requirements
 - Rust 1.88.0+ (2024 edition)

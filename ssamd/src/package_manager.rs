@@ -1,6 +1,7 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::network::NetworkManager;
 use crate::package::{Package, PackageStatus};
 use crate::package_manager::message::{
     GetAllPackageInfo, GetPackage, GetPackageInfo, GetPackageNames, GetPackagesStatus,
@@ -164,13 +165,36 @@ struct InstallInfo {
 }
 
 impl PackageManagerActor {
+    /// Build the manager from daemon configuration, creating the bridge
+    /// `NetworkManager` only when `[network] bridge_enabled` is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the network manager fails to initialize or if
+    /// [`Self::new`] fails.
+    pub async fn from_config(
+        bundled_dir_str: &str,
+        downloaded_dir_str: &str,
+    ) -> anyhow::Result<Self> {
+        let network = crate::configuration::network_config()
+            .filter(|c| c.bridge_enabled)
+            .map(NetworkManager::new)
+            .transpose()
+            .context("Failed to initialize NetworkManager from [network] config")?;
+        Self::new(bundled_dir_str, downloaded_dir_str, network).await
+    }
+
     /// # Errors
     ///
     /// Returns an error if the directory paths cannot be canonicalized, if both
     /// directories resolve to the same path, or if loading packages fails.
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
     #[allow(clippy::unnecessary_debug_formatting)]
-    pub async fn new(bundled_dir_str: &str, downloaded_dir_str: &str) -> anyhow::Result<Self> {
+    pub async fn new(
+        bundled_dir_str: &str,
+        downloaded_dir_str: &str,
+        network: Option<NetworkManager>,
+    ) -> anyhow::Result<Self> {
         // Canonical paths ensure that is_bundled_package() performs reliable
         // path comparisons even when the configuration contains symlinks.
         let bundled_dir = Path::new(bundled_dir_str)
@@ -189,7 +213,8 @@ impl PackageManagerActor {
         let package_store = PackageStore::new(HashMapPackageStore::new());
 
         let volume_manager_ref = spawn_with::<PackageVolumeManagerActor>(());
-        let actor = PackageTransactionActor::new(volume_manager_ref, DefaultPackageFileBackend);
+        let actor =
+            PackageTransactionActor::new(volume_manager_ref, DefaultPackageFileBackend, network);
         let transaction_actor = spawn_with::<PackageTransactionActor>(actor);
 
         let pm = PackageManagerActor {
@@ -861,7 +886,7 @@ impl PackageManagerActor {
     ) -> Self {
         let package_store = PackageStore::new(HashMapPackageStore::new());
         let (volume_manager_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(());
-        let actor = PackageTransactionActor::new(volume_manager_ref, fs_ops);
+        let actor = PackageTransactionActor::new(volume_manager_ref, fs_ops, None);
         let (transaction_actor, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         PackageManagerActor {
             bundled_dir,
@@ -1173,6 +1198,7 @@ mod tests {
             let actor = PackageManagerActor::new(
                 bundled_dir.path().to_str().unwrap(),
                 downloaded_dir.path().to_str().unwrap(),
+                None,
             )
             .await
             .expect("PackageManagerActor creation should succeed with empty dirs");

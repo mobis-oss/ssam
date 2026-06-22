@@ -6,11 +6,13 @@ use std::sync::Arc;
 
 use crate::executor::container::ContainerCommand;
 use crate::executor::{self, CommandArguments, ContainerRuntime, ExecutionResult, ExecutionStatus};
+use crate::network::NetworkManager;
 use crate::package_volume::messages::GetQuotaInfo;
 use crate::package_volume::{PackageFsBackend, PackageVolume, PackageVolumeManagerActor};
 use crate::utils::{timeline_complete, timeline_start};
 
 use anyhow::Context as _;
+use libssam::container::NetworkMode;
 use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{self, BrokenReason};
 use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
@@ -190,6 +192,8 @@ struct DefaultPackageTransitioner {
     package_name: String,
     executor: Arc<LazyExecutor>,
     pkgfs_handle: Arc<dyn PackageFsBackend>,
+    network: Option<NetworkManager>,
+    container_interface: String,
 }
 
 impl DefaultPackageTransitioner {
@@ -197,12 +201,20 @@ impl DefaultPackageTransitioner {
         package_name: String,
         executor: Arc<LazyExecutor>,
         pkgfs_handle: Arc<dyn PackageFsBackend>,
+        network: Option<NetworkManager>,
+        container_interface: String,
     ) -> Self {
         Self {
             package_name,
             executor,
             pkgfs_handle,
+            network,
+            container_interface,
         }
+    }
+
+    fn bridge_network(&self) -> Option<&NetworkManager> {
+        self.network.as_ref()
     }
 }
 
@@ -258,19 +270,50 @@ impl PackageTransitioner for DefaultPackageTransitioner {
             r
         });
 
-        let (executor_result, mount_result, prepare_result) =
-            tokio::try_join!(executor_handle, mount_handle, prepare_handle)
+        let netns_net = self.bridge_network().cloned();
+        let netns_pkg = self.package_name.clone();
+        let netns_iface = self.container_interface.clone();
+        let netns_handle = tokio::spawn(async move {
+            match netns_net {
+                Some(net) => {
+                    net.create_netns(&netns_pkg).await?;
+                    net.attach(&netns_pkg, &netns_iface).await.map(|_| ())
+                }
+                None => Ok(()),
+            }
+        });
+
+        let (executor_result, mount_result, prepare_result, netns_result) =
+            tokio::try_join!(executor_handle, mount_handle, prepare_handle, netns_handle)
                 .with_context(|| format!("{}: Cannot join the task on setup", self.package_name))?;
         let _ = executor_result
             .with_context(|| format!("{}: Error on initialize LazyExecutor", self.package_name))?;
         prepare_result
             .with_context(|| format!("{}: Error on prepare container bundle", self.package_name))?;
+        netns_result
+            .with_context(|| format!("{}: Error on attach bridge network", self.package_name))?;
 
         mount_result.with_context(|| format!("{}: Error on mount", self.package_name))
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {
         log::debug!("Cleaning up package {}", self.package_name);
+
+        if let Some(net) = self.bridge_network() {
+            let _ = net.detach(&self.package_name).await.inspect_err(|e| {
+                log::warn!("{}: detach during cleanup failed: {e:#}", self.package_name);
+            });
+            let _ = net
+                .destroy_netns(&self.package_name)
+                .await
+                .inspect_err(|e| {
+                    log::warn!(
+                        "{}: destroy_netns during cleanup failed: {e:#}",
+                        self.package_name
+                    );
+                });
+        }
+
         timeline_start(&self.package_name, PackagePhase::Unmount);
         let result = self
             .pkgfs_handle
@@ -284,6 +327,7 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         let pkg_name = self.package_name.as_str();
         log::debug!("Starting package {pkg_name}");
         timeline_start(&self.package_name, PackagePhase::Start);
+
         let executor = self.executor.get().await?;
         let result = executor.start().await;
 
@@ -315,6 +359,26 @@ impl PackageTransitioner for DefaultPackageTransitioner {
                 "{}: executor teardown failed (continuing with unmount): {e:#}",
                 self.package_name
             );
+        }
+
+        // Unconditional: teardown only runs on remove/shutdown, and a leftover
+        // netns/veth would collide with a reinstall or fresh daemon start.
+        if let Some(net) = self.bridge_network() {
+            let _ = net.detach(&self.package_name).await.inspect_err(|e| {
+                log::warn!(
+                    "{}: detach during teardown failed: {e:#}",
+                    self.package_name
+                );
+            });
+            let _ = net
+                .destroy_netns(&self.package_name)
+                .await
+                .inspect_err(|e| {
+                    log::warn!(
+                        "{}: destroy_netns during teardown failed: {e:#}",
+                        self.package_name
+                    );
+                });
         }
 
         self.pkgfs_handle
@@ -364,6 +428,7 @@ impl Package {
         context: PackageContext,
         pkg_volume: &PackageVolume,
         volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
+        network: Option<NetworkManager>,
     ) -> anyhow::Result<Self> {
         let (sender, mut receiver) = mpsc::channel(8);
 
@@ -372,12 +437,47 @@ impl Package {
         let package_file = context.package_file();
         let metadata = package_file.metadata();
 
+        // Authoritative network-mode parse: resolved once here and passed to both
+        // the container command and the transitioner so they never diverge.
+        let mut network_mode = metadata
+            .get_container_network_mode()
+            .map(|m| m.parse::<NetworkMode>())
+            .transpose()
+            .context("Invalid network mode in package config")?
+            .unwrap_or(NetworkMode::Host);
+
+        let container_interface = metadata.get_container_network_interface_name().map_or_else(
+            || crate::network::DEFAULT_CONTAINER_INTERFACE.to_owned(),
+            std::string::ToString::to_string,
+        );
+
+        // A package may request bridge mode while the daemon network is disabled.
+        // Rather than rejecting it, fall back to host networking so the package
+        // still runs, warning that the requested isolation is lost.
+        if network_mode == NetworkMode::Bridge && network.is_none() {
+            log::warn!(
+                "{pkg_name}: bridge network mode requested but the daemon network is disabled; \
+                 falling back to host network mode"
+            );
+            network_mode = NetworkMode::Host;
+        }
+
+        // netns is needed only when the (container) command runs in bridge mode.
+        // Gate the network manager here at the command fork so the transitioner
+        // stays network-mode-agnostic; a future non-container command passes None.
+        let effective_network = if network_mode == NetworkMode::Bridge {
+            network
+        } else {
+            None
+        };
+
         let command: Arc<dyn CommandArguments> = Arc::new(ContainerCommand::from_package(
             pkg_name.clone(),
             ContainerRuntime::CRun,
             package_file,
             pkg_volume,
-        )?);
+            network_mode,
+        ));
 
         let service_info = executor::systemd::ServiceInfo::new_from_metadata(metadata)?;
 
@@ -392,7 +492,13 @@ impl Package {
         let executor = Arc::new(LazyExecutor::new(command, init_args));
 
         let pkgfs_handle = pkg_volume.packagefs();
-        let ops = DefaultPackageTransitioner::new(pkg_name.clone(), executor, pkgfs_handle);
+        let ops = DefaultPackageTransitioner::new(
+            pkg_name.clone(),
+            executor,
+            pkgfs_handle,
+            effective_network,
+            container_interface,
+        );
         let transition_mgr = TransitionManager::new(Box::new(ops));
         let transition_mgr_ref = transition_mgr.clone();
 

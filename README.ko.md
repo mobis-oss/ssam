@@ -31,8 +31,9 @@
 ## Requirements
 
 ### Runtime requirements
-- Linux kernel: dm-verity, container, erofs, ext4 project quota 관련 설정 필요
+- Linux kernel: dm-verity, container, erofs, ext4 project quota, bridge 네트워킹(`bridge`/`veth`/network namespace), netfilter NAT(`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`) 관련 설정 필요
 - OCI runtime: [`crun`](https://github.com/containers/crun)과 테스트되었습니다.
+- Bridge 네트워크 모드 (`[container.network] mode = "bridge"`): [`nft`](https://www.netfilter.org/projects/nftables/) (nftables) 필요
 
 ### Build requirements
 - Rust 1.88.0+ (2024 edition)

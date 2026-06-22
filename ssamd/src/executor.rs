@@ -118,12 +118,6 @@ pub(crate) mod oci {
     }
 
     #[derive(Debug)]
-    pub(crate) struct ContainerSecurityConfig<'conf> {
-        pub seccomp_policy: Option<&'conf PackageSeccompPolicy>,
-        pub mac_enabled: bool,
-    }
-
-    #[derive(Debug)]
     pub(crate) struct TransientRuntimeConfig {
         path: TempDir,
     }
@@ -139,47 +133,50 @@ pub(crate) mod oci {
         ///
         /// # Arguments
         ///
-        /// * `oci_template` - The template OCI runtime specification.
-        /// * `security_config` - The container security configuration.
-        /// * `cgroups_path` - The base path for cgroups.
-        /// * `package_name` - The name of the package.
-        /// * `mount_point` - The package rootfs mount point.
-        /// * `data_mounts` - The package data root and container destination paths.
-        pub(crate) fn new(
-            oci_template: oci_spec::runtime::Spec,
-            security_config: &ContainerSecurityConfig,
-            network_mode: NetworkMode,
-            cgroups_path: &str,
-            package_name: &str,
-            mount_point: &Path,
-            data_mounts: Option<&DataMountPaths>,
-        ) -> anyhow::Result<Self> {
+        /// * `spec` - Owned snapshot of all inputs needed to build the bundle.
+        pub(crate) fn new(spec: ContainerBundleSpec) -> anyhow::Result<Self> {
+            let ContainerBundleSpec {
+                oci_template,
+                seccomp_policy,
+                mac_enabled,
+                network_mode,
+                cgroups_path,
+                package_name,
+                mount_point,
+                data_mounts,
+                bridge_netns_path,
+            } = spec;
+
             let path = tempfile::tempdir().context("Failed to create temporary directory")?;
 
             // just absolutize the rootfs path. the rootfs might not be mounted yet.
-            let rootfs_path = std::path::absolute(mount_point).with_context(|| {
+            let rootfs_path = std::path::absolute(&mount_point).with_context(|| {
                 format!("Unable to absoluteize rootfs directory of {package_name}")
             })?;
             let mut oci_runtime_conf = oci_template;
 
             let linux = oci_runtime_conf.linux_mut().get_or_insert(Linux::default());
 
-            let seccomp = Self::build_seccomp_config(security_config.seccomp_policy);
+            let seccomp = Self::build_seccomp_config(seccomp_policy.as_ref());
             if seccomp.is_none() {
                 log::info!("{package_name}: seccomp is disabled by configuration");
             }
             linux.set_seccomp(seccomp);
 
             let namespaces = linux.namespaces_mut().get_or_insert_with(Vec::new);
-            Self::configure_network_namespace(namespaces, network_mode, package_name)?;
+            Self::configure_network_namespace(
+                namespaces,
+                network_mode,
+                &package_name,
+                bridge_netns_path.as_deref(),
+            )?;
 
             let process = oci_runtime_conf
                 .process_mut()
                 .get_or_insert(oci_spec::runtime::Process::default());
 
-            let apparmor_profile = security_config
-                .mac_enabled
-                .then(|| Self::build_apparmor_profile(package_name))
+            let apparmor_profile = mac_enabled
+                .then(|| Self::build_apparmor_profile(&package_name))
                 .flatten();
             if apparmor_profile.is_none() {
                 log::info!("{package_name}: AppArmor is disabled by configuration");
@@ -232,6 +229,7 @@ pub(crate) mod oci {
             namespaces: &mut Vec<LinuxNamespace>,
             network_mode: NetworkMode,
             package_name: &str,
+            bridge_netns_path: Option<&std::path::Path>,
         ) -> anyhow::Result<()> {
             namespaces.retain(|ns| ns.typ() != LinuxNamespaceType::Network);
 
@@ -250,10 +248,14 @@ pub(crate) mod oci {
                     namespaces.push(ns);
                 }
                 NetworkMode::Bridge => {
-                    anyhow::bail!(
-                        "bridge network mode is not yet supported. \
-                         Use 'none' or 'host' instead."
-                    );
+                    let path =
+                        bridge_netns_path.context("bridge network mode requires a netns path")?;
+                    let ns = LinuxNamespaceBuilder::default()
+                        .typ(LinuxNamespaceType::Network)
+                        .path(path.to_path_buf())
+                        .build()
+                        .context("Failed to build bridge network namespace entry")?;
+                    namespaces.push(ns);
                 }
             }
             Ok(())
@@ -422,6 +424,7 @@ pub(crate) mod oci {
         pub(crate) package_name: String,
         pub(crate) mount_point: PathBuf,
         pub(crate) data_mounts: Option<DataMountPaths>,
+        pub(crate) bridge_netns_path: Option<std::path::PathBuf>,
     }
 
     use crate::package_volume::{DataDirectory, QuotaEntryBackend};
@@ -449,20 +452,7 @@ pub(crate) mod oci {
     impl ContainerBundleSpec {
         /// Synchronous file I/O. Must be called inside `spawn_blocking`.
         pub(crate) fn into_runtime_config(self) -> anyhow::Result<TransientRuntimeConfig> {
-            let seccomp_policy = self.seccomp_policy;
-            let security = ContainerSecurityConfig {
-                seccomp_policy: seccomp_policy.as_ref(),
-                mac_enabled: self.mac_enabled,
-            };
-            TransientRuntimeConfig::new(
-                self.oci_template,
-                &security,
-                self.network_mode,
-                &self.cgroups_path,
-                &self.package_name,
-                self.mount_point.as_path(),
-                self.data_mounts.as_ref(),
-            )
+            TransientRuntimeConfig::new(self)
         }
     }
 }
@@ -485,8 +475,10 @@ pub(crate) trait CommandArguments: Send + Sync + std::fmt::Debug {
 
 pub(crate) mod container {
     use anyhow::Context as _;
+    use libssam::container;
     use libssam::ssam_package::PackageFile;
 
+    use crate::network::netns;
     use crate::package_volume::PackageVolume;
 
     use super::{CommandArguments, ContainerRuntime, oci};
@@ -520,23 +512,23 @@ pub(crate) mod container {
             runtime: ContainerRuntime,
             package_file: &PackageFile,
             pkg_volume: &PackageVolume,
-        ) -> anyhow::Result<Self> {
+            network_mode: container::NetworkMode,
+        ) -> Self {
             let metadata = package_file.metadata();
 
             let seccomp_policy = metadata
                 .get_container_security_seccomp()
                 .then(|| package_file.seccomp_policy().clone());
 
-            let network_mode = metadata
-                .get_container_network_mode()
-                .map(|m| m.parse::<libssam::container::NetworkMode>())
-                .transpose()
-                .context("Invalid network mode in package config")?
-                .unwrap_or(libssam::container::NetworkMode::Host);
-
             let cgroups_path = super::systemd::cgroups_path().to_owned();
 
             let data_mounts = pkg_volume.data_directory().map(oci::DataMountPaths::new);
+
+            let bridge_netns_path = if network_mode == container::NetworkMode::Bridge {
+                Some(netns::netns_path(&netns::netns_name(&name)))
+            } else {
+                None
+            };
 
             // Deref coercion: &PackageRuntimeConfig → &Box<Spec> → &Spec
             let oci_runtime_spec: &oci_spec::runtime::Spec = package_file.runtime_config();
@@ -550,9 +542,10 @@ pub(crate) mod container {
                 package_name: name.clone(),
                 mount_point: pkg_volume.get_mount_point().to_path_buf(),
                 data_mounts,
+                bridge_netns_path,
             };
 
-            Ok(Self::new(name, runtime, spec))
+            Self::new(name, runtime, spec)
         }
 
         #[cfg(test)]
@@ -611,7 +604,7 @@ pub(crate) mod systemd;
 
 #[cfg(test)]
 mod tests {
-    use super::oci::{ContainerSecurityConfig, DataMountPaths, TransientRuntimeConfig};
+    use super::oci::{ContainerBundleSpec, DataMountPaths, TransientRuntimeConfig};
     use crate::package_volume::{DataDirectory, PackageVolume};
     use libssam::ssam_package::PackageSeccompPolicy;
     use oci_spec::runtime::{LinuxBuilder, ProcessBuilder, RootBuilder, Spec};
@@ -690,21 +683,18 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let security_config = ContainerSecurityConfig {
-            seccomp_policy: Some(&seccomp_policy),
-            mac_enabled: true,
-        };
-
         // Call the ACTUAL TransientRuntimeConfig::new function
-        let result = TransientRuntimeConfig::new(
-            oci_spec,
-            &security_config,
-            libssam::container::NetworkMode::None,
-            "/sys/fs/cgroup/system.slice",
-            "test-package",
-            package_volume.get_mount_point(),
-            None,
-        );
+        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: Some(seccomp_policy),
+            mac_enabled: true,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: "test-package".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        });
 
         assert!(
             result.is_ok(),
@@ -759,23 +749,20 @@ mod tests {
         )
         .expect("Failed to create test PackageVolume with data");
 
-        let security_config = ContainerSecurityConfig {
-            seccomp_policy: Some(&seccomp_policy),
-            mac_enabled: true,
-        };
-
         let data_mounts = package_volume.data_directory().map(DataMountPaths::new);
 
         // Call the ACTUAL TransientRuntimeConfig::new function
-        let result = TransientRuntimeConfig::new(
-            oci_spec,
-            &security_config,
-            libssam::container::NetworkMode::None,
-            "/sys/fs/cgroup/system.slice",
-            "test-package",
-            package_volume.get_mount_point(),
-            data_mounts.as_ref(),
-        );
+        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: Some(seccomp_policy),
+            mac_enabled: true,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: "test-package".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts,
+            bridge_netns_path: None,
+        });
 
         assert!(
             result.is_ok(),
@@ -811,21 +798,18 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let security_config = ContainerSecurityConfig {
+        // Call TransientRuntimeConfig::new with seccomp_policy = None
+        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
             seccomp_policy: None,
             mac_enabled: true,
-        };
-
-        // Call TransientRuntimeConfig::new with seccomp_policy = None
-        let result = TransientRuntimeConfig::new(
-            oci_spec,
-            &security_config,
-            libssam::container::NetworkMode::None,
-            "/sys/fs/cgroup/system.slice",
-            "test-package-no-seccomp",
-            package_volume.get_mount_point(),
-            None,
-        );
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: "test-package-no-seccomp".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        });
 
         assert!(
             result.is_ok(),
@@ -861,21 +845,18 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let security_config = ContainerSecurityConfig {
-            seccomp_policy: Some(&seccomp_policy),
-            mac_enabled: true,
-        };
-
         // Call TransientRuntimeConfig::new with seccomp_policy = Some
-        let result = TransientRuntimeConfig::new(
-            oci_spec,
-            &security_config,
-            libssam::container::NetworkMode::None,
-            "/sys/fs/cgroup/system.slice",
-            "test-package-with-seccomp",
-            package_volume.get_mount_point(),
-            None,
-        );
+        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: Some(seccomp_policy),
+            mac_enabled: true,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: "test-package-with-seccomp".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        });
 
         assert!(
             result.is_ok(),
@@ -953,6 +934,7 @@ mod tests {
                 package_name: "test-container".to_owned(),
                 mount_point,
                 data_mounts: None,
+                bridge_netns_path: None,
             };
             // temp_dir drops here but mount_point PathBuf is copied into spec.
             // std::path::absolute() does not require path to exist on disk.
@@ -1414,20 +1396,17 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let security_config = ContainerSecurityConfig {
+            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+                oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
-            };
-
-            let result = TransientRuntimeConfig::new(
-                oci_spec,
-                &security_config,
-                NetworkMode::Host,
-                "/sys/fs/cgroup/system.slice",
-                "test-host-net",
-                package_volume.get_mount_point(),
-                None,
-            );
+                network_mode: NetworkMode::Host,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-host-net".to_owned(),
+                mount_point: package_volume.get_mount_point().to_path_buf(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            });
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
             let config = result.unwrap();
@@ -1470,20 +1449,17 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let security_config = ContainerSecurityConfig {
+            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+                oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
-            };
-
-            let result = TransientRuntimeConfig::new(
-                oci_spec,
-                &security_config,
-                NetworkMode::None,
-                "/sys/fs/cgroup/system.slice",
-                "test-none-net",
-                package_volume.get_mount_point(),
-                None,
-            );
+                network_mode: NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-none-net".to_owned(),
+                mount_point: package_volume.get_mount_point().to_path_buf(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            });
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
             let config = result.unwrap();
@@ -1519,20 +1495,17 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let security_config = ContainerSecurityConfig {
+            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+                oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
-            };
-
-            let result = TransientRuntimeConfig::new(
-                oci_spec,
-                &security_config,
-                NetworkMode::None,
-                "/sys/fs/cgroup/system.slice",
-                "test-none-dup",
-                package_volume.get_mount_point(),
-                None,
-            );
+                network_mode: NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-none-dup".to_owned(),
+                mount_point: package_volume.get_mount_point().to_path_buf(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            });
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
             let config = result.unwrap();
@@ -1562,7 +1535,7 @@ mod tests {
         }
 
         #[test]
-        fn test_bridge_network_mode_returns_error() {
+        fn bridge_sets_path() {
             let oci_spec = create_test_oci_spec();
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
@@ -1571,29 +1544,83 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let security_config = ContainerSecurityConfig {
+            let netns_path = std::path::Path::new("/run/netns/ssam-test");
+            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+                oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
-            };
-
-            let result = TransientRuntimeConfig::new(
-                oci_spec,
-                &security_config,
-                NetworkMode::Bridge,
-                "/sys/fs/cgroup/system.slice",
-                "test-bridge-net",
-                package_volume.get_mount_point(),
-                None,
-            );
+                network_mode: NetworkMode::Bridge,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-bridge-path".to_owned(),
+                mount_point: package_volume.get_mount_point().to_path_buf(),
+                data_mounts: None,
+                bridge_netns_path: Some(netns_path.to_path_buf()),
+            });
 
             assert!(
-                result.is_err(),
-                "Bridge mode should return error since it's not implemented"
+                result.is_ok(),
+                "Bridge with netns path should succeed: {:?}",
+                result.err()
             );
+            let config = result.unwrap();
+            let config_file = config.dir_path().join("config.json");
+            let content = fs::read_to_string(&config_file).expect("Should read config file");
+            let config_json: serde_json::Value =
+                serde_json::from_str(&content).expect("Should parse config.json");
+
+            let linux = config_json.get("linux").expect("Should have linux section");
+            let namespaces = linux
+                .get("namespaces")
+                .and_then(|v| v.as_array())
+                .expect("Bridge mode should produce namespaces list");
+
+            let net_ns = namespaces.iter().find(|ns| {
+                ns.get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == "network")
+            });
+            assert!(
+                net_ns.is_some(),
+                "Bridge mode must add a network namespace entry"
+            );
+            let ns_path = net_ns
+                .unwrap()
+                .get("path")
+                .and_then(|p| p.as_str())
+                .expect("Network namespace must have a path");
+            assert_eq!(
+                ns_path, "/run/netns/ssam-test",
+                "Network namespace path must match supplied netns path"
+            );
+        }
+
+        #[test]
+        fn bridge_without_path_errors() {
+            let oci_spec = create_test_oci_spec();
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mount_point = temp_dir.path().join("mount");
+            fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+            let package_volume = create_test_package_volume_real(&mount_point)
+                .expect("Failed to create test PackageVolume");
+
+            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: None,
+                mac_enabled: false,
+                network_mode: NetworkMode::Bridge,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-bridge-no-path".to_owned(),
+                mount_point: package_volume.get_mount_point().to_path_buf(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            });
+
+            assert!(result.is_err(), "Bridge without netns path must error");
             let err_msg = result.unwrap_err().to_string();
             assert!(
-                err_msg.contains("bridge network mode is not yet supported"),
-                "Error should indicate bridge is unsupported: {err_msg}"
+                err_msg.contains("bridge network mode requires a netns path"),
+                "Error must describe missing netns path: {err_msg}"
             );
         }
     }

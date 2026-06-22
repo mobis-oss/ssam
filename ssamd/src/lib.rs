@@ -64,7 +64,8 @@ impl Daemon {
         }
 
         let actor =
-            package_manager::PackageManagerActor::new(bundled_dir_str, downloaded_dir_str).await?;
+            package_manager::PackageManagerActor::from_config(bundled_dir_str, downloaded_dir_str)
+                .await?;
 
         let actor_ref = spawn_with::<package_manager::PackageManagerActor>(actor);
 

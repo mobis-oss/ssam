@@ -10,6 +10,8 @@ use rsactor::{Actor, ActorRef, message_handlers};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::network::NetworkManager;
+
 use super::InstallInfo;
 
 use message::InstallMode;
@@ -59,16 +61,19 @@ impl PackageFileBackend for DefaultPackageFileBackend {
 pub(crate) struct PackageTransactionActor {
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
     fs_ops: Arc<dyn PackageFileBackend>,
+    network: Option<NetworkManager>,
 }
 
 impl PackageTransactionActor {
     pub(crate) fn new(
         volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
         fs_ops: impl PackageFileBackend + 'static,
+        network: Option<NetworkManager>,
     ) -> Self {
         Self {
             volume_manager_ref,
             fs_ops: Arc::new(fs_ops),
+            network,
         }
     }
 
@@ -175,7 +180,12 @@ impl PackageTransactionActor {
             .context("Failed to create volume metadata")?;
         let volume = self.acquire_volume(volume_meta).await?;
         let context = PackageContext::new(&msg.path, msg.package_file);
-        let package = Package::new(context, &volume, self.volume_manager_ref.clone())?;
+        let package = Package::new(
+            context,
+            &volume,
+            self.volume_manager_ref.clone(),
+            self.network.clone(),
+        )?;
         Ok(Arc::new(package))
     }
 
@@ -281,7 +291,12 @@ impl PackageTransactionActor {
         };
 
         let context = PackageContext::new(&dest, package_file);
-        match Package::new(context, &volume, self.volume_manager_ref.clone()) {
+        match Package::new(
+            context,
+            &volume,
+            self.volume_manager_ref.clone(),
+            self.network.clone(),
+        ) {
             Ok(package) => {
                 if let InstallMode::UpgradeDownloaded { ref installed_path } = mode {
                     let bp = Self::backup_path_of(installed_path);
@@ -428,7 +443,7 @@ service_type = "simple"
     fn spawn_actor(fs_ops: impl PackageFileBackend + 'static) -> ActorRef<PackageTransactionActor> {
         crate::configuration::ensure_test_init();
         let (vol_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(());
-        let actor = PackageTransactionActor::new(vol_ref, fs_ops);
+        let actor = PackageTransactionActor::new(vol_ref, fs_ops, None);
         let (actor_ref, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         actor_ref
     }
@@ -600,7 +615,7 @@ service_type = "simple"
         crate::configuration::ensure_test_init();
         let (vol_ref, vol_handle) = rsactor::spawn::<PackageVolumeManagerActor>(());
         vol_handle.abort();
-        let actor = PackageTransactionActor::new(vol_ref, fs_ops);
+        let actor = PackageTransactionActor::new(vol_ref, fs_ops, None);
         let (actor_ref, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         actor_ref
     }

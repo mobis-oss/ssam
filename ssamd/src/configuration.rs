@@ -74,6 +74,10 @@ pub struct NetworkConfig {
 #[derive(Debug, Clone, Deserialize)]
 struct RuntimeConfig {
     common: Common,
+
+    /// Optional network section — `None` when `[network]` is absent from the config file
+    #[serde(default)]
+    network: Option<NetworkConfig>,
 }
 
 /// Configuration manager that holds the runtime configuration
@@ -153,6 +157,11 @@ impl Configuration {
     /// Get bind IP address as a borrowed reference (optional)
     pub(crate) fn rpc_bind_ip(&self) -> Option<&str> {
         self.runtime_config.common.rpc_bind_ip.as_deref()
+    }
+
+    /// Get daemon network configuration (`None` when `[network]` section is absent)
+    pub(crate) fn network_config(&self) -> Option<&NetworkConfig> {
+        self.runtime_config.network.as_ref()
     }
 }
 
@@ -294,6 +303,18 @@ pub(crate) fn rpc_bind_ip() -> Option<&'static str> {
         .get()
         .expect("Configuration not initialized. Call init() first.")
         .rpc_bind_ip()
+}
+
+/// Get the daemon network configuration (`None` when `[network]` section is absent)
+///
+/// # Panics
+///
+/// Panics if `init()` has not been called before this function.
+pub(crate) fn network_config() -> Option<&'static NetworkConfig> {
+    RUNTIME_CONFIG
+        .get()
+        .expect("Configuration not initialized. Call init() first.")
+        .network_config()
 }
 
 /// Ensures test configuration is initialized. Safe to call multiple times.
@@ -512,5 +533,62 @@ mod tests {
         };
         assert_eq!(path, expected);
         assert!(path.exists(), "Test config file should exist at {path:?}");
+    }
+
+    #[test]
+    fn test_network_config_present() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            bundled_packages_dir = "/var/lib/ssamd/bundled"
+            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
+            packages_data_root = "/var/lib/ssamd/data"
+            packages_overlayfs_root = ""
+            packages_mnt_root = "/var/lib/ssamd/mnt"
+            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
+            packages_cgroup = ""
+            packages_ext = "ssam"
+
+            [network]
+            bridge_enabled = true
+            bridge_name = "ssam-br0"
+            subnet = "172.20.0.0/16"
+            gateway = "172.20.0.1"
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+        let net = config.network_config();
+        assert!(net.is_some());
+        let net = net.unwrap();
+        assert!(net.bridge_enabled);
+        assert_eq!(net.bridge_name, "ssam-br0");
+        assert_eq!(net.subnet, "172.20.0.0/16");
+        assert_eq!(
+            net.gateway,
+            "172.20.0.1".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_network_config_absent() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            bundled_packages_dir = "/var/lib/ssamd/bundled"
+            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
+            packages_data_root = "/var/lib/ssamd/data"
+            packages_overlayfs_root = ""
+            packages_mnt_root = "/var/lib/ssamd/mnt"
+            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
+            packages_cgroup = ""
+            packages_ext = "ssam"
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+        assert!(config.network_config().is_none());
     }
 }
