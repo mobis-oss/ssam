@@ -485,7 +485,7 @@ pub(crate) mod tests {
                         },
                         network: libssam::config::Network {
                             mode: None,
-                            interface_name: None,
+                            bridge: None,
                         },
                     },
                     service: libssam::config::Service {
@@ -939,7 +939,7 @@ pub(crate) mod tests {
                         },
                         network: libssam::config::Network {
                             mode: None,
-                            interface_name: None,
+                            bridge: None,
                         },
                     },
                     service: libssam::config::Service {
@@ -1007,7 +1007,7 @@ pub(crate) mod tests {
                         },
                         network: libssam::config::Network {
                             mode: None,
-                            interface_name: None,
+                            bridge: None,
                         },
                     },
                     service: libssam::config::Service {
@@ -1078,7 +1078,7 @@ pub(crate) mod tests {
                         },
                         network: libssam::config::Network {
                             mode: None,
-                            interface_name: None,
+                            bridge: None,
                         },
                     },
                     service: libssam::config::Service {
@@ -1273,7 +1273,7 @@ pub(crate) mod tests {
                 },
                 network: libssam::config::Network {
                     mode: None,
-                    interface_name: None,
+                    bridge: None,
                 },
             },
             service: libssam::config::Service {
@@ -1582,7 +1582,7 @@ pub(crate) mod tests {
                 },
                 network: libssam::config::Network {
                     mode: None,
-                    interface_name: None,
+                    bridge: None,
                 },
             },
             service: libssam::config::Service {
@@ -1784,7 +1784,7 @@ pub(crate) mod tests {
                 },
                 network: libssam::config::Network {
                     mode: None,
-                    interface_name: None,
+                    bridge: None,
                 },
             },
             service: libssam::config::Service {
@@ -1862,7 +1862,7 @@ pub(crate) mod tests {
                 },
                 network: libssam::config::Network {
                     mode: None,
-                    interface_name: None,
+                    bridge: None,
                 },
             },
             service: libssam::config::Service {

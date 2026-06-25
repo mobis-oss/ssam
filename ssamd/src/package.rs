@@ -446,10 +446,12 @@ impl Package {
             .context("Invalid network mode in package config")?
             .unwrap_or(NetworkMode::Host);
 
-        let container_interface = metadata.get_container_network_interface_name().map_or_else(
-            || crate::network::DEFAULT_CONTAINER_INTERFACE.to_owned(),
-            std::string::ToString::to_string,
-        );
+        let container_interface = metadata
+            .get_container_network_bridge_interface_name()
+            .map_or_else(
+                || crate::network::DEFAULT_CONTAINER_INTERFACE.to_owned(),
+                std::string::ToString::to_string,
+            );
 
         // A package may request bridge mode while the daemon network is disabled.
         // Rather than rejecting it, fall back to host networking so the package

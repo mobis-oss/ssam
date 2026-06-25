@@ -161,10 +161,10 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: Network {
+                network: Some(Network {
                     mode: None,
-                    interface_name: None,
-                },
+                    bridge: None,
+                }),
             },
             service: Service {
                 service_type: "notify".to_string(),
@@ -272,10 +272,10 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: Network {
+                network: Some(Network {
                     mode: None,
-                    interface_name: None,
-                },
+                    bridge: None,
+                }),
             },
             service: Service {
                 service_type: "notify".to_string(),

@@ -277,10 +277,10 @@ impl MockClient {
                     seccomp: true,
                     mac: true,
                 },
-                network: libssam::config::Network {
+                network: Some(libssam::config::Network {
                     mode: None,
-                    interface_name: None,
-                },
+                    bridge: None,
+                }),
             },
             service: libssam::config::Service {
                 service_type: "notify".to_owned(),
@@ -573,10 +573,10 @@ mod grpc_fake_server {
                                     seccomp: true,
                                     mac: true,
                                 },
-                                network: libssam::config::Network {
+                                network: Some(libssam::config::Network {
                                     mode: None,
-                                    interface_name: None,
-                                },
+                                    bridge: None,
+                                }),
                             },
                             service: libssam::config::Service {
                                 service_type: "notify".to_owned(),
@@ -654,10 +654,10 @@ mod grpc_fake_server {
                         seccomp: true,
                         mac: true,
                     },
-                    network: libssam::config::Network {
+                    network: Some(libssam::config::Network {
                         mode: None,
-                        interface_name: None,
-                    },
+                        bridge: None,
+                    }),
                 },
                 service: libssam::config::Service {
                     service_type: "notify".to_owned(),
@@ -718,10 +718,10 @@ mod grpc_fake_server {
                         seccomp: true,
                         mac: true,
                     },
-                    network: libssam::config::Network {
+                    network: Some(libssam::config::Network {
                         mode: None,
-                        interface_name: None,
-                    },
+                        bridge: None,
+                    }),
                 },
                 service: libssam::config::Service {
                     service_type: "notify".to_owned(),

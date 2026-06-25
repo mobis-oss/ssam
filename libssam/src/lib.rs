@@ -151,4 +151,85 @@ mod tests {
             toml::from_str(create_test_package_conf(true));
         assert!(package_config.is_err());
     }
+
+    #[test]
+    fn test_parse_package_config_port_mappings() {
+        let package_config =
+            toml::from_str::<config::PackageConfigSpec>(create_test_package_conf(false))
+                .expect("package config should parse");
+        assert_eq!(
+            package_config.get_container_network_bridge_port_mappings(),
+            None
+        );
+
+        let empty_port_mappings = toml::from_str::<config::PackageConfigSpec>(
+            r#"
+            [package]
+            name = "test_package"
+            autostart = true
+            version = "0.0.1"
+            description = "A test package"
+
+            [container]
+            storage_limit = 2000
+            data_dirs = "/app/data:/app/logs"
+
+            [container.security]
+            seccomp = true
+            mac = true
+
+            [container.network.bridge]
+            port_mappings = []
+
+            [service]
+            service_type = "notify"
+            bus_name = "com.test.service"
+            remain_after_exit = false
+        "#,
+        )
+        .expect("empty port mappings should parse");
+        assert_eq!(
+            empty_port_mappings.get_container_network_bridge_port_mappings(),
+            Some(&Vec::new())
+        );
+
+        let non_empty_port_mappings = toml::from_str::<config::PackageConfigSpec>(
+            r#"
+            [package]
+            name = "test_package"
+            autostart = true
+            version = "0.0.1"
+            description = "A test package"
+
+            [container]
+            storage_limit = 2000
+            data_dirs = "/app/data:/app/logs"
+
+            [container.security]
+            seccomp = true
+            mac = true
+
+            [container.network.bridge]
+            port_mappings = ["8080:80", "8443:443/tcp", "5353:53/udp"]
+
+            [service]
+            service_type = "notify"
+            bus_name = "com.test.service"
+            remain_after_exit = false
+        "#,
+        )
+        .expect("non-empty port mappings should parse");
+        assert_eq!(
+            non_empty_port_mappings
+                .get_container_network_bridge_port_mappings()
+                .map(Vec::as_slice),
+            Some(
+                &[
+                    "8080:80".to_string(),
+                    "8443:443/tcp".to_string(),
+                    "5353:53/udp".to_string(),
+                ][..]
+            )
+        );
+    }
 }

@@ -94,7 +94,7 @@ impl PackageMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Network, PackageConfigSpec, Security};
+    use crate::config::{Bridge, Network, PackageConfigSpec, Security};
     use crate::ssam_package::tests::make_verity;
 
     fn create_test_metadata() -> PackageMetadata {
@@ -112,10 +112,10 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: Network {
+                network: Some(Network {
                     mode: None,
-                    interface_name: None,
-                },
+                    bridge: None,
+                }),
             },
             service: crate::config::Service {
                 service_type: "notify".to_string(),
@@ -133,9 +133,9 @@ mod tests {
     }
 
     #[test]
-    fn container_network_interface_name_getter() {
+    fn container_network_bridge_interface_name_getter() {
         let absent = create_test_metadata();
-        assert_eq!(absent.get_container_network_interface_name(), None);
+        assert_eq!(absent.get_container_network_bridge_interface_name(), None);
 
         let package_config = PackageConfigSpec {
             package: crate::config::Package {
@@ -151,10 +151,13 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: Network {
+                network: Some(Network {
                     mode: Some("bridge".to_string()),
-                    interface_name: Some("eth1".to_string()),
-                },
+                    bridge: Some(Bridge {
+                        interface_name: Some("eth1".to_string()),
+                        port_mappings: None,
+                    }),
+                }),
             },
             service: crate::config::Service {
                 service_type: "notify".to_string(),
@@ -170,7 +173,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             configured
-                .get_container_network_interface_name()
+                .get_container_network_bridge_interface_name()
                 .map(String::as_str),
             Some("eth1")
         );
@@ -303,10 +306,10 @@ mod tests {
                         seccomp: true,
                         mac: true,
                     },
-                    network: crate::config::Network {
+                    network: Some(crate::config::Network {
                         mode: None,
-                        interface_name: None,
-                    },
+                        bridge: None,
+                    }),
                 },
                 service: crate::config::Service {
                     service_type: "notify".to_string(),
@@ -339,10 +342,10 @@ mod tests {
                     seccomp: true,
                     mac: true,
                 },
-                network: crate::config::Network {
+                network: Some(crate::config::Network {
                     mode: None,
-                    interface_name: None,
-                },
+                    bridge: None,
+                }),
             },
             service: crate::config::Service {
                 service_type: "notify".to_string(),
