@@ -1,6 +1,10 @@
 // Copyright 2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
+
+use anyhow::Context as _;
+use netavark::network::types::PortMapping;
 use rsa::sha2::{Digest, Sha256};
 
 pub mod actor;
@@ -303,6 +307,138 @@ pub mod netns {
             assert!(!path.exists());
             // Idempotent delete on an absent namespace is a no-op.
             delete_named_netns(&path).unwrap();
+        }
+    }
+}
+
+const MIN_PUBLISHABLE_HOST_PORT: u16 = 1024;
+
+const PROTO_TCP: &str = "tcp";
+const PROTO_UDP: &str = "udp";
+const PROTO_SCTP: &str = "sctp";
+
+/// Parse Docker-style `port_mappings` strings into netavark [`PortMapping`]s.
+///
+/// An empty or absent list yields `None` (not `Some(vec![])`).
+pub(crate) fn parse_port_mappings(bindings: &[String]) -> anyhow::Result<Option<Vec<PortMapping>>> {
+    if bindings.is_empty() {
+        return Ok(None);
+    }
+    let mappings = bindings
+        .iter()
+        .map(|b| parse_port_mapping(b))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut seen = HashSet::new();
+    for mapping in &mappings {
+        anyhow::ensure!(
+            seen.insert((mapping.protocol.clone(), mapping.host_port)),
+            "duplicate host port {}/{} in port mappings",
+            mapping.host_port,
+            mapping.protocol
+        );
+    }
+    Ok(Some(mappings))
+}
+
+/// Parse a single `HOST_PORT:CONTAINER_PORT[/PROTOCOL]` binding.
+///
+/// Protocol defaults to `tcp`; only lowercase `tcp`, `udp`, `sctp` are accepted.
+fn parse_port_mapping(binding: &str) -> anyhow::Result<PortMapping> {
+    let (ports, protocol) = binding.split_once('/').unwrap_or((binding, PROTO_TCP));
+    let protocol = match protocol {
+        PROTO_TCP | PROTO_UDP | PROTO_SCTP => protocol.to_owned(),
+        other => anyhow::bail!("invalid protocol {other:?} in port mapping {binding:?}"),
+    };
+    let (host, container) = ports
+        .split_once(':')
+        .with_context(|| format!("missing ':' in port mapping {binding:?}"))?;
+    let host_port: u16 = host
+        .parse()
+        .with_context(|| format!("invalid host port in port mapping {binding:?}"))?;
+    let container_port: u16 = container
+        .parse()
+        .with_context(|| format!("invalid container port in port mapping {binding:?}"))?;
+    anyhow::ensure!(
+        host_port >= MIN_PUBLISHABLE_HOST_PORT && host_port != libssam::remocon::CONTROL_PORT,
+        "host port {host_port} is reserved in port mapping {binding:?}"
+    );
+    anyhow::ensure!(
+        container_port != 0,
+        "container port 0 is invalid in port mapping {binding:?}"
+    );
+    Ok(PortMapping {
+        host_port,
+        container_port,
+        host_ip: "0.0.0.0".to_owned(),
+        protocol,
+        range: 1,
+    })
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[test]
+    fn parse_port_mapping_defaults_to_tcp() {
+        let m = parse_port_mapping("8080:80").expect("valid binding");
+        assert_eq!(m.host_port, 8080);
+        assert_eq!(m.container_port, 80);
+        assert_eq!(m.protocol, "tcp");
+        assert_eq!(m.host_ip, "0.0.0.0");
+        assert_eq!(m.range, 1);
+    }
+
+    #[test]
+    fn parse_port_mapping_explicit_udp() {
+        let m = parse_port_mapping("5353:53/udp").expect("valid udp binding");
+        assert_eq!(m.host_port, 5353);
+        assert_eq!(m.container_port, 53);
+        assert_eq!(m.protocol, "udp");
+    }
+
+    #[test]
+    fn parse_port_mapping_explicit_sctp() {
+        let m = parse_port_mapping("9899:9899/sctp").expect("valid sctp binding");
+        assert_eq!(m.host_port, 9899);
+        assert_eq!(m.container_port, 9899);
+        assert_eq!(m.protocol, "sctp");
+    }
+
+    #[test]
+    fn parse_port_mappings_empty_is_none() {
+        assert!(parse_port_mappings(&[]).expect("empty ok").is_none());
+    }
+
+    #[test]
+    fn parse_port_mappings_rejects_duplicate_host_protocol() {
+        let bindings = ["8080:80".to_owned(), "8080:81/tcp".to_owned()];
+        assert!(parse_port_mappings(&bindings).is_err());
+    }
+
+    #[test]
+    fn parse_port_mapping_rejects_malformed() {
+        for bad in [
+            "8080",
+            "8080:",
+            ":80",
+            "8080:80:90",
+            "70000:80",
+            "8080:70000",
+            "8080:80/icmp",
+            "8080:80/tcp,udp",
+            "8080:80/TCP",
+            "8080:80/",
+            "0:80",
+            "8080:0",
+            "22:22",
+            "443:443",
+            "63737:80",
+        ] {
+            assert!(
+                parse_port_mapping(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
         }
     }
 }

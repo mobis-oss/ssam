@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::executor::container::ContainerCommand;
 use crate::executor::{self, CommandArguments, ContainerRuntime, ExecutionResult, ExecutionStatus};
 use crate::network::NetworkManager;
+use crate::network::parse_port_mappings;
 use crate::package_volume::messages::GetQuotaInfo;
 use crate::package_volume::{PackageFsBackend, PackageVolume, PackageVolumeManagerActor};
 use crate::utils::{timeline_complete, timeline_start};
@@ -16,6 +17,7 @@ use libssam::container::NetworkMode;
 use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{self, BrokenReason};
 use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
+use netavark::network::types::PortMapping;
 use rsactor::ActorRef;
 use strum::Display;
 use tokio::sync::mpsc;
@@ -194,6 +196,7 @@ struct DefaultPackageTransitioner {
     pkgfs_handle: Arc<dyn PackageFsBackend>,
     network: Option<NetworkManager>,
     container_interface: String,
+    port_mappings: Option<Vec<PortMapping>>,
 }
 
 impl DefaultPackageTransitioner {
@@ -203,6 +206,7 @@ impl DefaultPackageTransitioner {
         pkgfs_handle: Arc<dyn PackageFsBackend>,
         network: Option<NetworkManager>,
         container_interface: String,
+        port_mappings: Option<Vec<PortMapping>>,
     ) -> Self {
         Self {
             package_name,
@@ -210,6 +214,7 @@ impl DefaultPackageTransitioner {
             pkgfs_handle,
             network,
             container_interface,
+            port_mappings,
         }
     }
 
@@ -273,11 +278,14 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         let netns_net = self.bridge_network().cloned();
         let netns_pkg = self.package_name.clone();
         let netns_iface = self.container_interface.clone();
+        let netns_ports = self.port_mappings.clone();
         let netns_handle = tokio::spawn(async move {
             match netns_net {
                 Some(net) => {
                     net.create_netns(&netns_pkg).await?;
-                    net.attach(&netns_pkg, &netns_iface).await.map(|_| ())
+                    net.attach(&netns_pkg, &netns_iface, netns_ports)
+                        .await
+                        .map(|_| ())
                 }
                 None => Ok(()),
             }
@@ -300,9 +308,16 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         log::debug!("Cleaning up package {}", self.package_name);
 
         if let Some(net) = self.bridge_network() {
-            let _ = net.detach(&self.package_name).await.inspect_err(|e| {
-                log::warn!("{}: detach during cleanup failed: {e:#}", self.package_name);
-            });
+            let _ = net
+                .detach(
+                    &self.package_name,
+                    &self.container_interface,
+                    self.port_mappings.clone(),
+                )
+                .await
+                .inspect_err(|e| {
+                    log::warn!("{}: detach during cleanup failed: {e:#}", self.package_name);
+                });
             let _ = net
                 .destroy_netns(&self.package_name)
                 .await
@@ -364,12 +379,19 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         // Unconditional: teardown only runs on remove/shutdown, and a leftover
         // netns/veth would collide with a reinstall or fresh daemon start.
         if let Some(net) = self.bridge_network() {
-            let _ = net.detach(&self.package_name).await.inspect_err(|e| {
-                log::warn!(
-                    "{}: detach during teardown failed: {e:#}",
-                    self.package_name
-                );
-            });
+            let _ = net
+                .detach(
+                    &self.package_name,
+                    &self.container_interface,
+                    self.port_mappings.clone(),
+                )
+                .await
+                .inspect_err(|e| {
+                    log::warn!(
+                        "{}: detach during teardown failed: {e:#}",
+                        self.package_name
+                    );
+                });
             let _ = net
                 .destroy_netns(&self.package_name)
                 .await
@@ -473,6 +495,19 @@ impl Package {
             None
         };
 
+        // Port bindings apply only in effective bridge mode; host/none/fallback
+        // ignore them so a forwarded port never leaks onto the host network.
+        let port_mappings = if network_mode == NetworkMode::Bridge {
+            parse_port_mappings(
+                metadata
+                    .get_container_network_bridge_port_mappings()
+                    .map_or(&[][..], Vec::as_slice),
+            )
+            .context("Invalid port mapping in package config")?
+        } else {
+            None
+        };
+
         let command: Arc<dyn CommandArguments> = Arc::new(ContainerCommand::from_package(
             pkg_name.clone(),
             ContainerRuntime::CRun,
@@ -500,6 +535,7 @@ impl Package {
             pkgfs_handle,
             effective_network,
             container_interface,
+            port_mappings,
         );
         let transition_mgr = TransitionManager::new(Box::new(ops));
         let transition_mgr_ref = transition_mgr.clone();
@@ -699,6 +735,7 @@ impl Package {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     // Mock implementation for testing
     #[derive(Debug)]
     pub(crate) struct MockExecutionState {

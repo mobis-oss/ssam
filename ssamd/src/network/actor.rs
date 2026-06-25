@@ -23,19 +23,19 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::AsFd as _;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use ipnet::{IpNet, Ipv4Net};
 use rsactor::{Actor, ActorRef, message_handlers};
 
-use netavark::firewall::get_supported_firewall_driver;
+use netavark::firewall::{FirewallDriver, get_supported_firewall_driver};
 use netavark::network::core_utils::open_netlink_sockets;
-use netavark::network::driver::{DriverInfo, get_network_driver};
+use netavark::network::driver::{DriverInfo, NetworkDriver, get_network_driver};
 use netavark::network::netlink_route::LinkID;
 use netavark::network::types::{
-    NamedPerNetworkOptions, Network, NetworkOptions, PerNetworkOptions, Subnet,
+    NamedPerNetworkOptions, Network, NetworkOptions, PerNetworkOptions, PortMapping, Subnet,
 };
 
 use crate::network::allocator::{self, IpAllocator};
@@ -59,6 +59,8 @@ const OPTION_HOST_INTERFACE_NAME: &str = "host_interface_name";
 pub(crate) mod messages {
     //! Plain message structs handled by [`super::NetworkActor`].
 
+    use netavark::network::types::PortMapping;
+
     /// Create the persistent named network namespace for `pkg`.
     pub(crate) struct CreateNetns {
         pub pkg: String,
@@ -69,11 +71,16 @@ pub(crate) mod messages {
     pub(crate) struct Attach {
         pub pkg: String,
         pub container_interface: String,
+        pub port_mappings: Option<Vec<PortMapping>>,
     }
 
     /// Delete `pkg`'s host veth and release its IP mark, keeping its namespace.
+    /// When `port_mappings` are present, a netavark teardown runs before the
+    /// veth delete to drop the published-port DNAT rules.
     pub(crate) struct Detach {
         pub pkg: String,
+        pub container_interface: String,
+        pub port_mappings: Option<Vec<PortMapping>>,
     }
 
     /// Delete `pkg`'s named network namespace.
@@ -177,6 +184,7 @@ impl NetworkActor {
         let messages::Attach {
             pkg,
             container_interface,
+            port_mappings,
         } = msg;
         validate_interface_name(&container_interface).with_context(|| {
             format!("Invalid container network interface_name {container_interface:?}")
@@ -213,6 +221,7 @@ impl NetworkActor {
             self.gateway,
             ip,
             &container_interface,
+            port_mappings,
         );
         let netns_path = ns_path
             .to_str()
@@ -244,16 +253,50 @@ impl NetworkActor {
 
     /// Idempotently delete the package's host veth, keeping its namespace.
     /// Best-effort and forgiving: always returns `Ok`.
+    ///
+    /// Non-empty `port_mappings` trigger a netavark teardown before the veth
+    /// delete to drop the published-port DNAT rules; teardown errors are logged,
+    /// not propagated.
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
     async fn handle_detach(
         &mut self,
         msg: messages::Detach,
         _actor_ref: &ActorRef<Self>,
     ) -> anyhow::Result<()> {
-        let pkg = msg.pkg;
+        let messages::Detach {
+            pkg,
+            container_interface,
+            port_mappings,
+        } = msg;
         let veth = allocator::veth_host_name(&pkg);
+
+        if port_mappings.as_ref().is_some_and(|m| !m.is_empty()) {
+            let teardown_result = async {
+                let ip = self.allocator.allocate(&pkg, &self.subnet, self.gateway)?;
+                let options = build_network_options(
+                    &pkg,
+                    &self.bridge_name,
+                    self.subnet,
+                    self.gateway,
+                    ip,
+                    &container_interface,
+                    port_mappings,
+                );
+                let ns_name = netns::netns_name(&pkg);
+                let netns_path = netns::netns_path(&ns_name)
+                    .to_str()
+                    .context("netns path is not valid UTF-8")?
+                    .to_owned();
+                tokio::task::spawn_blocking(move || run_netavark_teardown(&netns_path, &options))
+                    .await
+                    .context("netavark teardown task failed to join")?
+            }
+            .await;
+            if let Err(e) = teardown_result {
+                log::warn!("Best-effort netavark teardown for {pkg} failed: {e}");
+            }
+        }
+
         // Release the IP mark only once the host veth is confirmed gone. link::delete
         // returns Ok when the link is already absent, so Ok means no container still
         // holds this address. On delete failure keep the mark: leaking it is safe,
@@ -375,6 +418,7 @@ fn build_network_options(
     gateway: Ipv4Addr,
     container_ip: Ipv4Addr,
     container_interface: &str,
+    port_mappings: Option<Vec<PortMapping>>,
 ) -> NetworkOptions {
     let mut network_info = HashMap::new();
     network_info.insert(
@@ -390,7 +434,7 @@ fn build_network_options(
             opts: build_per_network_opts(pkg, container_ip, container_interface),
         }],
         network_info,
-        port_mappings: None,
+        port_mappings,
         dns_servers: None,
     }
 }
@@ -423,16 +467,69 @@ fn run_netavark_setup(netns_path: &str, options: &NetworkOptions) -> anyhow::Res
         .set_up(LinkID::ID(1))
         .map_err(|e| anyhow::anyhow!("netavark set loopback up: {e}"))?;
 
+    let driver = build_netavark_driver(
+        netns_path,
+        options,
+        firewall.as_ref(),
+        hostns.file.as_fd(),
+        netns.file.as_fd(),
+    )?;
+
+    let sockets = (&mut hostns.netlink, &mut netns.netlink);
+    driver
+        .setup(sockets)
+        .map(|_status| ())
+        .map_err(|e| anyhow::anyhow!("netavark setup: {e}"))
+}
+
+/// Run a blocking netavark bridge `teardown` for the pre-built `options`.
+///
+/// Mirrors [`run_netavark_setup`] with fresh netlink sockets and an identical
+/// [`DriverInfo`]; removes the published-port DNAT rules carried in
+/// `options.port_mappings`. Performs blocking netlink I/O and MUST run on a
+/// blocking executor (`spawn_blocking`).
+///
+/// # Errors
+///
+/// Returns an error if any netavark stage (firewall driver, netlink sockets,
+/// driver construction/validation, teardown) fails.
+fn run_netavark_teardown(netns_path: &str, options: &NetworkOptions) -> anyhow::Result<()> {
+    let firewall = get_supported_firewall_driver(Some(FIREWALL_DRIVER.to_owned()))
+        .map_err(|e| anyhow::anyhow!("netavark firewall driver: {e}"))?;
+
+    let (mut hostns, mut netns) = open_netlink_sockets(netns_path)
+        .map_err(|e| anyhow::anyhow!("netavark open netlink sockets for {netns_path}: {e}"))?;
+
+    let driver = build_netavark_driver(
+        netns_path,
+        options,
+        firewall.as_ref(),
+        hostns.file.as_fd(),
+        netns.file.as_fd(),
+    )?;
+
+    let sockets = (&mut hostns.netlink, &mut netns.netlink);
+    driver
+        .teardown(sockets)
+        .map_err(|e| anyhow::anyhow!("netavark teardown: {e}"))
+}
+
+fn build_netavark_driver<'a>(
+    netns_path: &'a str,
+    options: &'a NetworkOptions,
+    firewall: &'a dyn FirewallDriver,
+    hostns_fd: BorrowedFd<'a>,
+    netns_fd: BorrowedFd<'a>,
+) -> anyhow::Result<Box<dyn NetworkDriver + 'a>> {
     let named = &options.networks[0];
     let network = &options.network_info[&named.name];
-
     let info = DriverInfo {
-        firewall: firewall.as_ref(),
+        firewall,
         container_id: &options.container_id,
         container_name: &options.container_name,
         container_dns_servers: &options.dns_servers,
-        netns_host: hostns.file.as_fd(),
-        netns_container: netns.file.as_fd(),
+        netns_host: hostns_fd,
+        netns_container: netns_fd,
         netns_path,
         network,
         per_network_opts: &named.opts,
@@ -450,18 +547,12 @@ fn run_netavark_setup(netns_path: &str, options: &NetworkOptions) -> anyhow::Res
         rootless: true,
         container_hostname: &options.container_hostname,
     };
-
     let mut driver =
         get_network_driver(info, &None).map_err(|e| anyhow::anyhow!("netavark get driver: {e}"))?;
     driver
         .validate()
         .map_err(|e| anyhow::anyhow!("netavark validate: {e}"))?;
-
-    let sockets = (&mut hostns.netlink, &mut netns.netlink);
-    driver
-        .setup(sockets)
-        .map(|_status| ())
-        .map_err(|e| anyhow::anyhow!("netavark setup: {e}"))
+    Ok(driver)
 }
 
 /// Async wrapper over a spawned [`NetworkActor`].
@@ -506,11 +597,13 @@ impl NetworkManager {
         &self,
         pkg: &str,
         container_interface: &str,
+        port_mappings: Option<Vec<PortMapping>>,
     ) -> anyhow::Result<NetworkHandle> {
         self.actor
             .ask(messages::Attach {
                 pkg: pkg.to_owned(),
                 container_interface: container_interface.to_owned(),
+                port_mappings,
             })
             .await
             .context("NetworkActor has died?")?
@@ -518,14 +611,25 @@ impl NetworkManager {
 
     /// Idempotently detach the package's host veth (keeps the namespace).
     ///
+    /// Non-empty `port_mappings` trigger a netavark teardown before the veth
+    /// delete; the same `container_interface` passed to [`attach`](Self::attach)
+    /// must be supplied so netavark can rebuild the teardown options.
+    ///
     /// # Errors
     ///
     /// Returns an error only if the actor has stopped; teardown itself is
     /// best-effort and always reports success.
-    pub async fn detach(&self, pkg: &str) -> anyhow::Result<()> {
+    pub async fn detach(
+        &self,
+        pkg: &str,
+        container_interface: &str,
+        port_mappings: Option<Vec<PortMapping>>,
+    ) -> anyhow::Result<()> {
         self.actor
             .ask(messages::Detach {
                 pkg: pkg.to_owned(),
+                container_interface: container_interface.to_owned(),
+                port_mappings,
             })
             .await
             .context("NetworkActor has died?")?
@@ -597,6 +701,44 @@ mod tests {
         assert!(validate_interface_name("eth/0").is_err());
         assert!(validate_interface_name("eth 0").is_err());
         assert!(validate_interface_name("..").is_err());
+    }
+
+    fn port_mapping() -> PortMapping {
+        PortMapping {
+            container_port: 80,
+            host_ip: "0.0.0.0".to_owned(),
+            host_port: 8080,
+            protocol: "tcp".to_owned(),
+            range: 1,
+        }
+    }
+
+    #[test]
+    fn build_network_options_carries_port_mappings() {
+        let opts = build_network_options(
+            "pkg-a",
+            "ssam-br0",
+            "172.20.0.0/16".parse().unwrap(),
+            Ipv4Addr::new(172, 20, 0, 1),
+            Ipv4Addr::new(172, 20, 0, 2),
+            "eth0",
+            Some(vec![port_mapping()]),
+        );
+        assert_eq!(opts.port_mappings, Some(vec![port_mapping()]));
+    }
+
+    #[test]
+    fn build_network_options_omits_absent_port_mappings() {
+        let opts = build_network_options(
+            "pkg-a",
+            "ssam-br0",
+            "172.20.0.0/16".parse().unwrap(),
+            Ipv4Addr::new(172, 20, 0, 1),
+            Ipv4Addr::new(172, 20, 0, 2),
+            "eth0",
+            None,
+        );
+        assert_eq!(opts.port_mappings, None);
     }
 
     #[tokio::test]
