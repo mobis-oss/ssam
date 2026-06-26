@@ -26,6 +26,15 @@ pub enum ImageType {
     ErofsLz4hc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Display, Default)]
+pub enum OciArchitecture {
+    #[strum(serialize = "arm64")]
+    #[default]
+    Arm64,
+    #[strum(serialize = "amd64")]
+    Amd64,
+}
+
 /* Part of Skopeo available transports are supported.
 Refer to the following for detail:
 - https://github.com/containers/image/blob/main/docs/containers-transports.5.md
@@ -93,7 +102,11 @@ where
 // Safety: Using Debug format ({:#?}/{:?}) for PathBuf instead of Display to prevent
 // log injection attacks via special characters in path names.
 #[allow(clippy::use_debug, clippy::unnecessary_debug_formatting)]
-pub fn prepare(workspace: &crate::Workspace, pkgfs_src: Option<&str>) -> anyhow::Result<()> {
+pub fn prepare(
+    workspace: &crate::Workspace,
+    pkgfs_src: Option<&str>,
+    oci_arch: Option<OciArchitecture>,
+) -> anyhow::Result<()> {
     if let Some(pkgfs_src) = pkgfs_src {
         // using symlink_metadata() because pkgfs may be a symlink
         if workspace.pkgfs.symlink_metadata().is_ok() {
@@ -107,8 +120,11 @@ pub fn prepare(workspace: &crate::Workspace, pkgfs_src: Option<&str>) -> anyhow:
             .any(|prefix| pkgfs_src.starts_with(prefix))
         {
             // If src is docker, creating pkgfs as a directory with the extracted rootfs
-            docker::extract_rootfs(workspace, pkgfs_src)?;
+            docker::extract_rootfs(workspace, pkgfs_src, oci_arch.unwrap_or_default())?;
         } else {
+            if oci_arch.is_some() {
+                println!("WARN: Given source OCI architecture would be ignored!");
+            }
             let pkgfs_src = PathBuf::from(pkgfs_src).canonicalize().with_context(|| {
                 format!("Failed to determine package filesystem source - {pkgfs_src:#?}")
             })?;

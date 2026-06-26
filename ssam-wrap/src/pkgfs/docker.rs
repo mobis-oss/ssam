@@ -11,7 +11,6 @@ use super::execute_command;
 static OCI_IMAGE_TAG: &str = "ssam";
 static OCI_IMAGE_DIRNAME: &str = "oci_unpack";
 static OCI_UNPACK_DIRNAME: &str = "oci_unpack";
-static OCI_TARGET_ARCHITECTURE: &str = "arm64";
 
 fn copy_runtime_config(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> anyhow::Result<()> {
     let mut oci_runtime_conf =
@@ -75,7 +74,7 @@ fn move_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn extract_rootfs(workspace: &crate::Workspace, docker_uri: &str) -> anyhow::Result<()> {
+pub fn extract_rootfs(workspace: &crate::Workspace, docker_uri: &str, architecture: super::OciArchitecture) -> anyhow::Result<()> {
     workspace.prepare_intermediate_dir()?;
 
     let oci_image_dir = workspace.intermediate_dir.join(OCI_IMAGE_DIRNAME);
@@ -125,11 +124,11 @@ pub fn extract_rootfs(workspace: &crate::Workspace, docker_uri: &str) -> anyhow:
             } else {
                 arch
             };
-            if arch != OCI_TARGET_ARCHITECTURE {
+            if arch != architecture.to_string() {
                 return Err(anyhow::anyhow!(
                     "Docker image {} is not for {} architecture, found: {}",
                     docker_uri,
-                    OCI_TARGET_ARCHITECTURE,
+                    architecture,
                     arch.trim()
                 ));
             }
@@ -145,7 +144,7 @@ pub fn extract_rootfs(workspace: &crate::Workspace, docker_uri: &str) -> anyhow:
         Some([
             "--insecure-policy",
             "copy",
-            &format!("--override-arch={OCI_TARGET_ARCHITECTURE}"),
+            &format!("--override-arch={architecture}"),
             docker_uri,
             format!("oci:{oci_image_name}").as_str(),
         ]),

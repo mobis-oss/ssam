@@ -57,6 +57,12 @@ struct Cli {
     #[arg(short = 's', long)]
     pkgfs_src: Option<String>,
 
+    /// Specify source image architecture when using container transport for --pkgfs-src.
+    /// Only effective with container transports (docker://, docker-daemon:, etc.);
+    /// ignored otherwise. Defaults to arm64 if not specified.
+    #[arg(short = 'a', long = "src-oci-arch")]
+    src_oci_arch: Option<pkgfs::OciArchitecture>,
+
     #[arg(required = true)]
     workspace: String,
 }
@@ -231,7 +237,7 @@ fn main() -> anyhow::Result<()> {
     // point different location.
     // This could cause confusion, so might need to fix.
     let pkgfs_src = args.pkgfs_src;
-    pkgfs::prepare(&workspace, pkgfs_src.as_deref())?;
+    pkgfs::prepare(&workspace, pkgfs_src.as_deref(), args.src_oci_arch)?;
     if let Some(name) = &args.prepare {
         workspace.prepare(name)?;
         process::exit(0);
