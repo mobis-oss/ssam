@@ -199,21 +199,42 @@ fn add_proxy_getters(
         }
 
         let getter_name = create_getter_name(field_path);
-        let field_access = create_field_access(field_idents);
-        let field_tree = format!("{prefix}{}", field_path.join("."));
         let return_type = determine_leaf_type(val, field_path, optional_keys, prefix);
-        let is_optional = optional_keys.contains(&field_tree);
+        let leaf_tree = format!("{prefix}{}", field_path.join("."));
+        let leaf_optional = optional_keys.contains(&leaf_tree);
 
-        let getter = if is_optional {
+        // Thread `?` through any optional intermediate table: a getter for
+        // `a.b.c` where `b: Option<B>` becomes `self.a.b.as_ref()?.c`.
+        let last = field_idents.len() - 1;
+        let mut any_intermediate_optional = false;
+        let mut access = quote! { self };
+        for (i, ident) in field_idents.iter().enumerate() {
+            access = quote! { #access.#ident };
+            if i < last {
+                let intermediate_tree = format!("{prefix}{}", field_path[..=i].join("."));
+                if optional_keys.contains(&intermediate_tree) {
+                    any_intermediate_optional = true;
+                    access = quote! { #access.as_ref()? };
+                }
+            }
+        }
+
+        let getter = if leaf_optional {
             quote! {
                 pub fn #getter_name(&self) -> Option<&#return_type> {
-                    #field_access.as_ref()
+                    #access.as_ref()
+                }
+            }
+        } else if any_intermediate_optional {
+            quote! {
+                pub fn #getter_name(&self) -> Option<&#return_type> {
+                    Some(&#access)
                 }
             }
         } else {
             quote! {
                 pub fn #getter_name(&self) -> &#return_type {
-                    &#field_access
+                    &#access
                 }
             }
         };
@@ -232,15 +253,6 @@ fn create_getter_name(field_path: &[String]) -> proc_macro2::Ident {
             .collect::<Vec<_>>()
             .join("_")
     )
-}
-
-/// Creates field access chain for getter methods
-fn create_field_access(field_idents: &[proc_macro2::Ident]) -> proc_macro2::TokenStream {
-    let mut access = quote! { self };
-    for ident in field_idents {
-        access = quote! { #access.#ident };
-    }
-    access
 }
 
 /// Determines the type for a leaf value in getter methods
@@ -564,17 +576,6 @@ mod tests {
         let single_field = vec!["simple".to_string()];
         let result = create_getter_name(&single_field);
         assert_eq!(result.to_string(), "get_simple");
-    }
-
-    #[test]
-    fn test_create_field_access() {
-        let field_idents = vec![format_ident!("first"), format_ident!("second")];
-        let result = create_field_access(&field_idents);
-        assert_eq!(result.to_string(), "self . first . second");
-
-        let single_ident = vec![format_ident!("single")];
-        let result = create_field_access(&single_ident);
-        assert_eq!(result.to_string(), "self . single");
     }
 
     #[test]
