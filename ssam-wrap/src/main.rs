@@ -28,7 +28,7 @@ struct WrapOnlyArgs {
     #[arg(short = 'k', long = "private-key")]
     private_key_file: Option<String>,
 
-    /// Specify output package filename
+    /// Specify output package filename [default: <WORKSPACE>/<name>-<version>.ssam]
     #[arg(short = 'o', long = "output")]
     package_output_filename: Option<String>,
 
@@ -245,13 +245,6 @@ fn main() -> anyhow::Result<()> {
 
     workspace.prepare_intermediate_dir()?;
 
-    let package_filepath = workspace.path.join(
-        &args
-            .wrap_only_args
-            .package_output_filename
-            .context("Container package name is required")?,
-    );
-
     let private_key_filename = &args
         .wrap_only_args
         .private_key_file
@@ -283,6 +276,13 @@ fn main() -> anyhow::Result<()> {
         &pkgfs_info,
     )?;
     let metadata = pkg_file.metadata();
+    let package_filepath = match &args.wrap_only_args.package_output_filename {
+        Some(filename) => workspace.path.join(filename),
+        None => workspace.path.join(format!(
+            "{}-{}.ssam",
+            metadata.package.name, metadata.package.version
+        )),
+    };
     pkg_file.wrap(&package_filepath, private_key_filename)?;
 
     println!(
