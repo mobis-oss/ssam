@@ -277,7 +277,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     let metadata = pkg_file.metadata();
     let package_filepath = match &args.wrap_only_args.package_output_filename {
-        Some(filename) => workspace.path.join(filename),
+        Some(filename) => PathBuf::from(filename),
         None => workspace.path.join(format!(
             "{}-{}.ssam",
             metadata.package.name, metadata.package.version
