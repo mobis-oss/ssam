@@ -670,23 +670,22 @@ pub(crate) fn unmount_pkgfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()
     let unmount_time = Instant::now();
     let mount_point = &pkgfs_meta.mount_point;
 
-    let packages_overlayfs_root = configuration::packages_overlayfs_root();
-    if !packages_overlayfs_root.is_empty() {
-        log::debug!("unmount_pkgfs({}): overlayfs", pkgfs_meta.path.display());
+    // Reverse of mount_device: an optional overlay sits on the pkgfs base at
+    // the same mount point. mount_pkgfs's idempotency gate prevents restacking,
+    // so at most these two layers exist; unmount top-down, each guard making an
+    // already-unmounted layer a no-op during recovery.
+    if !configuration::packages_overlayfs_root().is_empty() && is_exact_mount(mount_point) {
         do_unmount(mount_point).context(format!(
             "unmount_pkgfs({}): Failed while unmounting overlayfs",
             pkgfs_meta.path.display()
         ))?;
     }
-
-    log::debug!(
-        "unmount_pkgfs({}): package filesystem",
-        pkgfs_meta.path.display()
-    );
-    do_unmount(mount_point).context(format!(
-        "unmount_pkgfs({}): Failed while unmounting package filesystem",
-        pkgfs_meta.path.display()
-    ))?;
+    if is_exact_mount(mount_point) {
+        do_unmount(mount_point).context(format!(
+            "unmount_pkgfs({}): Failed while unmounting package filesystem",
+            pkgfs_meta.path.display()
+        ))?;
+    }
 
     log::trace!(
         "unmount_pkgfs({}) elapsed: {:?}",
@@ -701,6 +700,19 @@ pub(crate) async fn mount_pkgfs(
     pkgfs_meta: &PackageFsMetadata,
     loop_control: &impl LoopDeviceAttacher,
 ) -> anyhow::Result<()> {
+    // Idempotency gate: reuse a live mount left by an ungraceful crash instead
+    // of stacking a second loop+dm-verity+mount chain (mount(2) succeeds on top
+    // of an existing mount, leaking the old devices and mount-table entry).
+    // Mount point logged via Debug to prevent log injection (ssamd/AGENTS.md).
+    #[allow(clippy::unnecessary_debug_formatting)]
+    if is_exact_mount(&pkgfs_meta.mount_point) {
+        log::info!(
+            "{pkg_name}: package fs already mounted at {:?}; skipping mount",
+            pkgfs_meta.mount_point
+        );
+        return Ok(());
+    }
+
     let pkgfs_path = pkgfs_meta.path.as_path();
     let pkgfs_info = &pkgfs_meta.packagefs_info;
     let total_time = Instant::now();
@@ -796,12 +808,19 @@ fn findmnt_impl(
         "Failed to read system mounts. Ensure /proc is accessible and correctly formatted.",
     )?;
 
+    // Canonicalize before matching: /proc/mounts reports resolved paths, so a
+    // lexical `target_path` under a symlinked ancestor would false-negate a
+    // live mount. Falls back to the raw path when canonicalize fails.
+    let canonicalize_or_raw = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let canonical_target = canonicalize_or_raw(target_path);
+
     let best_match_mount_point = mounts
         .iter()
         .filter_map(|mount_info| {
             let current_mount_path = Path::new(&mount_info.fs_file);
-            if target_path.starts_with(current_mount_path) {
-                Some((mount_info, current_mount_path.as_os_str().len()))
+            let canonical_mount = canonicalize_or_raw(current_mount_path);
+            if canonical_target.starts_with(&canonical_mount) {
+                Some((mount_info, canonical_mount.as_os_str().len()))
             } else {
                 None
             }
@@ -819,6 +838,19 @@ fn findmnt_impl(
 
 pub(crate) fn findmnt(target: impl AsRef<Path>) -> anyhow::Result<String> {
     findmnt_impl(target, procfs::mounts)
+}
+
+/// Whether `mount_point` is the exact target of a live mount (canonical-path
+/// compared, so a symlinked ancestor is not a false negative). A `findmnt`
+/// failure (missing dir, no `/proc/mounts` entry) is `false`. Ground truth for
+/// "is this package's filesystem already mounted", shared by `mount_pkgfs`'s
+/// idempotency gate and `unmount_pkgfs`'s guarded teardown.
+fn is_exact_mount(mount_point: &Path) -> bool {
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    matches!(
+        findmnt(mount_point),
+        Ok(found) if canonical(Path::new(&found)) == canonical(mount_point)
+    )
 }
 
 #[cfg(test)]
