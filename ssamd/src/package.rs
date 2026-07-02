@@ -151,20 +151,16 @@ impl LazyExecutor {
         } else {
             self.cell
                 .get_or_try_init(async || {
-                    let mut lock = self.init_args.write().await;
-                    let init_args = lock.take().expect("Already initialized");
-
-                    let ExecutorInitArgs {
-                        package_name,
-                        execution_type,
-                        state_sender,
-                    } = init_args;
+                    let init_args =
+                        self.init_args.write().await.take().context(
+                            "executor init args already consumed by a prior init attempt",
+                        )?;
 
                     executor::PackageExecutor::new(
-                        package_name,
+                        init_args.package_name,
                         self.command.clone(),
-                        execution_type,
-                        state_sender,
+                        init_args.execution_type,
+                        init_args.state_sender,
                     )
                     .await
                 })
@@ -452,7 +448,7 @@ impl Package {
         volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
         network: Option<NetworkManager>,
     ) -> anyhow::Result<Self> {
-        let (sender, mut receiver) = mpsc::channel(8);
+        let (sender, receiver) = mpsc::channel(8);
 
         let pkg_name = context.get_name().to_owned();
 
@@ -540,37 +536,11 @@ impl Package {
         let transition_mgr = TransitionManager::new(Box::new(ops));
         let transition_mgr_ref = transition_mgr.clone();
 
-        let receiver_handle = tokio::spawn(async move {
-            let result: anyhow::Result<()> = loop {
-                if let Some(state) = receiver.recv().await {
-                    log::debug!("{pkg_name}: Received active state: {state}");
-                    let status = match state {
-                        ExecutionStatus::Active(state) => PackageStatus::Running(state.to_string()),
-                        ExecutionStatus::Inactive(_) => PackageStatus::Ready,
-                    };
-
-                    if let Err(e) = transition_mgr_ref.transition_to(status).await {
-                        log::error!("{pkg_name}: Failed to transit status: {e:#}");
-                        break Err(e);
-                    }
-                } else {
-                    break Err(anyhow::anyhow!("Channel closed"));
-                }
-            };
-            if let Err(err) = &result {
-                log::error!("Package {pkg_name} failed to handle the receiver: {err:#}");
-
-                let err_str = format!("{err:#}");
-
-                transition_mgr_ref
-                    .transition_to(PackageStatus::Error(err_str))
-                    .await
-                    .with_context(|| {
-                        format!("Failed to set status of package {pkg_name} to error")
-                    })?;
-            }
-            result
-        });
+        let receiver_handle = tokio::spawn(Self::run_status_receiver(
+            pkg_name,
+            receiver,
+            transition_mgr_ref,
+        ));
 
         let pkg = Self {
             context,
@@ -582,6 +552,41 @@ impl Package {
         pkg.initialize();
 
         Ok(pkg)
+    }
+
+    /// Drives a package's status from `ActiveState` monitor events until the
+    /// channel closes or a transition failure forces `Error`.
+    /// Extracted from `new()` so the constructor stays plain wiring.
+    async fn run_status_receiver(
+        pkg_name: String,
+        mut receiver: mpsc::Receiver<ExecutionStatus>,
+        transition_mgr: TransitionManager,
+    ) -> anyhow::Result<()> {
+        let result: anyhow::Result<()> = loop {
+            if let Some(state) = receiver.recv().await {
+                log::debug!("{pkg_name}: Received active state: {state}");
+                let status = match state {
+                    ExecutionStatus::Active(state) => PackageStatus::Running(state.to_string()),
+                    ExecutionStatus::Inactive(_) => PackageStatus::Ready,
+                };
+
+                if let Err(e) = transition_mgr.transition_to(status).await {
+                    log::error!("{pkg_name}: Failed to transit status: {e:#}");
+                    break Err(e);
+                }
+            } else {
+                break Err(anyhow::anyhow!("Channel closed"));
+            }
+        };
+        if let Err(err) = &result {
+            log::error!("Package {pkg_name} failed to handle the receiver: {err:#}");
+            let err_str = format!("{err:#}");
+            transition_mgr
+                .transition_to(PackageStatus::Error(err_str))
+                .await
+                .with_context(|| format!("Failed to set status of package {pkg_name} to error"))?;
+        }
+        result
     }
 
     fn initialize(&self) {
