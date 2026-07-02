@@ -663,9 +663,22 @@ impl CommandExecutorBackend for TransientUnitExecutor<'_> {
             .await
             .context(format!("Failed to get active state for unit {unit_name}"))?;
 
-        if let UnitActiveState::Failed(_) = active_state {
-            log::debug!("Reset failed state for unit {unit_name}");
-            self.reset_failed().await?;
+        // Idempotent start: any unit already loaded under this name — Active or
+        // mid-transition (Activating/Reloading/Deactivating) — is a live resource
+        // to reuse; reissuing StartTransientUnit errors with "already loaded".
+        // Only a gone unit (Inactive) gets a fresh start; a Failed unit is cleared
+        // first so it can be recreated. The monitor wired in `new()` reports the
+        // eventual settled state.
+        match active_state {
+            UnitActiveState::Inactive => {}
+            UnitActiveState::Failed(_) => {
+                log::debug!("Reset failed state for unit {unit_name}");
+                self.reset_failed().await?;
+            }
+            other => {
+                log::debug!("Unit {unit_name} already loaded; skipping StartTransientUnit");
+                return Ok(ExecutionResult::Success(other.into()));
+            }
         }
         let unit_properties = self
             .gen_unit_properties()
@@ -781,9 +794,18 @@ async fn run_active_state_monitor(
     canceler: CancellationToken,
     state_converter: ActorRef<ActiveStateConverterActor>,
     unit_name: &str,
+    initial_state: UnitActiveState,
 ) -> anyhow::Result<()> {
     let mut stream = std::pin::pin!(stream);
-    let mut cached_state = UnitActiveState::Inactive;
+    // systemd is the source of truth: emit the unit's real live state once so a
+    // recovered (adopted) container is reflected immediately, then forward every
+    // change verbatim. The transition manager's same-state no-op absorbs any
+    // redundant repeat, so no local dedup cache is kept.
+    state_converter
+        .tell(UnitActiveStateChangedMsg {
+            state: initial_state,
+        })
+        .await?;
     loop {
         tokio::select! {
             () = canceler.cancelled() => {
@@ -796,16 +818,10 @@ async fn run_active_state_monitor(
                         "D-Bus ActiveState property stream closed unexpectedly for {unit_name}"
                     );
                 };
-                // get() failure is effectively impossible: ActiveState is always
-                // a String and the D-Bus connection outlives this monitor.
-                let state_str = result?;
-                let state = active_state_from_str(&state_str, failure_source)
+                let state = active_state_from_str(&result?, failure_source)
                     .await
                     .with_context(|| format!("Cannot convert ActiveState for unit {unit_name}"))?;
-                if cached_state != state {
-                    cached_state = state.clone();
-                    state_converter.tell(UnitActiveStateChangedMsg { state }).await?;
-                }
+                state_converter.tell(UnitActiveStateChangedMsg { state }).await?;
             }
         }
     }
@@ -842,6 +858,24 @@ impl ActiveStateHandler<'_> {
         let cancel_token = CancellationToken::new();
         let canceler = cancel_token.clone();
 
+        // Read the live state once before spawning so the monitor can emit it as
+        // its first event, reflecting an already-active (adopted) unit. An
+        // unreadable state (unit not yet loaded in the pre-start path) is Inactive.
+        let initial_state = match unit_proxy.active_state().await {
+            Ok(state) => {
+                active_state_from_str(state.as_str(), &SystemdServiceProxy(&service_proxy))
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "unit {unit_name}: unrecognized initial systemd active state, \
+                             defaulting to Inactive: {e:#}"
+                        );
+                        UnitActiveState::Inactive
+                    })
+            }
+            Err(_) => UnitActiveState::Inactive,
+        };
+
         tokio::spawn(async move {
             let state_stream = stream.then(|msg| async move {
                 msg.get()
@@ -855,6 +889,7 @@ impl ActiveStateHandler<'_> {
                 canceler,
                 state_converter,
                 &unit_name,
+                initial_state,
             )
             .await
             {
@@ -1134,6 +1169,7 @@ mod tests {
                 cancel_token,
                 converter,
                 "test.service",
+                UnitActiveState::Inactive,
             ),
         )
         .await;
@@ -1146,7 +1182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_active_state_monitor_deduplicates_and_forwards() {
+    async fn test_run_active_state_monitor_emits_initial_then_forwards_all() {
         use futures_util::stream;
 
         let (tx, mut rx) = mpsc::channel::<ExecutionStatus>(10);
@@ -1165,10 +1201,18 @@ mod tests {
             cancel_token,
             converter,
             "test.service",
+            UnitActiveState::Inactive,
         )
         .await;
         assert!(result.is_err());
 
+        // Initial state first, then every stream value verbatim (no dedup); the
+        // repeated active is later collapsed by transition_to's same-state no-op.
+        assert!(matches!(
+            rx.recv().await,
+            Some(ExecutionStatus::Inactive(_))
+        ));
+        assert!(matches!(rx.recv().await, Some(ExecutionStatus::Active(_))));
         assert!(matches!(rx.recv().await, Some(ExecutionStatus::Active(_))));
         assert!(matches!(
             rx.recv().await,
@@ -1196,6 +1240,7 @@ mod tests {
             cancel_token,
             converter,
             "test.service",
+            UnitActiveState::Inactive,
         )
         .await;
         assert!(result.is_err());
@@ -1226,6 +1271,7 @@ mod tests {
                 canceler,
                 converter,
                 "test.service",
+                UnitActiveState::Inactive,
             ),
         )
         .await;
@@ -1250,12 +1296,50 @@ mod tests {
             cancel_token,
             converter,
             "test.service",
+            UnitActiveState::Inactive,
         )
         .await;
         // Stream exhausted after delivering "failed" → bail on None
         assert!(result.is_err());
 
+        // Initial Inactive emitted first, then the failed state as Active.
+        assert!(matches!(
+            rx.recv().await,
+            Some(ExecutionStatus::Inactive(_))
+        ));
         let status = rx.recv().await.unwrap();
         assert!(matches!(status, ExecutionStatus::Active(_)));
+    }
+
+    #[tokio::test]
+    async fn test_run_active_state_monitor_initial_active_forwards_coalesced_exit() {
+        use futures_util::stream;
+
+        let (tx, mut rx) = mpsc::channel::<ExecutionStatus>(10);
+        let (converter, _handle) = spawn::<ActiveStateConverterActor>(tx);
+        let cancel_token = CancellationToken::new();
+
+        // Adopt path: monitor starts at Active, then the only delivered value is a
+        // coalesced "inactive". The initial Active is emitted first, then the exit
+        // Inactive is forwarded so the package leaves Running.
+        let state_stream = stream::iter(vec![Ok("inactive".to_string())]);
+
+        let result = run_active_state_monitor(
+            state_stream,
+            &MockServiceProxy,
+            cancel_token,
+            converter,
+            "test.service",
+            UnitActiveState::Active,
+        )
+        .await;
+        assert!(result.is_err());
+
+        assert!(matches!(rx.recv().await, Some(ExecutionStatus::Active(_))));
+        assert!(matches!(
+            rx.recv().await,
+            Some(ExecutionStatus::Inactive(_))
+        ));
+        assert_eq!(rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 }
