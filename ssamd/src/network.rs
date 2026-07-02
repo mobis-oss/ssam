@@ -111,7 +111,7 @@ pub mod netns {
     /// Directory holding ssam named network namespaces, under the process temp
     /// directory (the writable tmpfs required for the OCI bundle).
     #[must_use]
-    fn netns_dir() -> PathBuf {
+    pub(crate) fn netns_dir() -> PathBuf {
         std::env::temp_dir().join("ssam").join("netns")
     }
 
@@ -128,6 +128,23 @@ pub mod netns {
     #[must_use]
     pub fn netns_path(name: &str) -> PathBuf {
         netns_dir().join(name)
+    }
+
+    /// Validate the ssam-owned netns tree (`netns_dir()` and its parent) is a
+    /// real, root-owned, non-symlink, 0700 directory before any caller reads or
+    /// `setns`es beneath it. Callers share this `/tmp`-rooted tree, so without
+    /// the check an attacker could pre-create `netns_dir()` and smuggle in a
+    /// trusted symlink.
+    ///
+    /// # Errors
+    ///
+    /// Errors if either directory cannot be created/read, or is not euid-owned
+    /// with mode exactly 0700.
+    pub(crate) fn ensure_netns_tree_trusted() -> anyhow::Result<()> {
+        let dir = netns_dir();
+        let ssam_dir = dir.parent().context("netns directory has no parent")?;
+        ensure_root_only_dir(ssam_dir)?;
+        ensure_root_only_dir(&dir)
     }
 
     /// Create `dir` as a root-only (0700) dir and reject it as tampering unless
@@ -168,19 +185,11 @@ pub mod netns {
     // injection via special characters in netns paths.
     #[allow(clippy::use_debug, clippy::unnecessary_debug_formatting)]
     pub fn create_named_netns(path: &Path) -> anyhow::Result<()> {
-        // SECURITY (TOCTOU): /tmp is world-writable, so validate EVERY ssam-owned
-        // component, not just the leaf. An attacker who pre-creates an intermediate
-        // dir they own could swap the checked leaf between stat and open. Top-down
-        // validation closes this: a confirmed root-owned 0700 dir denies all
-        // non-root access below it, and /tmp's sticky bit blocks renaming our entry.
-        // Do NOT collapse this back to a single recursive create.
-        let dir = netns_dir();
-        let ssam_dir = dir.parent().context("netns directory has no parent")?;
-        ensure_root_only_dir(ssam_dir)?;
-        ensure_root_only_dir(&dir)?;
-
-        // Existence is only trustworthy under the validated tree, so check it here,
-        // not at function entry. Idempotent: a surviving namespace is preserved.
+        // The netns tree is created and trust-validated once at daemon startup
+        // (`NetworkManager::new`). Under sticky /tmp a confirmed root-0700 tree
+        // cannot then be tampered by non-root, so callers trust it here without
+        // re-checking; existence below is only meaningful under that trusted tree.
+        // Idempotent: a surviving namespace is preserved across restart.
         if path.exists() {
             return Ok(());
         }
@@ -259,6 +268,7 @@ pub mod netns {
     #[cfg(test)]
     mod tests {
         use std::os::fd::OwnedFd;
+        use std::os::unix::fs::PermissionsExt;
 
         use super::*;
 
@@ -266,6 +276,30 @@ pub mod netns {
             let file = fs::File::open(path)
                 .with_context(|| format!("Failed to open netns {}", path.display()))?;
             Ok(file.into())
+        }
+
+        #[test]
+        #[ignore = "requires root; ensure_root_only_dir checks meta.uid() == 0"]
+        fn ensure_root_only_dir_creates_and_accepts_0700() {
+            let parent = tempfile::TempDir::new().expect("tempdir");
+            let dir = parent.path().join("fresh");
+            ensure_root_only_dir(&dir).expect("first call creates a 0700 dir");
+            // Idempotent: an existing dir that already satisfies the check passes again.
+            ensure_root_only_dir(&dir).expect("second call accepts the same trusted dir");
+        }
+
+        #[test]
+        #[ignore = "requires root; ensure_root_only_dir checks meta.uid() == 0"]
+        fn ensure_root_only_dir_rejects_group_or_other_writable() {
+            let parent = tempfile::TempDir::new().expect("tempdir");
+            let dir = parent.path().join("loose");
+            fs::create_dir(&dir).expect("create dir");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o770)).expect("chmod 0770");
+            let err = ensure_root_only_dir(&dir).expect_err("0770 must be rejected as tampering");
+            assert!(
+                format!("{err:#}").contains("not a root-only directory"),
+                "unexpected error: {err:#}"
+            );
         }
 
         #[test]
@@ -295,6 +329,9 @@ pub mod netns {
             // Best-effort cleanup from any prior failed run.
             let _ = delete_named_netns(&path);
 
+            // create_named_netns no longer establishes the tree itself; the daemon
+            // does that once via NetworkManager::new. Mirror that here.
+            ensure_netns_tree_trusted().unwrap();
             create_named_netns(&path).unwrap();
             assert!(path.exists());
             // Idempotent re-create must succeed without disturbing the namespace.

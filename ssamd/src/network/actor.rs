@@ -37,6 +37,7 @@ use netavark::network::netlink_route::LinkID;
 use netavark::network::types::{
     NamedPerNetworkOptions, Network, NetworkOptions, PerNetworkOptions, PortMapping, Subnet,
 };
+use netlink_packet_route::address::AddressAttribute;
 
 use crate::network::allocator::{self, IpAllocator};
 use crate::network::{link, netns};
@@ -105,12 +106,25 @@ pub struct NetworkHandle {
 }
 
 /// rsactor actor owning the single bridge network's allocator state.
-#[derive(Debug, Actor)]
+#[derive(Debug)]
 pub struct NetworkActor {
     bridge_name: String,
     subnet: Ipv4Net,
     gateway: Ipv4Addr,
     allocator: IpAllocator,
+}
+
+impl Actor for NetworkActor {
+    type Args = Self;
+    type Error = std::convert::Infallible;
+
+    /// Claim every running container's in-use IP into the fresh allocator once,
+    /// before any attach/detach is handled, so a restart cannot reissue a live
+    /// address. Best-effort — an untrusted netns tree or scan error just skips.
+    async fn on_start(mut actor: Self, _actor_ref: &ActorRef<Self>) -> Result<Self, Self::Error> {
+        actor.claim_in_use_ips().await;
+        Ok(actor)
+    }
 }
 
 impl SupervisedActor for NetworkActor {
@@ -181,6 +195,9 @@ impl NetworkActor {
         msg: messages::Attach,
         _actor_ref: &ActorRef<Self>,
     ) -> anyhow::Result<NetworkHandle> {
+        // No netns-tree trust check here: `new()` validated the tree at actor
+        // construction and a root-0700 tree under sticky /tmp cannot then be
+        // tampered by non-root.
         let messages::Attach {
             pkg,
             container_interface,
@@ -198,9 +215,17 @@ impl NetworkActor {
         // not a practical concern.
         if link::exists(&veth) {
             if ns_path.exists() {
-                // Already attached: recompute the IP (idempotent) and return a
-                // handle without re-running netavark.
-                let ip = self.allocator.allocate(&pkg, &self.subnet, self.gateway)?;
+                // Already attached (container adopted across a daemon restart).
+                // The scan at handler entry already claimed this netid's in-use
+                // address, so read it back; a missing entry fails closed rather
+                // than minting a possibly-wrong fresh one.
+                let ip = self.allocator.ip_for(&veth).with_context(|| {
+                    format!(
+                        "{pkg}: veth and netns exist but no tracked address \
+                         (boot scan could not read it); refusing to mint a \
+                         possibly-wrong one"
+                    )
+                })?;
                 return Ok(self.handle_for(ns_path, ip, container_interface));
             }
             // Stale leftover: the namespace is gone but the veth remains. netavark
@@ -212,7 +237,7 @@ impl NetworkActor {
         }
 
         // Fresh setup.
-        let ip = self.allocator.allocate(&pkg, &self.subnet, self.gateway)?;
+        let ip = self.allocator.allocate(&veth, &self.subnet, self.gateway)?;
 
         let options = build_network_options(
             &pkg,
@@ -238,7 +263,7 @@ impl NetworkActor {
 
         if let Err(e) = setup_result {
             // Roll back the in-memory mark; keep the namespace intact.
-            self.allocator.release(&pkg);
+            self.allocator.release(&veth);
             // netavark may have created the host veth before failing. Remove it so
             // the next attach is not fooled by a leftover veth into reporting the
             // half-built network as already attached.
@@ -271,29 +296,43 @@ impl NetworkActor {
         let veth = allocator::veth_host_name(&pkg);
 
         if port_mappings.as_ref().is_some_and(|m| !m.is_empty()) {
-            let teardown_result = async {
-                let ip = self.allocator.allocate(&pkg, &self.subnet, self.gateway)?;
-                let options = build_network_options(
-                    &pkg,
-                    &self.bridge_name,
-                    self.subnet,
-                    self.gateway,
-                    ip,
-                    &container_interface,
-                    port_mappings,
-                );
-                let ns_name = netns::netns_name(&pkg);
-                let netns_path = netns::netns_path(&ns_name)
-                    .to_str()
-                    .context("netns path is not valid UTF-8")?
-                    .to_owned();
-                tokio::task::spawn_blocking(move || run_netavark_teardown(&netns_path, &options))
-                    .await
-                    .context("netavark teardown task failed to join")?
-            }
-            .await;
-            if let Err(e) = teardown_result {
-                log::warn!("Best-effort netavark teardown for {pkg} failed: {e}");
+            // Target the real address (claimed by the boot scan at handler entry),
+            // never a synthesized one: netavark's DNAT-rule removal is keyed by the
+            // ip we pass it. No known address -> skip rather than target a fake one.
+            match self.allocator.ip_for(&veth) {
+                Some(ip) => {
+                    let teardown_result = async {
+                        let options = build_network_options(
+                            &pkg,
+                            &self.bridge_name,
+                            self.subnet,
+                            self.gateway,
+                            ip,
+                            &container_interface,
+                            port_mappings,
+                        );
+                        let ns_name = netns::netns_name(&pkg);
+                        let netns_path = netns::netns_path(&ns_name)
+                            .to_str()
+                            .context("netns path is not valid UTF-8")?
+                            .to_owned();
+                        tokio::task::spawn_blocking(move || {
+                            run_netavark_teardown(&netns_path, &options)
+                        })
+                        .await
+                        .context("netavark teardown task failed to join")?
+                    }
+                    .await;
+                    if let Err(e) = teardown_result {
+                        log::warn!("Best-effort netavark teardown for {pkg} failed: {e}");
+                    }
+                }
+                None => {
+                    log::warn!(
+                        "{pkg}: no known address for port-mapping teardown; skipping \
+                         netavark teardown rather than target a synthesized address"
+                    );
+                }
             }
         }
 
@@ -302,7 +341,7 @@ impl NetworkActor {
         // holds this address. On delete failure keep the mark: leaking it is safe,
         // but reusing it would let another package collide with the lingering veth.
         match link::delete(&veth) {
-            Ok(()) => self.allocator.release(&pkg),
+            Ok(()) => self.allocator.release(&veth),
             Err(e) => {
                 log::warn!("Best-effort veth teardown for {pkg} failed; keeping IP marked: {e}");
             }
@@ -339,6 +378,139 @@ impl NetworkActor {
             container_interface,
         }
     }
+
+    /// Scan every running container's in-use address into the fresh allocator
+    /// (keyed by its `ssam-<hash>` netid) so a later allocate cannot reissue an
+    /// adopted container's address. Runs once at actor start, before any message.
+    ///
+    /// The netns tree is already validated in `new()`; a scan error just skips,
+    /// best-effort.
+    async fn claim_in_use_ips(&mut self) {
+        let subnet = self.subnet;
+        let gateway = self.gateway;
+        // The scan enters each container's network namespace via `setns` and
+        // relies on netavark restoring the host namespace afterward; that
+        // restore is not unwind-safe, so a panic (or a failed restore) would
+        // leave the running thread pinned in a container namespace. Run it on a
+        // dedicated OS thread that dies as soon as the scan returns, so any
+        // pinned thread is discarded rather than a reused blocking-pool worker
+        // (tokio keeps that worker alive after catching the panic). The outer
+        // spawn_blocking only parks on the join and never touches `setns`.
+        let claims = match tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || scan_in_use_host_ips(subnet, gateway)).join()
+        })
+        .await
+        {
+            Ok(Ok(claims)) => claims,
+            Ok(Err(_)) => {
+                log::warn!("in-use host IP scan thread panicked; skipping IP claim");
+                return;
+            }
+            Err(e) => {
+                log::warn!("in-use host IP scan task failed to join: {e}");
+                return;
+            }
+        };
+        for (netid, ip) in claims {
+            if let Err(e) = self.allocator.claim(&netid, ip) {
+                log::warn!("in-use host IP scan: {e}");
+            }
+        }
+    }
+}
+
+/// Read each running container's in-use IPv4 within `subnet` from the persistent
+/// netns directory, returning `(netid, ip)` pairs to claim. A missing directory
+/// or per-entry error yields fewer pairs, never an error. Blocking netlink I/O —
+/// run on a blocking executor.
+fn scan_in_use_host_ips(subnet: Ipv4Net, gateway: Ipv4Addr) -> Vec<(String, Ipv4Addr)> {
+    let dir = netns::netns_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            log::warn!(
+                "in-use host IP scan: cannot read netns dir {}: {e}",
+                dir.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut claims = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log::warn!("in-use host IP scan: cannot read a netns dir entry: {e}");
+                continue;
+            }
+        };
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        // The netns file name equals the veth/allocator netid (`ssam-<hash>`).
+        if !name.starts_with("ssam-") {
+            continue;
+        }
+        match read_container_ipv4(&entry.path(), subnet, gateway) {
+            Ok(Some(ip)) => claims.push((name.to_owned(), ip)),
+            Ok(None) => {}
+            Err(e) => log::error!(
+                "in-use host IP scan: probe of live container {name} failed: {e}; \
+                 its address is unprotected from reallocation"
+            ),
+        }
+    }
+    claims
+}
+
+/// Read the container's own IPv4 configured inside the namespace at `netns_path`.
+///
+/// A ssam bridge container's veth carries exactly one unicast address in
+/// `subnet` — its own. Loopback/link-local fall outside `subnet`, and the
+/// network/broadcast are never assigned to an interface as unicast, so the
+/// single in-`subnet` unicast that is not the `gateway` is unambiguously it.
+/// Excluding the gateway also stops a tampered container that self-assigned it
+/// from being claimed as its owner. `Ok(None)` = nothing to claim.
+///
+/// Blocking netlink I/O + a transient `setns` — MUST run on a blocking executor.
+///
+/// # Errors
+///
+/// Errors if the path is not valid UTF-8, the netlink sockets cannot be opened,
+/// or the address dump fails.
+fn read_container_ipv4(
+    netns_path: &Path,
+    subnet: Ipv4Net,
+    gateway: Ipv4Addr,
+) -> anyhow::Result<Option<Ipv4Addr>> {
+    let netns_path = netns_path
+        .to_str()
+        .context("netns path is not valid UTF-8")?;
+
+    // netavark binds this socket inside the namespace; the returned File handles
+    // must outlive the dump because the socket fds borrow from them.
+    let (_hostns, mut netns) = open_netlink_sockets(netns_path)
+        .map_err(|e| anyhow::anyhow!("open netlink sockets for {netns_path}: {e}"))?;
+
+    let addresses = netns
+        .netlink
+        .dump_addresses(None)
+        .map_err(|e| anyhow::anyhow!("dump addresses in {netns_path}: {e}"))?;
+
+    for addr in addresses {
+        for attr in addr.attributes {
+            if let AddressAttribute::Address(IpAddr::V4(v4)) = attr
+                && subnet.contains(&v4)
+                && v4 != gateway
+            {
+                return Ok(Some(v4));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Validate a Linux network interface name against kernel `IFNAMSIZ` rules.
@@ -566,9 +738,15 @@ impl NetworkManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the actor cannot be constructed (invalid subnet).
+    /// Returns an error if the actor cannot be constructed (invalid subnet) or
+    /// the netns tree fails its trust check.
     pub fn new(config: &crate::configuration::NetworkConfig) -> anyhow::Result<Self> {
         let actor = NetworkActor::new(config)?;
+        // Establish and validate the netns tree once, here at daemon startup. A
+        // confirmed root-0700 tree under sticky /tmp cannot then be tampered by
+        // non-root, so the actor's handlers trust it without re-checking; fail
+        // closed if it cannot be established.
+        netns::ensure_netns_tree_trusted().context("netns tree failed its trust check")?;
         let actor = spawn_with::<NetworkActor>(actor);
         Ok(Self { actor })
     }
