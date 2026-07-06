@@ -65,6 +65,7 @@ impl std::fmt::Display for ExecutionStatus {
 }
 
 pub(crate) mod oci {
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     use anyhow::Context;
@@ -147,7 +148,13 @@ pub(crate) mod oci {
                 bridge_netns_path,
             } = spec;
 
-            let path = tempfile::tempdir().context("Failed to create temporary directory")?;
+            // Create bundle dir as 0700 atomically. /tmp is world-writable and the
+            // default umask would leave it 0755, exposing config.json (mount paths,
+            // env, args) and rootfs references to other local users.
+            let path = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .context("Failed to create temporary directory")?;
 
             // just absolutize the rootfs path. the rootfs might not be mounted yet.
             let rootfs_path = std::path::absolute(&mount_point).with_context(|| {
@@ -727,6 +734,40 @@ mod tests {
         assert!(
             content.contains("/sys/fs/cgroup/system.slice/test-package.service/container"),
             "Should contain correct cgroups path"
+        );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_bundle_dir_is_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let oci_spec = create_test_oci_spec();
+        let seccomp_policy = create_test_seccomp_policy();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: Some(seccomp_policy),
+            mac_enabled: true,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: "test-package".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        })
+        .expect("TransientRuntimeConfig::new should succeed");
+
+        let meta = fs::symlink_metadata(config.dir_path()).expect("Failed to stat bundle dir");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "Bundle directory must be restricted to 0700"
         );
     }
 
