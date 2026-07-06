@@ -74,7 +74,11 @@ fn move_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn extract_rootfs(workspace: &crate::Workspace, docker_uri: &str, architecture: super::OciArchitecture) -> anyhow::Result<()> {
+pub fn extract_rootfs(
+    workspace: &crate::Workspace,
+    docker_uri: &str,
+    architecture: super::OciArchitecture,
+) -> anyhow::Result<()> {
     workspace.prepare_intermediate_dir()?;
 
     let oci_image_dir = workspace.intermediate_dir.join(OCI_IMAGE_DIRNAME);
