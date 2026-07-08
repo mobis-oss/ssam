@@ -3,7 +3,7 @@
 </p>
 
 # SSAM
-* [쌈](https://en.wikipedia.org/wiki/Ssam)
+* [쌈](https://en.wikipedia.org/wiki/Ssam)에서 이름을 따왔습니다.
 * SSAM은 Automotive 등과 같은 시스템 리소스가 한정적인 Embedded 환경에서 빠른 Container-native app의 실행과 실행 시점의 지속적인 무결성 보장을 지원하기 위해 개발한 솔루션입니다.
 * SSAM은 OCI Runtime 표준을 활용하여 Container-native app을 실행합니다.
 * SSAM은 Container-native app의 실행환경 구성을 위해 Filesystem image를 활용하는 패키지를 정의합니다.
@@ -26,17 +26,24 @@
 
 * [`ssamd`](ssamd): Package 관리, Container 실행환경 구성 및 실행을 담당하는 데몬.
 * [`ssam`](ssam): `ssamd`와의 통신을 할 수 있는 Command-line interface.
-* [`ssam-wrap`](ssam-wrap): Docker image에서의 변환 기능을 포함하는 SSAM 패키지 생성도구.
+* [`ssam-wrap`](ssam-wrap): Docker (및 OCI) 이미지 변환 기능을 포함하는 SSAM 패키지 생성도구.
 
 ## Requirements
 
-### Runtime requirements
-- Linux kernel: dm-verity, container, erofs, ext4 project quota, bridge 네트워킹(`bridge`/`veth`/network namespace), netfilter NAT(`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`) 관련 설정 필요
-- OCI runtime: [`crun`](https://github.com/containers/crun)과 테스트되었습니다.
-- Bridge 네트워크 모드 (`[container.network] mode = "bridge"`): [`nft`](https://www.netfilter.org/projects/nftables/) (nftables) 필요
-
 ### Build requirements
 - Rust 1.88.0+ (2024 edition)
+
+### `ssamd` requirements
+- OCI runtime: [`crun`](https://github.com/containers/crun)과 테스트되었습니다.
+- [`nft`](https://www.netfilter.org/projects/nftables/) (nftables): Bridge 네트워크 모드 (`[container.network] mode = "bridge"`) 사용 시 필요.
+- 다음과 관련된 Linux 커널 설정 (필수):
+  * dm-verity
+  * container
+  * erofs
+- 다음과 관련된 Linux 커널 설정 (선택적):
+  * ext4 project quota
+  * Bridge networking (`bridge`/`veth`/network namespaces)
+  * Netfilter NAT (`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`)
 
 ### `ssam-wrap` requirements
 - `lz4`
@@ -210,7 +217,7 @@ systemd[1]: helloworld.service: Deactivated successfully.
 
 ## TODOs
 * 상세 문서 제공
-* 네트워크 설정 기능 제공
+* gRPC 엔드포인트 보안
 
 ## License
 

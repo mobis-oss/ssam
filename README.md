@@ -2,8 +2,12 @@
   <img src="docs/assets/ssam-logo.png" alt="SSAM Logo" width="256">
 </p>
 
+<p align="center">
+  <a href="README.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
+</p>
+
 # SSAM
-* [Ssam](https://en.wikipedia.org/wiki/Ssam)
+* Named after the Korean dish - [Ssam](https://en.wikipedia.org/wiki/Ssam), where ingredients are wrapped together.
 * SSAM is a solution developed to enable fast execution of container-native apps and continuous runtime integrity verification in resource-constrained embedded environments such as automotive systems.
 * SSAM runs container-native apps using the OCI Runtime standard.
 * SSAM defines packages that leverage filesystem images to configure the runtime environment for container-native apps.
@@ -26,17 +30,24 @@ To address these limitations, a high-performance, security-enhanced container so
 
 * [`ssamd`](ssamd): Daemon responsible for package management, container runtime environment configuration, and execution.
 * [`ssam`](ssam): Command-line interface for communicating with `ssamd`.
-* [`ssam-wrap`](ssam-wrap): SSAM package creation tool with Docker image conversion support.
+* [`ssam-wrap`](ssam-wrap): SSAM package creation tool with Docker (and/or OCI) image conversion support.
 
 ## Requirements
 
-### Runtime requirements
-- Linux kernel: dm-verity, container, erofs, ext4 project quota, bridge networking (`bridge`/`veth`/network namespaces), and netfilter NAT (`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`) configurations required
-- OCI runtime: Tested with [`crun`](https://github.com/containers/crun).
-- Bridge network mode (`[container.network] mode = "bridge"`): [`nft`](https://www.netfilter.org/projects/nftables/) (nftables) required.
-
 ### Build requirements
 - Rust 1.88.0+ (2024 edition)
+
+### `ssamd` requirements
+- OCI runtime: Tested with [`crun`](https://github.com/containers/crun).
+- [`nft`](https://www.netfilter.org/projects/nftables/) (nftables) required for Bridge network mode (`[container.network] mode = "bridge"`).
+- Mandatory Linux kernel support for the following features:
+  * dm-verity
+  * container
+  * erofs
+- Optional Linux kernel support for the following features:
+  * ext4 project quota
+  * Bridge networking (`bridge`/`veth`/network namespaces)
+  * Netfilter NAT (`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`)
 
 ### `ssam-wrap` requirements
 - `lz4`
@@ -210,7 +221,7 @@ systemd[1]: helloworld.service: Deactivated successfully.
 
 ## TODOs
 * Provide detailed documentation
-* Provide network configuration support
+* Secure gRPC endpoint
 
 ## License
 
