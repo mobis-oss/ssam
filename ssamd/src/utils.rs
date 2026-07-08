@@ -227,7 +227,7 @@ pub(crate) fn make_directory(path: impl AsRef<Path>, recursive: bool) -> anyhow:
 
 pub(crate) mod quota_utils {
     use anyhow::Context;
-    use linux_raw_sys::general::fsxattr;
+    use linux_raw_sys::general::{FS_XFLAG_PROJINHERIT, fsxattr};
     use std::{fs, path::Path};
 
     // Trait abstraction for external syscalls/xattr operations
@@ -276,10 +276,15 @@ pub(crate) mod quota_utils {
         }
     }
 
-    pub(crate) fn get_projid_inner(
+    /// Project ID of a directory with an active project quota, else `None`.
+    ///
+    /// Active requires PROJINHERIT (`P`) flag set AND projid != 0. ssamd sets
+    /// both on quota grant; requiring both defends a crash between the two ioctls
+    /// (P set, projid still 0) and stops adopting projid 0 (ext4 root inode).
+    pub(crate) fn get_active_projid_inner(
         path: impl AsRef<Path>,
         ops: &impl FsAttributeConfigurator,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<Option<usize>> {
         let path = path.as_ref();
         let canonicalized = path
             .canonicalize()
@@ -296,11 +301,13 @@ pub(crate) mod quota_utils {
                 canonicalized.display()
             )
         })?;
-        Ok(attr.fsx_projid as usize)
+
+        let has_proj_inherit = attr.fsx_xflags & FS_XFLAG_PROJINHERIT != 0;
+        Ok((has_proj_inherit && attr.fsx_projid != 0).then_some(attr.fsx_projid as usize))
     }
 
-    pub(crate) fn get_projid(path: impl AsRef<Path>) -> anyhow::Result<usize> {
-        get_projid_inner(path, &DefaultFsAttributeConfigurator)
+    pub(crate) fn get_active_projid(path: impl AsRef<Path>) -> anyhow::Result<Option<usize>> {
+        get_active_projid_inner(path, &DefaultFsAttributeConfigurator)
     }
 
     fn set_project_quota_inner(
@@ -469,31 +476,59 @@ pub(crate) mod quota_utils {
             }
         }
 
+        fn xattr_with(xflags: u32, projid: u32) -> fsxattr {
+            fsxattr {
+                fsx_xflags: xflags,
+                fsx_projid: projid,
+                ..default_fsxattr_with_projid(0)
+            }
+        }
+
         #[test]
-        fn test_get_projid_success() {
+        fn test_get_active_projid_flag_set_and_nonzero() {
             let temp_dir = TempDir::new().unwrap();
             let test_file = temp_dir.path().join("test_file");
             std::fs::File::create(&test_file).unwrap();
 
             let ops = MockFsAttributeConfigurator::new()
-                .with_get_xattr(Ok(default_fsxattr_with_projid(42)));
-            let id = get_projid_inner(&test_file, &ops).unwrap();
-            assert_eq!(id, 42);
+                .with_get_xattr(Ok(xattr_with(FS_XFLAG_PROJINHERIT, 42)));
+            let id = get_active_projid_inner(&test_file, &ops).unwrap();
+            assert_eq!(id, Some(42));
         }
 
         #[test]
-        fn test_get_projid_errors_nonexistent_and_symlink() {
+        fn test_get_active_projid_inactive_returns_none() {
+            let temp_dir = TempDir::new().unwrap();
+            let test_file = temp_dir.path().join("test_file");
+            std::fs::File::create(&test_file).unwrap();
+
+            // No P flag, projid 0: fresh/external directory.
+            let ops = MockFsAttributeConfigurator::new().with_get_xattr(Ok(xattr_with(0, 0)));
+            assert_eq!(get_active_projid_inner(&test_file, &ops).unwrap(), None);
+
+            // No P flag but projid set: stale/foreign projid, not ours.
+            let ops = MockFsAttributeConfigurator::new().with_get_xattr(Ok(xattr_with(0, 7)));
+            assert_eq!(get_active_projid_inner(&test_file, &ops).unwrap(), None);
+
+            // P flag set but projid 0: crash between the two ioctls.
+            let ops = MockFsAttributeConfigurator::new()
+                .with_get_xattr(Ok(xattr_with(FS_XFLAG_PROJINHERIT, 0)));
+            assert_eq!(get_active_projid_inner(&test_file, &ops).unwrap(), None);
+        }
+
+        #[test]
+        fn test_get_active_projid_errors_nonexistent_and_symlink() {
             let ops = MockFsAttributeConfigurator::new();
 
             // nonexistent
-            let result = get_projid_inner("/nonexistent/path", &ops);
+            let result = get_active_projid_inner("/nonexistent/path", &ops);
             assert!(result.is_err());
 
             // broken symlink
             let temp_dir = TempDir::new().unwrap();
             let target_path = temp_dir.path().join("broken_symlink");
             symlink(temp_dir.path().join("invalid/path/broken"), &target_path).unwrap();
-            let result = get_projid_inner(&target_path, &ops);
+            let result = get_active_projid_inner(&target_path, &ops);
             assert!(result.is_err());
         }
 
@@ -553,14 +588,14 @@ pub(crate) mod quota_utils {
             let result = set_project_quota_inner("/nonexistent", true, 1, &ops);
             assert!(result.is_err());
 
-            // get_xattr failure path in get_projid
+            // get_xattr failure path in get_active_projid
             let temp_dir = TempDir::new().unwrap();
             let test_file = temp_dir.path().join("test_file");
             std::fs::File::create(&test_file).unwrap();
 
             let ops = MockFsAttributeConfigurator::new()
                 .with_get_xattr(Err(anyhow::anyhow!("mock error")));
-            let result = get_projid_inner(&test_file, &ops);
+            let result = get_active_projid_inner(&test_file, &ops);
             assert!(result.is_err());
         }
 

@@ -358,7 +358,7 @@ impl Ext4QuotaBackend for Ext4Quota {
     }
 
     fn get_project_id_for_dir(&self, path: &Path) -> Option<usize> {
-        quota_utils::get_projid(path).ok()
+        quota_utils::get_active_projid(path).ok().flatten()
     }
 }
 
