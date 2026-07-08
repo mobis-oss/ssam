@@ -124,12 +124,13 @@ impl FormatVerity<'_> {
                 .to_string(),
             None => String::new(),
         };
-        Ok(PackageFsVerityInfo {
-            data_size: self.data_size,
+        PackageFsVerityInfo::from_verity_image(
+            &self.image_path,
+            self.data_size,
             hash_size,
-            root_hash,
-            hash_offset: self.hash_offset,
-        })
+            self.hash_offset,
+            &root_hash,
+        )
     }
 }
 

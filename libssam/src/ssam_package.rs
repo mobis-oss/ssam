@@ -7,6 +7,7 @@ pub mod ssam_pkg_metadata;
 pub(crate) mod ssam_pkg_payload;
 pub mod ssam_pkg_runtime_config;
 pub mod ssam_pkg_seccomp;
+mod verity;
 
 pub use error::PackageParseError;
 
@@ -16,8 +17,54 @@ pub use error::PackageParseError;
 pub struct PackageFsVerityInfo {
     pub data_size: u64,
     pub hash_size: u64,
-    pub root_hash: String,
+    /// Signed dm-verity kernel table parameters, excluding the two runtime
+    /// device-path slots that [`Self::resolve_table`] inserts. Signing the
+    /// algorithm, salt and digest together prevents argument injection: an
+    /// unsigned field can no longer shift the signed digest into another slot.
+    pub table_params: String,
     pub hash_offset: u64,
+}
+
+impl PackageFsVerityInfo {
+    /// Build the signed dm-verity table parameters, omitting the two runtime
+    /// device-path slots. Field order is the kernel table minus `data_dev`
+    /// and `hash_dev`:
+    /// `version data_block_size hash_block_size data_blocks hash_start_block
+    /// algorithm root_hash salt`.
+    // The 8 parameters map one-to-one onto fixed kernel dm-verity table fields;
+    // grouping them into a struct would only rename the same data.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn build_table_params(
+        version: u32,
+        data_block_size: u32,
+        hash_block_size: u32,
+        data_blocks: u64,
+        hash_start_block: u64,
+        algorithm: &str,
+        root_hash: &str,
+        salt: &str,
+    ) -> String {
+        format!(
+            "{version} {data_block_size} {hash_block_size} {data_blocks} {hash_start_block} {algorithm} {root_hash} {salt}"
+        )
+    }
+
+    /// Assemble the final kernel dm-verity table by inserting the runtime loop
+    /// device path into the `data_dev` and `hash_dev` slots (the same device),
+    /// which sit between the signed `version` field and the remaining signed
+    /// fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signed table string has no `version` field.
+    pub fn resolve_table(&self, dev_path: &str) -> anyhow::Result<String> {
+        let (version, rest) = self
+            .table_params
+            .split_once(' ')
+            .context("Invalid signed dm-verity table: missing fields")?;
+        Ok(format!("{version} {dev_path} {dev_path} {rest}"))
+    }
 }
 
 use crate::config::{PackageConfigSpec, SSAM_SERIALIZATION_CONFIG};
@@ -41,7 +88,7 @@ type PayloadSizeType = u64;
 const SSAM_PKG_MAGIC_LEN: usize = 24;
 const SSAM_PKG_FORMAT_VERSION_LEN: usize = 8;
 const SSAM_PKG_MAGIC: &[u8; SSAM_PKG_MAGIC_LEN] = b"MIRAEPLATFORMGAEBALGROUP";
-const SSAM_PKG_FORMAT_VERSION: &[u8; SSAM_PKG_FORMAT_VERSION_LEN] = b"0.4.0\0\0\0";
+const SSAM_PKG_FORMAT_VERSION: &[u8; SSAM_PKG_FORMAT_VERSION_LEN] = b"0.5.0\0\0\0";
 const SSAM_PKG_FOOTER_LEN: usize = SSAM_PKG_MAGIC_LEN + SSAM_PKG_FORMAT_VERSION_LEN;
 
 /// Read N bytes from the end of file at given offset.
@@ -701,7 +748,9 @@ pub(crate) mod tests {
         PackageFsVerityInfo {
             data_size: 0,
             hash_size: 0,
-            root_hash: root_hash.to_string(),
+            table_params: PackageFsVerityInfo::build_table_params(
+                1, 4096, 4096, 100, 101, "sha256", root_hash, "deadbeef",
+            ),
             hash_offset,
         }
     }
@@ -879,8 +928,8 @@ pub(crate) mod tests {
         assert_eq!(retrieved_metadata.package.name, "test_package");
         assert_eq!(retrieved_metadata.service.service_type, "notify");
         assert_eq!(
-            retrieved_metadata.pkgfs_verity_info().root_hash,
-            "test_hash_root"
+            retrieved_metadata.pkgfs_verity_info().table_params,
+            "1 4096 4096 100 101 sha256 test_hash_root deadbeef"
         );
     }
 
@@ -960,7 +1009,10 @@ pub(crate) mod tests {
 
         let pkgfs = result.unwrap();
         assert_eq!(pkgfs.pkgfs_type, FsType::Erofs);
-        assert_eq!(pkgfs.verity_info.root_hash, "test_hash_root");
+        assert_eq!(
+            pkgfs.verity_info.table_params,
+            "1 4096 4096 100 101 sha256 test_hash_root deadbeef"
+        );
     }
 
     #[test]
@@ -1087,7 +1139,10 @@ pub(crate) mod tests {
         );
 
         assert_eq!(filesystem.pkgfs_type, FsType::Ext4);
-        assert_eq!(filesystem.verity_info.root_hash, "hash_root_test");
+        assert_eq!(
+            filesystem.verity_info.table_params,
+            "1 4096 4096 100 101 sha256 hash_root_test deadbeef"
+        );
         assert_eq!(filesystem.verity_info.hash_offset, 0u64);
         assert!(matches!(filesystem.payload, Payload::External(ref p) if p == &pkgfs_path));
     }
@@ -1484,7 +1539,10 @@ pub(crate) mod tests {
         assert_eq!(extent.offset, 1024);
         assert_eq!(extent.length, 8192);
         assert_eq!(fs.pkgfs_type(), FsType::Ext4);
-        assert_eq!(fs.verity_info().root_hash, "root_hash_xyz");
+        assert_eq!(
+            fs.verity_info().table_params,
+            "1 4096 4096 100 101 sha256 root_hash_xyz deadbeef"
+        );
         assert_eq!(fs.verity_info().hash_offset, 4096);
     }
 
@@ -1498,6 +1556,30 @@ pub(crate) mod tests {
 
         assert_eq!(fs.pkgfs_extent(), None);
         assert_eq!(fs.pkgfs_type(), FsType::Erofs);
-        assert_eq!(fs.verity_info().root_hash, "h");
+        assert_eq!(
+            fs.verity_info().table_params,
+            "1 4096 4096 100 101 sha256 h deadbeef"
+        );
+    }
+
+    #[test]
+    fn resolve_table_substitutes_both_device_slots() {
+        let verity = make_verity("abc123", 0);
+        let table = verity.resolve_table("/dev/loop7").unwrap();
+        assert_eq!(
+            table,
+            "1 /dev/loop7 /dev/loop7 4096 4096 100 101 sha256 abc123 deadbeef"
+        );
+    }
+
+    #[test]
+    fn resolve_table_rejects_empty_params() {
+        let verity = PackageFsVerityInfo {
+            data_size: 0,
+            hash_size: 0,
+            table_params: "1".to_string(),
+            hash_offset: 0,
+        };
+        assert!(verity.resolve_table("/dev/loop0").is_err());
     }
 }

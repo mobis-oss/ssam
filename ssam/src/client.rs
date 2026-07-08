@@ -294,7 +294,7 @@ impl MockClient {
             libssam::ssam_package::PackageFsVerityInfo {
                 data_size: 0,
                 hash_size: 0,
-                root_hash: "dummy_hash_root".to_owned(),
+                table_params: "1 4096 4096 100 101 sha256 dummy_hash_root deadbeef".to_owned(),
                 hash_offset: 0,
             },
         )
@@ -588,7 +588,8 @@ mod grpc_fake_server {
                         libssam::ssam_package::PackageFsVerityInfo {
                             data_size: 0,
                             hash_size: 0,
-                            root_hash: "dummy_hash_root".to_owned(),
+                            table_params: "1 4096 4096 100 101 sha256 dummy_hash_root deadbeef"
+                                .to_owned(),
                             hash_offset: 0,
                         },
                     )
@@ -671,7 +672,7 @@ mod grpc_fake_server {
                 libssam::ssam_package::PackageFsVerityInfo {
                     data_size: 0,
                     hash_size: 0,
-                    root_hash: "dummy_hash_root".to_owned(),
+                    table_params: "1 4096 4096 100 101 sha256 dummy_hash_root deadbeef".to_owned(),
                     hash_offset: 0,
                 },
             )
@@ -735,7 +736,7 @@ mod grpc_fake_server {
                 libssam::ssam_package::PackageFsVerityInfo {
                     data_size: 0,
                     hash_size: 0,
-                    root_hash: "dummy_hash_root".to_owned(),
+                    table_params: "1 4096 4096 100 101 sha256 dummy_hash_root deadbeef".to_owned(),
                     hash_offset: 0,
                 },
             )

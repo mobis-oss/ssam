@@ -498,7 +498,7 @@ pub(crate) mod tests {
                 PackageFsVerityInfo {
                     data_size: 0,
                     hash_size: 0,
-                    root_hash: "mock_hash_root".to_string(),
+                    table_params: "1 4096 4096 100 101 sha256 mock_hash_root deadbeef".to_string(),
                     hash_offset: 0,
                 },
             )
@@ -952,7 +952,7 @@ pub(crate) mod tests {
                 PackageFsVerityInfo {
                     data_size: 0,
                     hash_size: 0,
-                    root_hash: "mock_hash_root".to_string(),
+                    table_params: "1 4096 4096 100 101 sha256 mock_hash_root deadbeef".to_string(),
                     hash_offset: 0,
                 },
             )
@@ -1020,7 +1020,7 @@ pub(crate) mod tests {
                 PackageFsVerityInfo {
                     data_size: 0,
                     hash_size: 0,
-                    root_hash: "mock_hash_root".to_string(),
+                    table_params: "1 4096 4096 100 101 sha256 mock_hash_root deadbeef".to_string(),
                     hash_offset: 0,
                 },
             )
@@ -1091,7 +1091,7 @@ pub(crate) mod tests {
                 PackageFsVerityInfo {
                     data_size: 0,
                     hash_size: 0,
-                    root_hash: "mock_hash_root".to_string(),
+                    table_params: "1 4096 4096 100 101 sha256 mock_hash_root deadbeef".to_string(),
                     hash_offset: 0,
                 },
             )
@@ -1288,7 +1288,7 @@ pub(crate) mod tests {
             PackageFsVerityInfo {
                 data_size: 0,
                 hash_size: 0,
-                root_hash: "custom_hash".to_string(),
+                table_params: "1 4096 4096 100 101 sha256 custom_hash deadbeef".to_string(),
                 hash_offset: 0,
             },
         )
@@ -1597,7 +1597,7 @@ pub(crate) mod tests {
             PackageFsVerityInfo {
                 data_size: 0,
                 hash_size: 0,
-                root_hash: "custom_hash_root".to_string(),
+                table_params: "1 4096 4096 100 101 sha256 custom_hash_root deadbeef".to_string(),
                 hash_offset: 0,
             },
         )
@@ -1799,7 +1799,7 @@ pub(crate) mod tests {
             PackageFsVerityInfo {
                 data_size: 0,
                 hash_size: 0,
-                root_hash: "mock_hash_root".to_string(),
+                table_params: "1 4096 4096 100 101 sha256 mock_hash_root deadbeef".to_string(),
                 hash_offset: 0,
             },
         )
@@ -1877,7 +1877,7 @@ pub(crate) mod tests {
             PackageFsVerityInfo {
                 data_size: 0,
                 hash_size: 0,
-                root_hash: "mock_hash_root".to_string(),
+                table_params: "1 4096 4096 100 101 sha256 mock_hash_root deadbeef".to_string(),
                 hash_offset: 0,
             },
         )

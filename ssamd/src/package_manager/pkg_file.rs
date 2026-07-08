@@ -409,7 +409,7 @@ service_type = "simple"
             PackageFsVerityInfo {
                 data_size: 4096,
                 hash_size: 2048,
-                root_hash: "abcd1234".to_string(),
+                table_params: "1 4096 4096 100 2 sha256 abcd1234 deadbeef".to_string(),
                 hash_offset: 8192,
             },
         );

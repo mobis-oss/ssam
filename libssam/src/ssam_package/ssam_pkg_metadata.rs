@@ -200,8 +200,8 @@ mod tests {
             deserialized_metadata.package_config.service.service_type
         );
         assert_eq!(
-            original_metadata.pkgfs_verity_info.root_hash,
-            deserialized_metadata.pkgfs_verity_info().root_hash
+            original_metadata.pkgfs_verity_info.table_params,
+            deserialized_metadata.pkgfs_verity_info().table_params
         );
         assert_eq!(
             original_metadata.pkgfs_type,

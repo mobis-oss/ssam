@@ -178,7 +178,7 @@ mod tests {
             PackageFsVerityInfo {
                 data_size: 0,
                 hash_size: 0,
-                root_hash: "dummy_hash_root".to_string(),
+                table_params: "1 4096 4096 100 101 sha256 dummy_hash_root deadbeef".to_string(),
                 hash_offset: 0,
             },
         )
@@ -289,7 +289,7 @@ mod tests {
             PackageFsVerityInfo {
                 data_size: 0,
                 hash_size: 0,
-                root_hash: "dummy_hash_root".to_string(),
+                table_params: "1 4096 4096 100 101 sha256 dummy_hash_root deadbeef".to_string(),
                 hash_offset: 0,
             },
         )

@@ -292,7 +292,7 @@ pub(crate) mod tests {
             PackageFsVerityInfo {
                 data_size: 4096,
                 hash_size: 2048,
-                root_hash: "abcd1234567890".to_string(),
+                table_params: "1 4096 4096 100 2 sha256 abcd1234567890 deadbeef".to_string(),
                 hash_offset: 8192,
             }
         }
@@ -333,7 +333,7 @@ pub(crate) mod tests {
             assert_eq!(pkgfs_meta.packagefs_info.length, 8192 + 2048);
 
             let verity = &pkgfs_meta.packagefs_info.verity_info;
-            assert_eq!(verity.root_hash, "abcd1234567890");
+            assert!(verity.table_params.contains("abcd1234567890"));
             assert_eq!(verity.hash_offset, 8192);
             assert_eq!(verity.data_size, 4096);
         }
