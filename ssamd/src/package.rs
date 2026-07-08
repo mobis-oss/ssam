@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::executor::container::ContainerCommand;
-use crate::executor::{self, CommandArguments, ContainerRuntime, ExecutionResult, ExecutionStatus};
+use crate::executor::{self, ContainerRuntime, ExecuteCommand, ExecutionResult, ExecutionStatus};
 use crate::network::NetworkManager;
 use crate::network::parse_port_mappings;
 use crate::package_volume::messages::GetQuotaInfo;
@@ -127,13 +127,13 @@ struct ExecutorInitArgs {
 
 #[derive(Debug)]
 struct LazyExecutor {
-    command: Arc<dyn CommandArguments>,
+    command: Arc<dyn ExecuteCommand>,
     init_args: tokio::sync::RwLock<Option<ExecutorInitArgs>>,
     cell: tokio::sync::OnceCell<executor::PackageExecutor>,
 }
 
 impl LazyExecutor {
-    fn new(command: Arc<dyn CommandArguments>, init_args: ExecutorInitArgs) -> Self {
+    fn new(command: Arc<dyn ExecuteCommand>, init_args: ExecutorInitArgs) -> Self {
         Self {
             command,
             init_args: tokio::sync::RwLock::new(Some(init_args)),
@@ -141,7 +141,7 @@ impl LazyExecutor {
         }
     }
 
-    fn command(&self) -> &Arc<dyn CommandArguments> {
+    fn command(&self) -> &Arc<dyn ExecuteCommand> {
         &self.command
     }
 
@@ -226,13 +226,13 @@ impl PackageTransitioner for DefaultPackageTransitioner {
 
         let executor = Arc::clone(&self.executor);
 
-        let package_name_clone = self.package_name.clone();
+        let pkg_name = self.package_name.clone();
         // init executor in this point with another task to save time
         let executor_handle = tokio::spawn(async move {
-            timeline_start(&package_name_clone, PackagePhase::InitExecutor);
+            timeline_start(&pkg_name, PackagePhase::InitExecutor);
             // force init
             let executor = executor.get().await;
-            timeline_complete(&package_name_clone, PackagePhase::InitExecutor);
+            timeline_complete(&pkg_name, PackagePhase::InitExecutor);
             executor
         });
 
@@ -263,23 +263,23 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         });
 
         let command = Arc::clone(self.executor.command());
-        let prep_name = self.package_name.clone();
+        let pkg_name = self.package_name.clone();
         let prepare_handle = tokio::spawn(async move {
-            timeline_start(&prep_name, PackagePhase::PrepareCommand);
+            timeline_start(&pkg_name, PackagePhase::PrepareCommand);
             let r = command.prepare().await;
-            timeline_complete(&prep_name, PackagePhase::PrepareCommand);
+            timeline_complete(&pkg_name, PackagePhase::PrepareCommand);
             r
         });
 
+        let pkg_name = self.package_name.clone();
         let netns_net = self.bridge_network().cloned();
-        let netns_pkg = self.package_name.clone();
         let netns_iface = self.container_interface.clone();
         let netns_ports = self.port_mappings.clone();
         let netns_handle = tokio::spawn(async move {
             match netns_net {
                 Some(net) => {
-                    net.create_netns(&netns_pkg).await?;
-                    net.attach(&netns_pkg, &netns_iface, netns_ports)
+                    net.create_netns(&pkg_name).await?;
+                    net.attach(&pkg_name, &netns_iface, netns_ports)
                         .await
                         .map(|_| ())
                 }
@@ -504,7 +504,7 @@ impl Package {
             None
         };
 
-        let command: Arc<dyn CommandArguments> = Arc::new(ContainerCommand::from_package(
+        let command: Arc<dyn ExecuteCommand> = Arc::new(ContainerCommand::from_package(
             pkg_name.clone(),
             ContainerRuntime::CRun,
             package_file,

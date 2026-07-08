@@ -19,7 +19,7 @@ use crate::configuration;
 use crate::executor::systemd::systemd_dbus::manager_messages::{
     ResetFailedUnit, StartTransientUnit, StopUnit,
 };
-use crate::executor::{CommandArguments, ExecutionResult, ExecutionState, ExecutionStatus};
+use crate::executor::{ExecuteCommand, ExecutionResult, ExecutionState, ExecutionStatus};
 
 use super::CommandExecutorBackend;
 
@@ -451,7 +451,7 @@ impl ServiceInfo {
 #[derive(Debug)]
 pub(crate) struct TransientUnitExecutor<'u> {
     unit_name: String,
-    cmd_args: Arc<dyn CommandArguments>,
+    cmd_args: Arc<dyn ExecuteCommand>,
     service_info: ServiceInfo,
     active_state_handler: ActiveStateHandler<'u>,
     systemd_interface: systemd_dbus::SystemdManager,
@@ -472,7 +472,7 @@ pub(crate) fn cgroups_path() -> &'static str {
 impl TransientUnitExecutor<'_> {
     pub(crate) async fn new(
         package_name: String,
-        cmd_args: Arc<dyn CommandArguments>,
+        cmd_args: Arc<dyn ExecuteCommand>,
         service_info: ServiceInfo,
         active_state_sender: mpsc::Sender<ExecutionStatus>,
     ) -> anyhow::Result<Self> {
@@ -497,7 +497,7 @@ impl TransientUnitExecutor<'_> {
     }
 
     fn gen_unit_properties(&self) -> anyhow::Result<Vec<(String, OwnedValue)>> {
-        let start_cmd = self.cmd_args.get_start_args()?;
+        let start_cmd = self.cmd_args.get_start_cmd()?;
         let execstart: OwnedValue = Array::from(vec![(start_cmd[0].clone(), start_cmd, false)])
             .try_into()
             .context(format!(
@@ -505,7 +505,7 @@ impl TransientUnitExecutor<'_> {
                 self.unit_name
             ))?;
 
-        let delete_cmd = self.cmd_args.get_stop_args()?;
+        let delete_cmd = self.cmd_args.get_stop_cmd()?;
         let exec_stop_post: OwnedValue =
             Array::from(vec![(delete_cmd[0].clone(), delete_cmd, false)])
                 .try_into()

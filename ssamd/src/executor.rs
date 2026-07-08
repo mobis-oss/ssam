@@ -21,7 +21,7 @@ pub(crate) struct PackageExecutor(Arc<dyn CommandExecutorBackend>);
 impl PackageExecutor {
     pub(crate) async fn new(
         package_name: String,
-        command: Arc<dyn CommandArguments>,
+        command: Arc<dyn ExecuteCommand>,
         execution_type: ExecutorType,
         state_sender: tokio::sync::mpsc::Sender<ExecutionStatus>,
     ) -> anyhow::Result<Self> {
@@ -472,9 +472,9 @@ pub(crate) trait CommandExecutorBackend: Send + Sync + std::fmt::Debug {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait CommandArguments: Send + Sync + std::fmt::Debug {
-    fn get_start_args(&self) -> anyhow::Result<Vec<String>>;
-    fn get_stop_args(&self) -> anyhow::Result<Vec<String>>;
+pub(crate) trait ExecuteCommand: Send + Sync + std::fmt::Debug {
+    fn get_start_cmd(&self) -> anyhow::Result<Vec<String>>;
+    fn get_stop_cmd(&self) -> anyhow::Result<Vec<String>>;
     async fn prepare(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -488,7 +488,7 @@ pub(crate) mod container {
     use crate::network::netns;
     use crate::package_volume::PackageVolume;
 
-    use super::{CommandArguments, ContainerRuntime, oci};
+    use super::{ContainerRuntime, ExecuteCommand, oci};
 
     #[derive(Debug)]
     pub(crate) struct ContainerCommand {
@@ -562,7 +562,7 @@ pub(crate) mod container {
     }
 
     #[async_trait::async_trait]
-    impl CommandArguments for ContainerCommand {
+    impl ExecuteCommand for ContainerCommand {
         async fn prepare(&self) -> anyhow::Result<()> {
             self.runtime_config
                 .get_or_try_init(|| async {
@@ -575,11 +575,11 @@ pub(crate) mod container {
             Ok(())
         }
 
-        fn get_start_args(&self) -> anyhow::Result<Vec<String>> {
+        fn get_start_cmd(&self) -> anyhow::Result<Vec<String>> {
             let path = self
                 .runtime_config
                 .get()
-                .context("not prepared")?
+                .context("OCI runtime config not prepared")?
                 .dir_path();
             if !path.exists() {
                 anyhow::bail!("Bundle path does not exist: {}", path.display());
@@ -596,7 +596,7 @@ pub(crate) mod container {
             ])
         }
 
-        fn get_stop_args(&self) -> anyhow::Result<Vec<String>> {
+        fn get_stop_cmd(&self) -> anyhow::Result<Vec<String>> {
             Ok(vec![
                 self.runtime.to_string(),
                 "delete".to_owned(),
@@ -956,7 +956,7 @@ mod tests {
     mod container_command_tests {
         use super::*;
         use crate::executor::container::ContainerCommand;
-        use crate::executor::{CommandArguments, ContainerRuntime};
+        use crate::executor::{ContainerRuntime, ExecuteCommand};
 
         fn create_test_container_command() -> ContainerCommand {
             use crate::executor::oci::ContainerBundleSpec;
@@ -995,9 +995,12 @@ mod tests {
         async fn test_container_command_get_start_args() {
             let executor = create_test_container_command();
 
-            executor.prepare().await.expect("prepare should succeed");
+            executor
+                .prepare()
+                .await
+                .expect("command prepare should succeed");
 
-            let start_args = executor.get_start_args().expect("Should get start args");
+            let start_args = executor.get_start_cmd().expect("Should get start command");
 
             assert_eq!(start_args.len(), 5);
             assert_eq!(start_args[0], "/usr/bin/crun");
@@ -1016,7 +1019,7 @@ mod tests {
         fn test_container_command_get_stop_args() {
             let executor = create_test_container_command();
 
-            let stop_args = executor.get_stop_args().expect("Should get stop args");
+            let stop_args = executor.get_stop_cmd().expect("Should get stop command");
 
             // Verify the stop command structure
             assert_eq!(stop_args.len(), 4);
@@ -1030,7 +1033,10 @@ mod tests {
         async fn test_container_command_get_start_args_bundle_not_exists() {
             let executor = create_test_container_command();
 
-            executor.prepare().await.expect("prepare should succeed");
+            executor
+                .prepare()
+                .await
+                .expect("command prepare should succeed");
 
             let bundle_path = executor
                 .runtime_config()
@@ -1042,7 +1048,7 @@ mod tests {
                 fs::remove_dir_all(&bundle_path).expect("Failed to remove bundle dir");
             }
 
-            let result = executor.get_start_args();
+            let result = executor.get_start_cmd();
             assert!(
                 result.is_err(),
                 "Should fail when bundle path doesn't exist"
@@ -1058,7 +1064,7 @@ mod tests {
         fn test_container_command_unprepared_get_start_args_error() {
             let executor = create_test_container_command();
 
-            let result = executor.get_start_args();
+            let result = executor.get_start_cmd();
 
             assert!(result.is_err(), "Should fail before prepare");
             let error_msg = result.unwrap_err().to_string();
@@ -1101,8 +1107,11 @@ mod tests {
         async fn test_container_command_prepared_get_start_args_valid() {
             let executor = create_test_container_command();
 
-            executor.prepare().await.expect("prepare should succeed");
-            let start_args = executor.get_start_args().expect("Should get start args");
+            executor
+                .prepare()
+                .await
+                .expect("command prepare should succeed");
+            let start_args = executor.get_start_cmd().expect("Should get start command");
 
             assert_eq!(start_args[0], "/usr/bin/crun");
             assert_eq!(start_args[1], "run");
