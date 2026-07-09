@@ -797,15 +797,19 @@ async fn run_active_state_monitor(
     initial_state: UnitActiveState,
 ) -> anyhow::Result<()> {
     let mut stream = std::pin::pin!(stream);
-    // systemd is the source of truth: emit the unit's real live state once so a
-    // recovered (adopted) container is reflected immediately, then forward every
-    // change verbatim. The transition manager's same-state no-op absorbs any
-    // redundant repeat, so no local dedup cache is kept.
-    state_converter
-        .tell(UnitActiveStateChangedMsg {
-            state: initial_state,
-        })
-        .await?;
+    // Proactively reflect only a live (adopted) unit's state. An Inactive
+    // initial state means nothing is running to reflect, and emitting it drives
+    // a spurious Inactive->Ready that races the package lifecycle: a monitor
+    // lazily created during teardown would report Inactive after cleanup has
+    // already moved the package to Cleaned, corrupting it into Error. Real
+    // state changes from the stream below are always forwarded.
+    if !matches!(initial_state, UnitActiveState::Inactive) {
+        state_converter
+            .tell(UnitActiveStateChangedMsg {
+                state: initial_state,
+            })
+            .await?;
+    }
     loop {
         tokio::select! {
             () = canceler.cancelled() => {
@@ -1182,7 +1186,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_active_state_monitor_emits_initial_then_forwards_all() {
+    async fn test_run_active_state_monitor_skips_inactive_initial_then_forwards() {
         use futures_util::stream;
 
         let (tx, mut rx) = mpsc::channel::<ExecutionStatus>(10);
@@ -1206,12 +1210,8 @@ mod tests {
         .await;
         assert!(result.is_err());
 
-        // Initial state first, then every stream value verbatim (no dedup); the
-        // repeated active is later collapsed by transition_to's same-state no-op.
-        assert!(matches!(
-            rx.recv().await,
-            Some(ExecutionStatus::Inactive(_))
-        ));
+        // An Inactive initial state is not emitted (nothing live to reflect);
+        // only the stream values are forwarded verbatim.
         assert!(matches!(rx.recv().await, Some(ExecutionStatus::Active(_))));
         assert!(matches!(rx.recv().await, Some(ExecutionStatus::Active(_))));
         assert!(matches!(
@@ -1302,11 +1302,7 @@ mod tests {
         // Stream exhausted after delivering "failed" → bail on None
         assert!(result.is_err());
 
-        // Initial Inactive emitted first, then the failed state as Active.
-        assert!(matches!(
-            rx.recv().await,
-            Some(ExecutionStatus::Inactive(_))
-        ));
+        // Inactive initial state is skipped; the failed state forwards as Active.
         let status = rx.recv().await.unwrap();
         assert!(matches!(status, ExecutionStatus::Active(_)));
     }
