@@ -225,6 +225,40 @@ pub(crate) fn make_directory(path: impl AsRef<Path>, recursive: bool) -> anyhow:
         ))
 }
 
+/// True if `path` is a safe relative path: at least one component and every
+/// component is `Normal`, so `..`, absolute root/prefix, a leading `.`, and
+/// NUL are rejected. `components()` normalizes interior `.` away, so it can
+/// never form an escaping segment. Rejects path traversal at trust boundaries.
+/// Callers strip an optional single leading `/` before calling (`data_dirs`
+/// are authored absolute-looking).
+pub(crate) fn is_safe_relative_path(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let mut has_component = false;
+    for c in path.components() {
+        match c {
+            Component::Normal(seg) => {
+                if seg.as_encoded_bytes().contains(&0) {
+                    return false;
+                }
+                has_component = true;
+            }
+            _ => return false,
+        }
+    }
+    has_component
+}
+
+/// True if `name` is a safe single path segment (a package name): non-empty,
+/// no `/`, no NUL, exactly one `Normal` component. Structural only — charset
+/// policy is out of scope (owned by MLINUX-2095).
+pub(crate) fn is_safe_path_segment(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\0') {
+        return false;
+    }
+    let mut comps = std::path::Path::new(name).components();
+    matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
+}
+
 pub(crate) mod quota_utils {
     use anyhow::Context;
     use linux_raw_sys::general::{FS_XFLAG_PROJINHERIT, fsxattr};
@@ -689,6 +723,52 @@ mod tests {
         // Test root path - this might actually succeed since root exists
         let result = make_directory("/", false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_safe_path_segment_accepts_simple_names() {
+        for name in ["nginx", "pkg_v2.3", "my-package"] {
+            assert!(is_safe_path_segment(name), "{name} should be safe");
+        }
+    }
+
+    #[test]
+    fn test_is_safe_path_segment_rejects_unsafe_names() {
+        for name in [
+            "",
+            "../evil",
+            "sub/../evil",
+            "subdir/name",
+            "/abs",
+            "pkg/",
+            "a\0b",
+        ] {
+            assert!(!is_safe_path_segment(name), "{name:?} should be unsafe");
+        }
+    }
+
+    #[test]
+    fn test_is_safe_relative_path_accepts_safe_paths() {
+        for path in [
+            Path::new("var/data"),
+            Path::new("subdir"),
+            Path::new("var/lib"),
+        ] {
+            assert!(is_safe_relative_path(path), "{path:?} should be safe");
+        }
+    }
+
+    #[test]
+    fn test_is_safe_relative_path_rejects_unsafe_paths() {
+        for path in [
+            Path::new("../etc"),
+            Path::new("a/../b"),
+            Path::new("/abs"),
+            Path::new(""),
+            Path::new("a\0b"),
+        ] {
+            assert!(!is_safe_relative_path(path), "{path:?} should be unsafe");
+        }
     }
 
     #[test]

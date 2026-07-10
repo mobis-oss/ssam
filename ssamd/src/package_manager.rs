@@ -351,13 +351,7 @@ impl PackageManagerActor {
     }
 
     fn is_valid_package_name(name: &str) -> bool {
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
-            return false;
-        }
-        let path = Path::new(name);
-        let mut components = path.components();
-        matches!(components.next(), Some(std::path::Component::Normal(_)))
-            && components.next().is_none()
+        crate::utils::is_safe_path_segment(name)
     }
 
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.

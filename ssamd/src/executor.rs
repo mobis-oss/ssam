@@ -357,9 +357,14 @@ pub(crate) mod oci {
             data_dirs
                 .into_iter()
                 .map(|dest_path| {
-                    let src_path =
-                        package_data_root.join(dest_path.strip_prefix("/").unwrap_or(dest_path));
-                    let dest = dest_prefix.join(dest_path);
+                    let relative = dest_path.strip_prefix("/").unwrap_or(dest_path);
+                    anyhow::ensure!(
+                        crate::utils::is_safe_relative_path(relative),
+                        "Unsafe data_dir bind mount escapes root: {}",
+                        dest_path.display()
+                    );
+                    let src_path = package_data_root.join(relative);
+                    let dest = dest_prefix.join(relative);
                     let options = Self::MOUNT_OPTION
                         .iter()
                         .map(ToString::to_string)
@@ -416,6 +421,38 @@ pub(crate) mod oci {
 
         pub(crate) fn dir_path(&self) -> &Path {
             self.path.path()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_make_bind_mounts_rejects_traversal_data_dir() {
+            let package_data_root = Path::new("/package-data/test-package");
+
+            let result = TransientRuntimeConfig::make_bind_mounts(
+                package_data_root,
+                vec![Path::new("/../escape")],
+            );
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_make_bind_mounts_uses_validated_relative_path() {
+            let package_data_root = Path::new("/package-data/test-package");
+
+            let mounts = TransientRuntimeConfig::make_bind_mounts(
+                package_data_root,
+                vec![Path::new("/var/data")],
+            )
+            .unwrap();
+
+            let mount_json = serde_json::to_value(&mounts[0]).unwrap();
+            assert_eq!(mount_json["source"], "/package-data/test-package/var/data");
+            assert_eq!(mount_json["destination"], "/var/data");
         }
     }
 

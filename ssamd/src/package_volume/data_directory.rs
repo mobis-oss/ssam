@@ -123,6 +123,11 @@ impl<T: QuotaEntryBackend> DataDirectory<T> {
             for dir in data_dirs {
                 // Remove leading "/" if present to make it relative
                 let relative_dir = dir.strip_prefix("/").unwrap_or(dir);
+                anyhow::ensure!(
+                    utils::is_safe_relative_path(relative_dir),
+                    "Unsafe data_dir escapes package root: {}",
+                    dir.display()
+                );
                 let src_path = path.join(relative_dir);
                 utils::make_directory(&src_path, true).with_context(|| {
                     format!(
@@ -212,6 +217,10 @@ pub(crate) struct DataDirMetadata {
 impl DataDirMetadata {
     pub(crate) fn new<F: PackageFileInfo + ?Sized>(pkg_file: &F) -> anyhow::Result<Self> {
         let package_name = pkg_file.get_package_name().to_string();
+        anyhow::ensure!(
+            utils::is_safe_path_segment(&package_name),
+            "Unsafe package name rejected: {package_name}"
+        );
         let data_dirs = pkg_file.get_container_data_dirs().cloned();
         let storage_limit = pkg_file
             .get_container_storage_limit()
@@ -482,6 +491,30 @@ pub(crate) mod tests {
             pub(crate) should_fail: bool,
         }
 
+        pub(crate) struct MockPackageFileInfo {
+            pub(crate) package_name: String,
+            pub(crate) data_dirs: Option<String>,
+            pub(crate) storage_limit: Option<i64>,
+        }
+
+        impl PackageFileInfo for MockPackageFileInfo {
+            fn pkgfs(&self) -> anyhow::Result<libssam::ssam_package::PackageFilesystem> {
+                anyhow::bail!("unused by DataDirMetadata")
+            }
+
+            fn get_package_name(&self) -> &str {
+                &self.package_name
+            }
+
+            fn get_container_data_dirs(&self) -> Option<&String> {
+                self.data_dirs.as_ref()
+            }
+
+            fn get_container_storage_limit(&self) -> Option<&i64> {
+                self.storage_limit.as_ref()
+            }
+        }
+
         impl Ext4QuotaBackend for MockExt4QuotaManager {
             type Entry = MockQuotaEntryBackend;
 
@@ -672,6 +705,32 @@ pub(crate) mod tests {
 
             assert!(test_path.join("app/data").exists());
             assert!(test_path.join("var/log").exists());
+        }
+
+        #[test]
+        fn test_ensure_data_dirs_traversal_escapes_package_root() {
+            let temp_dir = TempDir::new().unwrap();
+            let test_path = temp_dir.path().join("test_package");
+            let data_dirs_str = Some("/../../etc:../escape".to_string());
+
+            let data_dir =
+                DataDirectory::<DefaultQuotaEntryBackend>::new(test_path, data_dirs_str, None)
+                    .unwrap();
+
+            assert!(data_dir.ensure_data_dirs().is_err());
+        }
+
+        #[test]
+        fn test_data_dir_metadata_rejects_unsafe_package_name() {
+            for package_name in ["../evil", "/abs"] {
+                let pkg_file = mocks::MockPackageFileInfo {
+                    package_name: package_name.to_string(),
+                    data_dirs: None,
+                    storage_limit: None,
+                };
+
+                assert!(DataDirMetadata::new(&pkg_file).is_err());
+            }
         }
 
         #[test]

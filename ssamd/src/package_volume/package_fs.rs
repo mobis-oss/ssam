@@ -3,6 +3,7 @@
 
 use crate::configuration;
 use crate::mount::{LoopDeviceAttacher, mount_pkgfs, unmount_pkgfs};
+use crate::utils;
 use libssam::ssam_package::{PackageFsVerityInfo, PkgfsExtent};
 use libssam::superblock::FsType;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,10 @@ impl PackageFsMetadata {
         let package_path = path.as_ref().to_path_buf();
         let pkgfs_info = package_file.pkgfs()?;
         let package_name = package_file.get_package_name();
+        anyhow::ensure!(
+            utils::is_safe_path_segment(package_name),
+            "Unsafe package name rejected: {package_name}"
+        );
         let mnt_root = configuration::packages_mnt_root();
         let mount_point = Path::new(mnt_root).join(package_name);
 
@@ -436,11 +441,19 @@ pub(crate) mod tests {
             pkg_file.package_name = String::new();
 
             let result = PackageFsMetadata::new(&test_path, &pkg_file);
-            assert!(result.is_ok());
+            assert!(result.is_err());
+        }
 
-            let pkgfs_meta = result.unwrap();
-            let mnt_root = configuration::packages_mnt_root();
-            assert_eq!(pkgfs_meta.mount_point, Path::new(mnt_root));
+        #[test]
+        fn test_package_fs_metadata_rejects_unsafe_package_name() {
+            let test_path = PathBuf::from("/test/package/path");
+
+            for package_name in ["../evil", "/abs"] {
+                let mut pkg_file = create_test_ssam_package_file();
+                pkg_file.package_name = package_name.to_string();
+
+                assert!(PackageFsMetadata::new(&test_path, &pkg_file).is_err());
+            }
         }
 
         #[test]
