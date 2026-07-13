@@ -306,13 +306,18 @@ impl PackageManagerActor {
             ..
         } = parsed;
 
-        match package_file {
-            Ok(package_file) => {
-                let package = self
-                    .create_package(&path, package_file)
-                    .await
-                    .with_context(|| format!("Failed to create package: {package_name}"))?;
+        // Degrade any single-package failure (parse OR build) to Broken; one bad
+        // package must not brick daemon startup by aborting the whole reload.
+        let create_result = async {
+            let package_file = package_file?;
+            self.create_package(&path, package_file)
+                .await
+                .with_context(|| format!("Failed to create package: {package_name}"))
+        }
+        .await;
 
+        match create_result {
+            Ok(package) => {
                 if self
                     .package_store
                     .insert(package_name.clone(), package)
@@ -325,7 +330,7 @@ impl PackageManagerActor {
                 }
             }
             Err(e) => {
-                log::error!("Failed to parse package {package_name}: {e:#}");
+                log::error!("Failed to load package {package_name}: {e:#}");
                 self.package_store
                     .insert_broken(
                         package_name,
