@@ -36,12 +36,19 @@ pub mod config {
     use proc_macros::toml_file_to_struct;
     toml_file_to_struct!("data/package_config_spec.toml");
 
+    /// Decode ceiling for every `.ssam` bincode decode. Bounds pre-verification
+    /// allocation: an untrusted package's oversized container length prefix would
+    /// otherwise allocate unbounded memory and abort root ssamd. Applies to decode
+    /// only (bincode ignores it on encode), so the wire format is unchanged. The
+    /// largest decoded structure is far smaller; raise this if one ever grows.
+    pub const SSAM_MAX_DECODE_SIZE: usize = 1024 * 1024;
+
     // Whether Fixint or Varint is the difference between legacy and standard
     pub static SSAM_SERIALIZATION_CONFIG: bincode::config::Configuration<
         bincode::config::LittleEndian,
         bincode::config::Fixint,
-        bincode::config::NoLimit,
-    > = bincode::config::legacy();
+        bincode::config::Limit<SSAM_MAX_DECODE_SIZE>,
+    > = bincode::config::legacy().with_limit::<SSAM_MAX_DECODE_SIZE>();
 }
 
 pub mod container {

@@ -632,4 +632,30 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), b"payload_data_here".to_vec());
     }
+
+    #[test]
+    fn payloads_info_decode_rejects_oversized_container() {
+        // Outer BTreeMap declares u64::MAX entries; the limit must reject it
+        // before allocating.
+        let malicious = u64::MAX.to_le_bytes();
+        let result: Result<(Payloads, usize), _> =
+            bincode::decode_from_slice(&malicious, SSAM_SERIALIZATION_CONFIG);
+        assert!(
+            result.is_err(),
+            "oversized payloads_info container must be rejected, not allocated"
+        );
+    }
+
+    #[test]
+    fn payloads_info_decode_accepts_legit_within_limit() {
+        // A real payloads_info round-trips unchanged through the limited config.
+        let payloads = Payloads::init()
+            .set_mut(PayloadType::Metadata, Some(Payload::Internal((0, 128))))
+            .set_mut(PayloadType::Signature, Some(Payload::Internal((128, 256))));
+        let encoded = payloads.serialize().expect("serialize payloads");
+        let (decoded, _): (Payloads, usize) =
+            bincode::decode_from_slice(&encoded, SSAM_SERIALIZATION_CONFIG)
+                .expect("decode legit payloads within limit");
+        assert_eq!(decoded.0, payloads.0);
+    }
 }
