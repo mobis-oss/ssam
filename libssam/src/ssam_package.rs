@@ -72,11 +72,12 @@ use crate::superblock::FsType;
 use anyhow::{Context, Result, anyhow, bail};
 use ssam_pkg_metadata::PackageMetadata;
 use ssam_pkg_payload::Payloads;
+use ssam_pkg_payload::VerifiedPayloads;
 use ssam_pkg_payload::{Payload, PayloadType, SSAM_PAYLOAD_CONFIGURATION};
 use ssam_pkg_runtime_config::PackageRuntimeConfig;
 pub use ssam_pkg_seccomp::PackageSeccompPolicy;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::{fs::File, path::Path};
 use strum::IntoEnumIterator;
 use zip::{ZipArchive, ZipWriter};
@@ -356,83 +357,34 @@ impl PackageFile {
             source: e,
         })?;
 
-        let ssam_payloads = Self::load_payloads_info(&mut pkg_fp, &public_key)?;
+        let (ssam_payloads, verified) = Self::load_payloads_info(&mut pkg_fp, &public_key)?;
 
         let mut builder = PackageFileBuilder::new();
-        for (payload_type, payload) in ssam_payloads.iter() {
-            let payload = payload
-                .as_ref()
+        let metadata_bytes =
+            verified
+                .get(&PayloadType::Metadata)
                 .ok_or_else(|| PackageParseError::ParseFailed {
-                    source: anyhow!("Missing payload for {payload_type:?}"),
+                    source: anyhow!("Missing verified metadata payload"),
                 })?;
-
-            // Parameters would be handled per Payload
-            if let Payload::Internal((offset, size)) = payload {
-                // TODO: Make more generic to handle different payload types with PayloadConfig
-                match payload_type {
-                    PayloadType::Metadata => {
-                        pkg_fp
-                            .seek(std::io::SeekFrom::Start(*offset))
-                            .with_context(|| {
-                                format!("Seeking to metadata payload at offset {offset}")
-                            })
-                            .map_err(|source| PackageParseError::Io {
-                                message: "Failed to seek package file.".to_string(),
-                                source,
-                            })?;
-                        let metadata = PackageMetadata::deserialize(&mut pkg_fp)?;
-                        builder.set_metadata(metadata);
-                    }
-                    PayloadType::RuntimeConfig => {
-                        pkg_fp
-                            .seek(std::io::SeekFrom::Start(*offset))
-                            .with_context(|| {
-                                format!("Seeking to runtime config payload at offset {offset}")
-                            })
-                            .map_err(|source| PackageParseError::Io {
-                                message: "Failed to seek package file.".to_string(),
-                                source,
-                            })?;
-                        let mut fp = pkg_fp
-                            .try_clone()
-                            .context("Cloning file handle for runtime config payload read")
-                            .map_err(|source| PackageParseError::Io {
-                                message: "Failed to clone file handle.".to_string(),
-                                source,
-                            })?
-                            .take(*size);
-                        let runtime_config = PackageRuntimeConfig::deserialize(&mut fp)?;
-                        builder.set_runtime_config(runtime_config);
-                    }
-                    PayloadType::SeccompPolicy => {
-                        pkg_fp
-                            .seek(std::io::SeekFrom::Start(*offset))
-                            .with_context(|| {
-                                format!("Seeking to seccomp policy payload at offset {offset}")
-                            })
-                            .map_err(|source| PackageParseError::Io {
-                                message: "Failed to seek package file.".to_string(),
-                                source,
-                            })?;
-                        let mut fp = pkg_fp
-                            .try_clone()
-                            .context("Cloning file handle for seccomp policy payload read")
-                            .map_err(|source| PackageParseError::Io {
-                                message: "Failed to clone file handle.".to_string(),
-                                source,
-                            })?
-                            .take(*size);
-                        let seccomp_policy = PackageSeccompPolicy::deserialize(&mut fp)?;
-                        builder.set_seccomp_policy(seccomp_policy);
-                    }
-                    _ => (), // Other payloads are kept as they are
-                }
-            } else {
-                return Err(PackageParseError::ParseFailed {
-                    source: anyhow!("Expected internal payload for {payload_type:?}"),
-                })?;
+        builder.set_metadata(PackageMetadata::deserialize(&mut Cursor::new(
+            metadata_bytes.as_slice(),
+        ))?);
+        let runtime_bytes = verified.get(&PayloadType::RuntimeConfig).ok_or_else(|| {
+            PackageParseError::ParseFailed {
+                source: anyhow!("Missing verified runtime config payload"),
             }
-        }
+        })?;
+        builder.set_runtime_config(PackageRuntimeConfig::deserialize(&mut Cursor::new(
+            runtime_bytes.as_slice(),
+        ))?);
+        let seccomp_bytes = verified.get(&PayloadType::SeccompPolicy).ok_or_else(|| {
+            PackageParseError::ParseFailed {
+                source: anyhow!("Missing verified seccomp payload"),
+            }
+        })?;
+        builder.set_seccomp_policy(PackageSeccompPolicy::deserialize(&mut Cursor::new(
+            seccomp_bytes.as_slice(),
+        ))?);
 
         builder.set_payloads(ssam_payloads);
 
@@ -608,7 +560,7 @@ impl PackageFile {
     fn load_payloads_info(
         pkg_fp: &mut File,
         public_key: impl AsRef<std::path::Path>,
-    ) -> Result<Payloads, PackageParseError> {
+    ) -> Result<(Payloads, VerifiedPayloads), PackageParseError> {
         verify_footer(pkg_fp)?;
 
         let pkg_file_size = pkg_fp
@@ -1294,6 +1246,52 @@ pub(crate) mod tests {
 
         let package_file = PackageFile::from_file_verified(&output_package_file, public2_key_path);
         assert!(package_file.is_err());
+    }
+
+    #[test]
+    fn test_from_file_verified_parses_from_verified_bytes() {
+        let temp_dir = tempdir().unwrap();
+        let output_package_file = temp_dir.path().join("test_package.ssam");
+        let runtime_config_path = temp_dir.path().join("runtime.json");
+        let private_key_path = temp_dir.path().join("private_key.pem");
+        let public_key_path = temp_dir.path().join("public_key.pem");
+        create_test_keys(&private_key_path, &public_key_path);
+
+        let metadata = PackageMetadata::new(
+            create_test_package_config(),
+            FsType::Erofs,
+            make_verity("test_hash_root", 0),
+        )
+        .unwrap();
+
+        create_test_runtime_config(&runtime_config_path);
+        let pkgfs = temp_dir.path().join("pkgfs.img");
+        std::fs::write(&pkgfs, b"pkgfs_data").unwrap();
+        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let seccomp_policy = create_test_seccomp_policy();
+        let payloads = Payloads::init().set_mut(
+            PayloadType::PackageFilesystem,
+            Some(Payload::External(pkgfs)),
+        );
+
+        let mut package_file = PackageFileBuilder::new();
+        package_file.set_metadata(metadata);
+        package_file.set_runtime_config(runtime_config);
+        package_file.set_seccomp_policy(seccomp_policy);
+        package_file.set_payloads(payloads);
+
+        package_file
+            .build()
+            .unwrap()
+            .wrap(&output_package_file, &private_key_path)
+            .unwrap();
+
+        let package_file =
+            PackageFile::from_file_verified(&output_package_file, public_key_path).unwrap();
+
+        assert_eq!(package_file.metadata().package.name, "test_package");
+        assert_eq!(package_file.runtime_config().version(), "1.0.0");
+        assert!(package_file.seccomp_policy().as_str().is_ok());
     }
 
     #[test]

@@ -24,7 +24,9 @@ use strum::IntoEnumIterator;
 use super::PackageParseError;
 use crate::config::SSAM_SERIALIZATION_CONFIG;
 
-const STREAMING_CHUNK_SIZE: usize = 64 * 1024;
+/// Cap on a signed payload buffered before verification; bounds pre-auth
+/// allocation from an attacker-controlled size field. Real payloads far smaller.
+const MAX_VERIFY_PAYLOAD_SIZE: usize = 4 * 1024 * 1024;
 
 fn seek_to_payload(
     reader: &mut (impl Read + Seek),
@@ -71,36 +73,6 @@ fn read_payload(
     Ok(buf)
 }
 
-fn update_hasher(
-    reader: &mut (impl Read + Seek),
-    offset: PayloadOffset,
-    size: usize,
-    file_size: u64,
-    hasher: &mut Sha256,
-    buf: &mut [u8],
-) -> Result<(), PackageParseError> {
-    let chunk_size = buf.len();
-    if chunk_size == 0 {
-        return Err(PackageParseError::ParseFailed {
-            source: anyhow!("Streaming buffer must not be empty"),
-        });
-    }
-    seek_to_payload(reader, offset, size, file_size)?;
-    let mut remaining = size;
-    while remaining > 0 {
-        let n = remaining.min(chunk_size);
-        reader
-            .read_exact(&mut buf[..n])
-            .map_err(|e| PackageParseError::Io {
-                message: "Failed to read package file.".to_string(),
-                source: e.into(),
-            })?;
-        hasher.update(&buf[..n]);
-        remaining -= n;
-    }
-    Ok(())
-}
-
 #[derive(
     Debug,
     Clone,
@@ -125,6 +97,7 @@ pub(crate) enum PayloadType {
 
 type PayloadOffset = u64;
 type PayloadSize = u64;
+pub(crate) type VerifiedPayloads = BTreeMap<PayloadType, Vec<u8>>;
 
 #[derive(Debug, Clone, PartialEq, bincode::Encode, bincode::Decode)]
 pub enum Payload {
@@ -197,13 +170,13 @@ impl Payloads {
     pub(crate) fn deserialize_from_pkg_verified(
         pkg_fp: &mut File,
         public_key: impl AsRef<std::path::Path>,
-    ) -> Result<Self, PackageParseError> {
+    ) -> Result<(Self, VerifiedPayloads), PackageParseError> {
         let deserialized: Self = bincode::decode_from_std_read(pkg_fp, SSAM_SERIALIZATION_CONFIG)
             .map_err(|e| PackageParseError::ParseFailed {
             source: anyhow!(e).context("Failed to decode payload info"),
         })?;
-        Self::verify(pkg_fp, &deserialized, &public_key)?;
-        Ok(deserialized)
+        let verified = Self::verify(pkg_fp, &deserialized, &public_key)?;
+        Ok((deserialized, verified))
     }
 
     pub(crate) fn sign(&mut self, private_key: impl AsRef<Path>) -> Result<()> {
@@ -245,7 +218,7 @@ impl Payloads {
         pkg_fp: &mut File,
         ssam_payloads: &Self,
         public_key: impl AsRef<Path>,
-    ) -> Result<(), PackageParseError> {
+    ) -> Result<VerifiedPayloads, PackageParseError> {
         let file_size = pkg_fp
             .metadata()
             .context("Querying file metadata for payload size validation")
@@ -278,7 +251,7 @@ impl Payloads {
         }
 
         let mut hasher = Sha256::new();
-        let mut hash_buf = vec![0u8; STREAMING_CHUNK_SIZE];
+        let mut verified = VerifiedPayloads::new();
         for (payload_type, payload) in ssam_payloads {
             let payload_conf = SSAM_PAYLOAD_CONFIGURATION
                 .get(payload_type)
@@ -302,7 +275,9 @@ impl Payloads {
                         message: format!("Payload size too large for {payload_type}"),
                         source,
                     })?;
-                update_hasher(pkg_fp, *offset, size, file_size, &mut hasher, &mut hash_buf)?;
+                let buf = read_payload(pkg_fp, *offset, size, file_size, MAX_VERIFY_PAYLOAD_SIZE)?;
+                hasher.update(&buf);
+                verified.insert(*payload_type, buf);
             } else {
                 return Err(PackageParseError::ParseFailed {
                     source: anyhow!("Expected internal payload for {payload_type}"),
@@ -320,7 +295,8 @@ impl Payloads {
 
         public_key
             .verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &signature)
-            .map_err(|_| PackageParseError::SignatureVerificationFailed)
+            .map_err(|_| PackageParseError::SignatureVerificationFailed)?;
+        Ok(verified)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&PayloadType, &Option<Payload>)> {
@@ -604,6 +580,22 @@ mod tests {
     }
 
     #[test]
+    fn read_payload_rejects_oversized_verify_payload() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let huge_file_size = (MAX_VERIFY_PAYLOAD_SIZE + 1) as u64;
+
+        let result = read_payload(
+            &mut cursor,
+            0,
+            MAX_VERIFY_PAYLOAD_SIZE + 1,
+            huge_file_size,
+            MAX_VERIFY_PAYLOAD_SIZE,
+        );
+
+        assert!(matches!(result, Err(PackageParseError::ParseFailed { .. })));
+    }
+
+    #[test]
     fn read_payload_succeeds_at_exact_boundary() {
         let data = b"exactly16bytes!!";
         let mut cursor = Cursor::new(data.to_vec());
@@ -639,105 +631,5 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), b"payload_data_here".to_vec());
-    }
-
-    #[test]
-    fn update_hasher_produces_correct_hash() {
-        let data = b"hello world streaming hash test data";
-        let mut cursor = Cursor::new(data.to_vec());
-        let file_size = data.len() as u64;
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
-        let result = update_hasher(&mut cursor, 0, data.len(), file_size, &mut hasher, &mut buf);
-        assert!(result.is_ok());
-
-        let mut expected_hasher = Sha256::new();
-        expected_hasher.update(data);
-        assert_eq!(hasher.finalize(), expected_hasher.finalize());
-    }
-
-    #[test]
-    fn update_hasher_rejects_region_past_eof() {
-        let mut cursor = Cursor::new(b"short".to_vec());
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
-        let result = update_hasher(&mut cursor, 0, 9999, 5, &mut hasher, &mut buf);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn update_hasher_handles_multi_chunk_data() {
-        let data = vec![0xABu8; STREAMING_CHUNK_SIZE * 3 + 1000];
-        let mut cursor = Cursor::new(data.clone());
-        let file_size = data.len() as u64;
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
-        let result = update_hasher(&mut cursor, 0, data.len(), file_size, &mut hasher, &mut buf);
-        assert!(result.is_ok());
-
-        let mut expected_hasher = Sha256::new();
-        expected_hasher.update(&data);
-        assert_eq!(hasher.finalize(), expected_hasher.finalize());
-    }
-
-    #[test]
-    fn update_hasher_handles_exact_chunk_boundary() {
-        let data = vec![0xCDu8; STREAMING_CHUNK_SIZE * 2];
-        let mut cursor = Cursor::new(data.clone());
-        let file_size = data.len() as u64;
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
-        let result = update_hasher(&mut cursor, 0, data.len(), file_size, &mut hasher, &mut buf);
-        assert!(result.is_ok());
-
-        let mut expected_hasher = Sha256::new();
-        expected_hasher.update(&data);
-        assert_eq!(hasher.finalize(), expected_hasher.finalize());
-    }
-
-    #[test]
-    fn update_hasher_from_nonzero_offset() {
-        let data = b"SKIPthis_is_hashed";
-        let mut cursor = Cursor::new(data.to_vec());
-        let file_size = data.len() as u64;
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
-        let result = update_hasher(&mut cursor, 4, 14, file_size, &mut hasher, &mut buf);
-        assert!(result.is_ok());
-
-        let mut expected_hasher = Sha256::new();
-        expected_hasher.update(b"this_is_hashed");
-        assert_eq!(hasher.finalize(), expected_hasher.finalize());
-    }
-
-    #[test]
-    fn update_hasher_zero_size() {
-        let mut cursor = Cursor::new(b"data".to_vec());
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; STREAMING_CHUNK_SIZE];
-        let result = update_hasher(&mut cursor, 0, 0, 4, &mut hasher, &mut buf);
-        assert!(result.is_ok());
-
-        let mut expected_hasher = Sha256::new();
-        expected_hasher.update(b"");
-        assert_eq!(hasher.finalize(), expected_hasher.finalize());
-    }
-
-    #[test]
-    fn update_hasher_rejects_empty_buffer() {
-        let mut cursor = Cursor::new(b"data".to_vec());
-
-        let mut hasher = Sha256::new();
-        let mut buf = vec![];
-        let result = update_hasher(&mut cursor, 0, 4, 4, &mut hasher, &mut buf);
-
-        assert!(result.is_err());
     }
 }
