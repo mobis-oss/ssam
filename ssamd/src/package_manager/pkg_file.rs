@@ -308,8 +308,17 @@ impl PackageTransactionActor {
             }
             Err(e) => {
                 self.rollback_file_ops(&mode, &dest)
-                    .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
+                    .inspect_err(|rb| log::error!("File rollback also failed: {rb:#}"))
                     .ok();
+                // Purge the acquired volume only when no pre-existing user data is at
+                // risk. Fresh created the data dir here, and remove_data=true already
+                // discarded old data before acquire. A remove_data=false upgrade must
+                // keep the existing data dir so rollback restores the old version's data.
+                if (remove_data || matches!(mode, InstallMode::Fresh))
+                    && let Err(v) = self.purge_volume(&package_name).await
+                {
+                    log::error!("Volume purge also failed: {v:#}");
+                }
                 Err(e)
             }
         }

@@ -232,7 +232,11 @@ pub fn downloaded_packages_dir() -> &'static str {
 /// Get a reference to the packages data root directory path with static lifetime
 ///
 /// Returns `&'static str` pointing to either the runtime config value or build-time config.
-pub(crate) fn packages_data_root() -> &'static str {
+///
+/// # Panics
+///
+/// Panics if the daemon configuration has not been initialized via [`init`].
+pub fn packages_data_root() -> &'static str {
     RUNTIME_CONFIG
         .get()
         .expect("Configuration not initialized. Call init() first.")
