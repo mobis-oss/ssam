@@ -75,6 +75,12 @@ impl PackageVolumeMetadata {
             data_meta,
         })
     }
+
+    /// Returns the data directory path.
+    #[must_use]
+    pub fn data_dir(&self) -> &Path {
+        &self.data_meta.path
+    }
 }
 
 pub mod messages {

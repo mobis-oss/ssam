@@ -246,6 +246,23 @@ impl PackageTransactionActor {
         }
     }
 
+    /// Renames the data directory to a ".old" backup for upgrade rollback.
+    /// Returns the backup path, or None if the directory does not exist.
+    fn backup_data_dir(data_dir_path: &Path) -> anyhow::Result<Option<PathBuf>> {
+        // Append to the whole path; with_extension would clobber the final
+        // segment of reverse-DNS names (com.example.app).
+        let mut old = data_dir_path.to_path_buf().into_os_string();
+        old.push(".old");
+        let old = PathBuf::from(old);
+        // Clear a stale ".old"; rename onto a non-empty dir fails with ENOTEMPTY.
+        std::fs::remove_dir_all(&old).ok();
+        match std::fs::rename(data_dir_path, &old) {
+            Ok(()) => Ok(Some(old)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context("Failed to back up data directory for rollback"),
+        }
+    }
+
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
     #[allow(clippy::unnecessary_debug_formatting)]
     async fn execute_install_inner(
@@ -273,22 +290,41 @@ impl PackageTransactionActor {
             return Err(e);
         }
 
-        if remove_data && let Err(e) = self.purge_volume(&package_name).await {
-            self.rollback_file_ops(&mode, &dest)
-                .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
-                .ok();
-            return Err(e);
-        }
-
-        let volume = match self.acquire_volume(volume_meta).await {
-            Ok(v) => v,
-            Err(e) => {
+        // Back up the data dir before acquire/Package::new so a failure past
+        // this destructive point can restore it.
+        let data_dir_path = volume_meta.data_dir().to_path_buf();
+        let data_backup_path = (remove_data
+            && matches!(
+                mode,
+                InstallMode::UpgradeBundled | InstallMode::UpgradeDownloaded { .. }
+            ))
+        .then(|| {
+            Self::backup_data_dir(&data_dir_path).inspect_err(|_| {
                 self.rollback_file_ops(&mode, &dest)
                     .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
                     .ok();
-                return Err(e);
-            }
-        };
+            })
+        })
+        .transpose()?
+        .flatten();
+
+        let volume = self
+            .acquire_volume(volume_meta)
+            .await
+            .inspect_err(|_| {
+                // acquire failed: drop any partial fresh dir, restore the backup.
+                if let Some(ref backup_path) = data_backup_path {
+                    std::fs::remove_dir_all(&data_dir_path).ok();
+                    if let Err(restore_err) = std::fs::rename(backup_path, &data_dir_path) {
+                        log::error!(
+                            "Failed to restore old data directory after acquire failure: {restore_err:#}"
+                        );
+                    }
+                }
+                self.rollback_file_ops(&mode, &dest)
+                    .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
+                    .ok();
+            })?;
 
         let context = PackageContext::new(&dest, package_file);
         match Package::new(
@@ -304,20 +340,37 @@ impl PackageTransactionActor {
                         log::warn!("Failed to remove backup file {bp:?}: {e:#}");
                     }
                 }
+                if let Some(ref backup_path) = data_backup_path
+                    && let Err(e) = std::fs::remove_dir_all(backup_path)
+                {
+                    log::warn!("Failed to remove old data directory {backup_path:?}: {e:#}");
+                }
                 Ok(Arc::new(package))
             }
             Err(e) => {
                 self.rollback_file_ops(&mode, &dest)
                     .inspect_err(|rb| log::error!("File rollback also failed: {rb:#}"))
                     .ok();
-                // Purge the acquired volume only when no pre-existing user data is at
-                // risk. Fresh created the data dir here, and remove_data=true already
-                // discarded old data before acquire. A remove_data=false upgrade must
-                // keep the existing data dir so rollback restores the old version's data.
-                if (remove_data || matches!(mode, InstallMode::Fresh))
-                    && let Err(v) = self.purge_volume(&package_name).await
-                {
-                    log::error!("Volume purge also failed: {v:#}");
+                match data_backup_path {
+                    // Upgrade preserved old data: purge fresh volume, restore it.
+                    Some(ref backup_path) => {
+                        if let Err(v) = self.purge_volume(&package_name).await {
+                            log::error!("Volume purge during rollback failed: {v:#}");
+                        }
+                        // Clear the fresh dir even if purge failed, so restore can land.
+                        std::fs::remove_dir_all(&data_dir_path).ok();
+                        if let Err(restore_err) = std::fs::rename(backup_path, &data_dir_path) {
+                            log::error!("Failed to restore old data directory: {restore_err:#}");
+                        }
+                    }
+                    // Fresh, or remove_data upgrade with no old data: purge fresh volume.
+                    None if remove_data || matches!(mode, InstallMode::Fresh) => {
+                        if let Err(v) = self.purge_volume(&package_name).await {
+                            log::error!("Volume purge also failed: {v:#}");
+                        }
+                    }
+                    // remove_data=false upgrade: keep existing data for rollback.
+                    None => {}
                 }
                 Err(e)
             }
@@ -760,5 +813,86 @@ service_type = "simple"
             .expect("actor communication");
 
         assert!(result.is_err(), "non-NotFound errors should propagate");
+    }
+
+    #[tokio::test]
+    async fn test_acquire_failure_restores_backup_file() {
+        // Verifies the .ssam backup file is restored on acquire failure. The
+        // data-dir root (/test/data) is absent under test, so backup_data_dir
+        // returns None; the data-dir path is covered by the integration test
+        // `test_upgrade_failure_triggers_recovery`.
+        let ops = MockTrackingPackageFile::new();
+        let renames = Arc::clone(&ops.renames);
+        let removals = Arc::clone(&ops.removals);
+        let actor_ref = spawn_actor_with_dead_volume_manager(ops);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let info = make_install_info("test-pkg", tmp.path());
+
+        let installed_path = PathBuf::from("/pkg/installed.ssam");
+        let result = actor_ref
+            .ask(Install {
+                info,
+                remove_data: true,
+                mode: InstallMode::UpgradeDownloaded {
+                    installed_path: installed_path.clone(),
+                },
+            })
+            .await
+            .expect("actor communication");
+
+        assert!(result.is_err(), "expected Failed when acquire_volume fails");
+
+        let renames_guard = renames.lock().unwrap();
+        // Only backup rename and restore are tracked via fs_ops.
+        // 1: backup rename (installed.ssam -> installed.ssam.old)
+        // 2: backup restore (installed.ssam.old -> installed.ssam)
+        assert_eq!(renames_guard.len(), 2);
+        assert_eq!(renames_guard[0].0, installed_path);
+        assert_eq!(renames_guard[0].1, PathBuf::from("/pkg/installed.ssam.old"));
+        assert_eq!(renames_guard[1].0, PathBuf::from("/pkg/installed.ssam.old"));
+        assert_eq!(renames_guard[1].1, installed_path);
+
+        // No removals expected (backup not deleted on failure)
+        drop(renames_guard);
+        let removals = removals.lock().unwrap();
+        assert!(removals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_success_removes_backup_file() {
+        // Verifies the .ssam backup file is removed on success. The data-dir
+        // root (/test/data) is absent under test, so backup_data_dir returns
+        // None; the data-dir path is covered by the integration test
+        // `test_upgrade_failure_triggers_recovery`.
+        let ops = MockTrackingPackageFile::new();
+        let renames = Arc::clone(&ops.renames);
+        let removals = Arc::clone(&ops.removals);
+        let actor_ref = spawn_actor(ops);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let info = make_install_info("test-pkg", tmp.path());
+
+        let installed_path = PathBuf::from("/pkg/installed.ssam");
+        let result = actor_ref
+            .ask(Install {
+                info,
+                remove_data: true,
+                mode: InstallMode::UpgradeDownloaded {
+                    installed_path: installed_path.clone(),
+                },
+            })
+            .await
+            .expect("actor communication");
+
+        assert!(result.is_ok(), "expected success");
+
+        let renames = renames.lock().unwrap();
+        // Only the backup rename is fs_ops-tracked; the data-dir rename is direct std::fs.
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0].0, installed_path);
+        assert_eq!(renames[0].1, PathBuf::from("/pkg/installed.ssam.old"));
+
+        let removals = removals.lock().unwrap();
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0], PathBuf::from("/pkg/installed.ssam.old"));
     }
 }
