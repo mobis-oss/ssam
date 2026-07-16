@@ -249,10 +249,12 @@ pub(crate) fn is_safe_relative_path(path: &std::path::Path) -> bool {
 }
 
 /// True if `name` is a safe single path segment (a package name): non-empty,
-/// no `/`, no NUL, exactly one `Normal` component. Structural only — charset
-/// policy is out of scope (owned by MLINUX-2095).
+/// no `/`, no NUL, no `,`, no `\`, exactly one `Normal` component. `,` and `\`
+/// are rejected so a name cannot inject or corrupt overlayfs mount options.
 pub(crate) fn is_safe_path_segment(name: &str) -> bool {
-    if name.is_empty() || name.contains('/') || name.contains('\0') {
+    // Chars that could escape the segment or inject/corrupt overlayfs options.
+    const FORBIDDEN: &[char] = &['/', '\0', ',', '\\'];
+    if name.is_empty() || name.contains(FORBIDDEN) {
         return false;
     }
     let mut comps = std::path::Path::new(name).components();
@@ -742,6 +744,8 @@ mod tests {
             "/abs",
             "pkg/",
             "a\0b",
+            "evil,volatile",
+            "evil\\back",
         ] {
             assert!(!is_safe_path_segment(name), "{name:?} should be unsafe");
         }

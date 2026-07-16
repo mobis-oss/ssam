@@ -615,17 +615,79 @@ fn do_mount(
     ))
 }
 
+/// Mount steps performed by `mount_device`, injectable to unit-test rollback.
+trait DeviceMountBackend {
+    fn mount_base(&self, blkdev: &Path) -> anyhow::Result<()>;
+    fn mount_overlay(&self) -> anyhow::Result<()>;
+    fn unmount(&self) -> anyhow::Result<()>;
+}
+
+struct DefaultDeviceMountBackend<'meta> {
+    pkgfs_meta: &'meta PackageFsMetadata,
+}
+
+impl DeviceMountBackend for DefaultDeviceMountBackend<'_> {
+    fn mount_base(&self, blkdev: &Path) -> anyhow::Result<()> {
+        let fstype = self.pkgfs_meta.packagefs_info.fstype.to_string();
+        do_mount(
+            blkdev,
+            &self.pkgfs_meta.mount_point,
+            &fstype,
+            MountFlags::RDONLY,
+            None,
+        )
+    }
+
+    fn mount_overlay(&self) -> anyhow::Result<()> {
+        mount_overlayfs(self.pkgfs_meta)
+    }
+
+    fn unmount(&self) -> anyhow::Result<()> {
+        do_unmount(&self.pkgfs_meta.mount_point)
+    }
+}
+
 fn mount_device(blkdev: impl AsRef<Path>, pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
-    let mount_point = &pkgfs_meta.mount_point;
-    let fstype = &pkgfs_meta.packagefs_info.fstype.to_string();
+    let overlay_enabled = !configuration::packages_overlayfs_root().is_empty();
+    mount_device_with(
+        blkdev.as_ref(),
+        overlay_enabled,
+        &DefaultDeviceMountBackend { pkgfs_meta },
+    )
+}
 
-    do_mount(blkdev, mount_point, fstype, MountFlags::RDONLY, None)?;
-
-    let packages_overlayfs_root = configuration::packages_overlayfs_root();
-    if !packages_overlayfs_root.is_empty() {
-        mount_overlayfs(pkgfs_meta)?;
+/// Mount the base package fs, then the overlay. Roll back the base if the
+/// overlay step fails.
+fn mount_device_with(
+    blkdev: &Path,
+    overlay_enabled: bool,
+    backend: &impl DeviceMountBackend,
+) -> anyhow::Result<()> {
+    backend.mount_base(blkdev)?;
+    if overlay_enabled && let Err(e) = backend.mount_overlay() {
+        if let Err(unmount_err) = backend.unmount() {
+            log::warn!("mount_device: base rollback after overlay failure failed: {unmount_err:?}");
+        }
+        return Err(e);
     }
     Ok(())
+}
+
+/// Escape metacharacters in a lowerdir path. Colon is the list separator; the
+/// kernel unescapes `\:`, so a name cannot inject an extra lowerdir.
+fn escape_overlay_opt(path: &str) -> String {
+    path.replace('\\', "\\\\")
+        .replace(',', "\\,")
+        .replace(':', "\\:")
+}
+
+/// Only lowerdir is escaped: it is a colon-separated list the kernel unescapes.
+/// upperdir/workdir are single paths passed verbatim (escaping would break them).
+fn build_overlay_options(lowerdir: &str, upperdir: &str, workdir: &str) -> String {
+    format!(
+        "lowerdir={},upperdir={upperdir},workdir={workdir}",
+        escape_overlay_opt(lowerdir),
+    )
 }
 
 fn mount_overlayfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
@@ -642,8 +704,8 @@ fn mount_overlayfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
 
     let upperdir = overlayfs_root.join("upper");
     let workdir = overlayfs_root.join("work");
-    let options = format!(
-        "lowerdir={mntpoint},upperdir={},workdir={}",
+    let options = build_overlay_options(
+        mntpoint,
         upperdir.to_str().ok_or(anyhow::anyhow!(
             "mount_overlayfs(): Failed to convert upperdir - \"{}\" to string",
             upperdir.to_string_lossy()
@@ -856,6 +918,174 @@ fn is_exact_mount(mount_point: &Path) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn escape_overlay_opt_escapes_metachars() {
+        assert_eq!(escape_overlay_opt("/mnt/pkg"), "/mnt/pkg");
+        assert_eq!(escape_overlay_opt("a,b"), "a\\,b");
+        assert_eq!(escape_overlay_opt("a:b"), "a\\:b");
+        assert_eq!(escape_overlay_opt("a\\b"), "a\\\\b");
+        // Backslash escaped first, so an injected "\," stays two escaped chars.
+        assert_eq!(escape_overlay_opt("x\\,y"), "x\\\\\\,y");
+    }
+
+    #[test]
+    fn build_overlay_options_escapes_only_lowerdir() {
+        // Colon escaped in lowerdir (list separator), raw in upperdir/workdir.
+        let opts = build_overlay_options("/mnt/a:b", "/ov/a:b/upper", "/ov/a:b/work");
+        assert_eq!(
+            opts,
+            "lowerdir=/mnt/a\\:b,upperdir=/ov/a:b/upper,workdir=/ov/a:b/work"
+        );
+    }
+
+    // Overlay failure must roll back the base mount, and only then.
+    #[derive(Default)]
+    struct MockMountCalls {
+        base_mounted: bool,
+        overlay_attempted: bool,
+        unmounted: bool,
+        // Call order, for sequencing asserts.
+        order: Vec<&'static str>,
+    }
+
+    struct MockDeviceMountBackend {
+        calls: RefCell<MockMountCalls>,
+        base_ok: bool,
+        overlay_ok: bool,
+        unmount_ok: bool,
+    }
+
+    impl DeviceMountBackend for MockDeviceMountBackend {
+        fn mount_base(&self, _blkdev: &Path) -> anyhow::Result<()> {
+            let mut calls = self.calls.borrow_mut();
+            calls.base_mounted = true;
+            calls.order.push("base");
+            if self.base_ok {
+                Ok(())
+            } else {
+                anyhow::bail!("injected base mount failure")
+            }
+        }
+        fn mount_overlay(&self) -> anyhow::Result<()> {
+            let mut calls = self.calls.borrow_mut();
+            calls.overlay_attempted = true;
+            calls.order.push("overlay");
+            if self.overlay_ok {
+                Ok(())
+            } else {
+                anyhow::bail!("injected overlay mount failure")
+            }
+        }
+        fn unmount(&self) -> anyhow::Result<()> {
+            let mut calls = self.calls.borrow_mut();
+            calls.unmounted = true;
+            calls.order.push("unmount");
+            if self.unmount_ok {
+                Ok(())
+            } else {
+                anyhow::bail!("injected unmount failure")
+            }
+        }
+    }
+
+    fn mock_backend(overlay_ok: bool) -> MockDeviceMountBackend {
+        MockDeviceMountBackend {
+            calls: RefCell::new(MockMountCalls::default()),
+            base_ok: true,
+            overlay_ok,
+            unmount_ok: true,
+        }
+    }
+
+    #[test]
+    fn mount_device_rolls_back_base_on_overlay_failure() {
+        let backend = mock_backend(false);
+        let res = mount_device_with(Path::new("/dev/fake"), true, &backend);
+        assert!(res.is_err());
+        let calls = backend.calls.borrow();
+        assert!(calls.base_mounted);
+        assert!(calls.overlay_attempted);
+        assert!(
+            calls.unmounted,
+            "base must be unmounted after overlay failure"
+        );
+        assert_eq!(
+            calls.order,
+            ["base", "overlay", "unmount"],
+            "must mount base, attempt overlay, then roll back"
+        );
+    }
+
+    #[test]
+    fn mount_device_returns_overlay_error_when_rollback_unmount_fails() {
+        // Overlay and rollback-unmount both fail: caller still gets the overlay
+        // error (unmount error is only logged).
+        let backend = MockDeviceMountBackend {
+            calls: RefCell::new(MockMountCalls::default()),
+            base_ok: true,
+            overlay_ok: false,
+            unmount_ok: false,
+        };
+        let err = mount_device_with(Path::new("/dev/fake"), true, &backend).unwrap_err();
+        assert!(
+            err.to_string().contains("injected overlay mount failure"),
+            "must return the overlay error, not the rollback unmount error: {err}"
+        );
+        assert!(
+            backend.calls.borrow().unmounted,
+            "rollback must be attempted"
+        );
+    }
+
+    #[test]
+    fn mount_device_stops_on_base_failure() {
+        // Base mount fails: overlay and rollback must not run.
+        let backend = MockDeviceMountBackend {
+            calls: RefCell::new(MockMountCalls::default()),
+            base_ok: false,
+            overlay_ok: true,
+            unmount_ok: true,
+        };
+        let err = mount_device_with(Path::new("/dev/fake"), true, &backend).unwrap_err();
+        assert!(err.to_string().contains("injected base mount failure"));
+        let calls = backend.calls.borrow();
+        assert!(calls.base_mounted);
+        assert!(
+            !calls.overlay_attempted,
+            "overlay must not run after base failure"
+        );
+        assert!(
+            !calls.unmounted,
+            "nothing to roll back when base itself failed"
+        );
+    }
+
+    #[test]
+    fn mount_device_no_rollback_on_success() {
+        let backend = mock_backend(true);
+        let res = mount_device_with(Path::new("/dev/fake"), true, &backend);
+        assert!(res.is_ok());
+        assert!(
+            !backend.calls.borrow().unmounted,
+            "success must not unmount"
+        );
+    }
+
+    #[test]
+    fn mount_device_skips_overlay_when_disabled() {
+        let backend = mock_backend(false);
+        let res = mount_device_with(Path::new("/dev/fake"), false, &backend);
+        assert!(res.is_ok());
+        let calls = backend.calls.borrow();
+        assert!(calls.base_mounted);
+        assert!(
+            !calls.overlay_attempted,
+            "overlay must not run when disabled"
+        );
+        assert!(!calls.unmounted);
+    }
 
     struct FailingLoopControlOpener;
 
