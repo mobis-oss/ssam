@@ -4,6 +4,8 @@
 use crate::configuration;
 #[cfg(feature = "dm-verity")]
 use crate::dm::VerityDevice;
+#[cfg(feature = "dm-verity")]
+use crate::network::pkg_hash10;
 use crate::package_volume::PackageFsMetadata;
 
 use crate::utils::actor_supervisor::{SupervisedActor, spawn_with};
@@ -809,13 +811,12 @@ pub(crate) async fn mount_pkgfs(
     let veritydev = {
         let dm_setup_time = Instant::now();
 
-        // Append a random suffix to make each device name unique. DM_DEFERRED_REMOVE
-        // processes removal asynchronously (150-250ms via kdmremove workqueue), so a
-        // stale device name may still exist when the same package is remounted quickly.
-        // Old devices are always cleaned up after unmount triggers deferred removal,
-        // so unique names do not leak resources.
+        // ssam-<hash>-verity-<suffix>: hash the (uncontrolled) package name so a
+        // long name cannot truncate past the 128-byte dm field and collide, as
+        // network.rs does. Random suffix keeps a quick remount unique while the
+        // old device's DM_DEFERRED_REMOVE is still pending.
         let suffix = uuid::Uuid::new_v4().simple();
-        let verity_name = format!("ssam-{pkg_name}-verity-{suffix}");
+        let verity_name = format!("ssam-{}-verity-{suffix}", pkg_hash10(pkg_name));
         let veritydev = VerityDevice::new(&verity_name, &loop_dev_path, &pkgfs_info.verity_info)
             .with_context(|| {
                 format!(
