@@ -22,6 +22,8 @@ mode = "host" # one of: host | bridge | none
 
 #:Opt:# container.network.bridge
 [container.network.bridge]
+#:Opt:# container.network.bridge.network_name
+network_name = "shared-net-a"
 #:Opt:# container.network.bridge.interface_name
 interface_name = "eth0"
 #:Opt:# container.network.bridge.port_mappings

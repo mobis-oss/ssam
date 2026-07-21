@@ -154,6 +154,7 @@ mod tests {
                 network: Some(Network {
                     mode: Some("bridge".to_string()),
                     bridge: Some(Bridge {
+                        network_name: None,
                         interface_name: Some("eth1".to_string()),
                         port_mappings: None,
                     }),
@@ -176,6 +177,54 @@ mod tests {
                 .get_container_network_bridge_interface_name()
                 .map(String::as_str),
             Some("eth1")
+        );
+    }
+
+    #[test]
+    fn container_network_bridge_network_name_getter() {
+        let absent = create_test_metadata();
+        assert_eq!(absent.get_container_network_bridge_network_name(), None);
+
+        let package_config = PackageConfigSpec {
+            package: crate::config::Package {
+                name: "test_package".to_string(),
+                description: "A test package".to_string(),
+                version: "1.0.0".to_string(),
+                autostart: Some(true),
+            },
+            container: crate::config::Container {
+                storage_limit: Some(1000),
+                data_dirs: Some("/test/path1:/test/path2".to_string()),
+                security: Security {
+                    seccomp: true,
+                    mac: true,
+                },
+                network: Some(Network {
+                    mode: Some("bridge".to_string()),
+                    bridge: Some(Bridge {
+                        network_name: Some("shared-net".to_string()),
+                        interface_name: None,
+                        port_mappings: None,
+                    }),
+                }),
+            },
+            service: crate::config::Service {
+                service_type: "notify".to_string(),
+                bus_name: Some("test.bus.name".to_string()),
+                remain_after_exit: Some(false),
+            },
+        };
+        let configured = PackageMetadata::new(
+            package_config,
+            FsType::Erofs,
+            make_verity("test_hash_root", 0),
+        )
+        .unwrap();
+        assert_eq!(
+            configured
+                .get_container_network_bridge_network_name()
+                .map(String::as_str),
+            Some("shared-net")
         );
     }
 

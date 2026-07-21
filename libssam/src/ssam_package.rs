@@ -89,7 +89,7 @@ type PayloadSizeType = u64;
 const SSAM_PKG_MAGIC_LEN: usize = 24;
 const SSAM_PKG_FORMAT_VERSION_LEN: usize = 8;
 const SSAM_PKG_MAGIC: &[u8; SSAM_PKG_MAGIC_LEN] = b"MIRAEPLATFORMGAEBALGROUP";
-const SSAM_PKG_FORMAT_VERSION: &[u8; SSAM_PKG_FORMAT_VERSION_LEN] = b"0.5.0\0\0\0";
+const SSAM_PKG_FORMAT_VERSION: &[u8; SSAM_PKG_FORMAT_VERSION_LEN] = b"0.6.0\0\0\0";
 const SSAM_PKG_FOOTER_LEN: usize = SSAM_PKG_MAGIC_LEN + SSAM_PKG_FORMAT_VERSION_LEN;
 
 /// Read N bytes from the end of file at given offset.
