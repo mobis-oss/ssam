@@ -173,7 +173,7 @@ pub(crate) mod oci {
             let namespaces = linux.namespaces_mut().get_or_insert_with(Vec::new);
             Self::configure_network_namespace(
                 namespaces,
-                network_mode,
+                &network_mode,
                 &package_name,
                 bridge_netns_path.as_deref(),
             )?;
@@ -232,9 +232,12 @@ pub(crate) mod oci {
         // pre-configured network namespace when package config specifies network
         // mode. If both are present, ssam-wrap should reject the package at build
         // time rather than silently overriding here.
+        // Safety: Debug format ({:?}) for the netns path instead of Display to
+        // prevent log injection via special characters in the path.
+        #[allow(clippy::use_debug, clippy::unnecessary_debug_formatting)]
         fn configure_network_namespace(
             namespaces: &mut Vec<LinuxNamespace>,
-            network_mode: NetworkMode,
+            network_mode: &NetworkMode,
             package_name: &str,
             bridge_netns_path: Option<&std::path::Path>,
         ) -> anyhow::Result<()> {
@@ -262,6 +265,16 @@ pub(crate) mod oci {
                         .path(path.to_path_buf())
                         .build()
                         .context("Failed to build bridge network namespace entry")?;
+                    namespaces.push(ns);
+                }
+                NetworkMode::Netns(path) => {
+                    crate::network::netns::verify_is_netns(path)
+                        .context("Failed to verify external netns")?;
+                    let ns = LinuxNamespaceBuilder::default()
+                        .typ(LinuxNamespaceType::Network)
+                        .path(path.clone())
+                        .build()
+                        .context("Failed to build external netns entry")?;
                     namespaces.push(ns);
                 }
             }
@@ -453,6 +466,52 @@ pub(crate) mod oci {
             let mount_json = serde_json::to_value(&mounts[0]).unwrap();
             assert_eq!(mount_json["source"], "/package-data/test-package/var/data");
             assert_eq!(mount_json["destination"], "/var/data");
+        }
+
+        #[test]
+        fn netns_arm_fails_for_non_netns_path() {
+            let file = tempfile::NamedTempFile::new().expect("tempfile");
+            let mut namespaces = Vec::new();
+            let err = TransientRuntimeConfig::configure_network_namespace(
+                &mut namespaces,
+                &NetworkMode::Netns(file.path().to_path_buf()),
+                "test-netns-pkg",
+                None,
+            )
+            .expect_err("a plain file is not a netns");
+            assert!(
+                format!("{err:#}").contains("external netns"),
+                "unexpected error: {err:#}"
+            );
+        }
+
+        // `configure_network_namespace` calls `verify_is_netns`, which requires a
+        // real network namespace (root + CLONE_NEWNET) to succeed; run under the
+        // Docker test harness instead of plain `cargo test`.
+        #[test]
+        #[ignore = "requires root and CLONE_NEWNET; run under the Docker test harness"]
+        fn netns_arm_sets_path_when_verified() {
+            let path = crate::network::netns::netns_path("ssam-executor-netns-test");
+            let _ = crate::network::netns::delete_named_netns(&path);
+            crate::network::netns::ensure_netns_tree_trusted().unwrap();
+            crate::network::netns::create_named_netns(&path).unwrap();
+
+            let mut namespaces = Vec::new();
+            TransientRuntimeConfig::configure_network_namespace(
+                &mut namespaces,
+                &NetworkMode::Netns(path.clone()),
+                "test-netns-pkg",
+                None,
+            )
+            .expect("a verified netns must succeed");
+
+            let net_ns = namespaces
+                .iter()
+                .find(|ns| ns.typ() == LinuxNamespaceType::Network)
+                .expect("must add a network namespace entry");
+            assert_eq!(net_ns.path(), &Some(path.clone()));
+
+            crate::network::netns::delete_named_netns(&path).unwrap();
         }
     }
 

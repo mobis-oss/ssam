@@ -68,12 +68,54 @@ pub mod container {
         Idle,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, Display)]
+    #[derive(Debug, Clone, PartialEq, Eq, EnumString)]
     #[strum(serialize_all = "lowercase")]
     pub enum NetworkMode {
         Host,
         None,
         Bridge,
+        /// Join a sysadmin-provisioned netns at this path. Not a keyword, so
+        /// excluded from strum's string parsing (see `parse_mode`).
+        #[strum(disabled)]
+        Netns(std::path::PathBuf),
+    }
+
+    impl NetworkMode {
+        /// Parse the `[container.network] mode` value: an absolute path selects an
+        /// external pre-existing netns; otherwise it is a keyword (host/none/bridge).
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if `s` is not an absolute path and does not match a
+        /// known keyword (`host`, `none`, `bridge`).
+        pub fn parse_mode(s: &str) -> Result<Self, strum::ParseError> {
+            if std::path::Path::new(s).is_absolute() {
+                Ok(NetworkMode::Netns(std::path::PathBuf::from(s)))
+            } else {
+                s.parse()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parse_mode_recognizes_keywords_and_absolute_path() {
+            assert_eq!(NetworkMode::parse_mode("host").unwrap(), NetworkMode::Host);
+            assert_eq!(
+                NetworkMode::parse_mode("bridge").unwrap(),
+                NetworkMode::Bridge
+            );
+            assert_eq!(
+                NetworkMode::parse_mode("/run/netns/foo").unwrap(),
+                NetworkMode::Netns(std::path::PathBuf::from("/run/netns/foo"))
+            );
+            assert!(NetworkMode::parse_mode("garbage").is_err());
+            // Relative path (no leading '/') falls into keyword parsing and fails.
+            assert!(NetworkMode::parse_mode("./rel").is_err());
+        }
     }
 }
 

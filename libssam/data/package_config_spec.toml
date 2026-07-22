@@ -18,7 +18,7 @@ mac = true # default is true
 #:Opt:# container.network
 [container.network]
 #:Opt:# container.network.mode
-mode = "host" # one of: host | bridge | none
+mode = "host" # one of: host | bridge | none | /abs/netns/path
 
 #:Opt:# container.network.bridge
 [container.network.bridge]

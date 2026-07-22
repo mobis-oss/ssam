@@ -449,7 +449,7 @@ impl Package {
         // the container command and the transitioner so they never diverge.
         let network_mode = metadata
             .get_container_network_mode()
-            .map(|m| m.parse::<NetworkMode>())
+            .map(|m| NetworkMode::parse_mode(m))
             .transpose()
             .context("Invalid network mode in package config")?
             .unwrap_or(NetworkMode::Host);
