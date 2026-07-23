@@ -6,8 +6,6 @@ use libssam::utils::PrettyJsonWriter;
 use oci_spec::runtime::{LinuxNamespaceType, ProcessBuilder};
 use std::path::Path;
 
-use super::execute_command;
-
 static OCI_IMAGE_TAG: &str = "ssam";
 static OCI_IMAGE_DIRNAME: &str = "oci_unpack";
 static OCI_UNPACK_DIRNAME: &str = "oci_unpack";
@@ -79,6 +77,7 @@ pub fn extract_rootfs(
     docker_uri: &str,
     architecture: super::OciArchitecture,
 ) -> anyhow::Result<()> {
+    let runner = workspace.runner.as_ref();
     workspace.prepare_intermediate_dir()?;
 
     let oci_image_dir = workspace.intermediate_dir.join(OCI_IMAGE_DIRNAME);
@@ -117,9 +116,9 @@ pub fn extract_rootfs(
         let docker_uri = docker_uri.trim_start_matches("docker-daemon:");
         println!("Using Docker daemon URI: {docker_uri}");
 
-        if let Ok(arch) = execute_command(
+        if let Ok(arch) = runner.execute_command(
             "docker",
-            Some(["inspect", "--format='{{.Architecture}}'", docker_uri]),
+            &["inspect", "--format='{{.Architecture}}'", docker_uri],
             true,
         ) {
             let arch = arch.trim();
@@ -143,21 +142,21 @@ pub fn extract_rootfs(
         }
     }
 
-    execute_command(
+    runner.execute_command(
         "skopeo",
-        Some([
+        &[
             "--insecure-policy",
             "copy",
             &format!("--override-arch={architecture}"),
             docker_uri,
             format!("oci:{oci_image_name}").as_str(),
-        ]),
+        ],
         false,
     )?;
 
-    execute_command(
+    runner.execute_command(
         "umoci",
-        Some([
+        &[
             "unpack",
             "--rootless",
             "--image",
@@ -165,7 +164,7 @@ pub fn extract_rootfs(
             oci_unpack_dir
                 .to_str()
                 .context("Failed to convert OCI unpack path to string")?,
-        ]),
+        ],
         false,
     )?;
 

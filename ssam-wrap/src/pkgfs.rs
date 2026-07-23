@@ -3,10 +3,8 @@
 
 use anyhow::Context;
 use clap::ValueEnum;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use strum::{Display, EnumString, VariantNames};
 
 mod docker;
@@ -55,47 +53,6 @@ impl From<ImageType> for (&'static str, Vec<&'static str>) {
             ImageType::ErofsLz4 => ("pkgfs.erofs-lz4", vec!["mkfs.erofs", "-zlz4"]),
             ImageType::ErofsLz4hc => ("pkgfs.erofs-lz4hc", vec!["mkfs.erofs", "-zlz4hc"]),
         }
-    }
-}
-
-pub fn execute_command<I, S>(
-    cmd: &str,
-    args: Option<I>,
-    capture_stdout: bool,
-) -> anyhow::Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let mut command = Command::new(cmd);
-    if let Some(args) = args {
-        command.args(args);
-    }
-
-    if capture_stdout {
-        command.stdout(Stdio::piped());
-    } else {
-        command.stdout(Stdio::inherit());
-    }
-    command.stderr(Stdio::inherit());
-
-    let output = command.output().context(format!("Failed to run {cmd}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "Command {:?} failed with status {}\nStderr: {}",
-            command,
-            output.status,
-            stderr
-        );
-    }
-
-    if !capture_stdout || output.stdout.is_empty() {
-        Ok(String::new())
-    } else {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
     }
 }
 

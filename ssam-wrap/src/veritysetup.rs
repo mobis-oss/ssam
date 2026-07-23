@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    ffi::OsStr,
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
 };
 
 use anyhow::Context;
 use libssam::{ssam_package::PackageFsVerityInfo, superblock};
+
+use crate::command::{CommandRunner, OutputCapture};
 
 /// Returns the byte offset at which the dm-verity hash tree starts inside a
 /// combined `filesystem.img`, rounded up to the next `block_size` boundary.
@@ -24,11 +27,19 @@ struct VeritySetup<'vs> {
 
 impl VeritySetup<'_> {
     const VERITY_SETUP_CMD: &'static str = "veritysetup";
-    pub fn run(&self) -> anyhow::Result<Output> {
-        Command::new(VeritySetup::VERITY_SETUP_CMD)
-            .arg(self.action)
-            .args(&self.args)
-            .output()
+    pub fn run(&self, runner: &dyn CommandRunner) -> anyhow::Result<Output> {
+        let mut all_args: Vec<&OsStr> = Vec::with_capacity(self.args.len() + 1);
+        all_args.push(OsStr::new(self.action));
+        all_args.extend(self.args.iter().map(|s| OsStr::new(s.as_str())));
+        runner
+            .run(
+                VeritySetup::VERITY_SETUP_CMD,
+                &all_args,
+                OutputCapture {
+                    stdout: true,
+                    stderr: true,
+                },
+            )
             .context(format!(
                 "Failed to run {} {} {}",
                 VeritySetup::VERITY_SETUP_CMD,
@@ -100,8 +111,8 @@ impl FormatVerity<'_> {
         })
     }
 
-    pub fn run(&self) -> anyhow::Result<PackageFsVerityInfo> {
-        let output = self.cmd.run()?;
+    pub fn run(&self, runner: &dyn CommandRunner) -> anyhow::Result<PackageFsVerityInfo> {
+        let output = self.cmd.run(runner)?;
         if !output.status.success() {
             anyhow::bail!(
                 "Failed to create dm-verity hash tree: process exited with status {}. Errmsg: {}",

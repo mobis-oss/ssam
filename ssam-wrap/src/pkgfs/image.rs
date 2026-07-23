@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use super::ImageType;
-use super::execute_command;
+use crate::command::CommandRunner;
 
 mod rootfs {
     use anyhow::{Context, Result};
@@ -179,7 +179,12 @@ mod rootfs {
     }
 }
 
-fn build_pkgfs_ext4_image(src: &str, dest: &str, mkfs_args: &[&str]) -> Result<()> {
+fn build_pkgfs_ext4_image(
+    src: &str,
+    dest: &str,
+    mkfs_args: &[&str],
+    runner: &dyn CommandRunner,
+) -> Result<()> {
     let mut mkfs_args = Vec::from(mkfs_args);
 
     let dir_size = fs_extra::dir::get_size(src)
@@ -192,24 +197,29 @@ fn build_pkgfs_ext4_image(src: &str, dest: &str, mkfs_args: &[&str]) -> Result<(
     let total_size_mb = total_size.div_ceil(1024 * 1024).max(3);
     println!("10% overhead added source directory: {total_size} bytes ({total_size_mb} MiB)");
 
-    execute_command(
+    runner.execute_command(
         "truncate",
-        Some(&["-s", &format!("{total_size_mb}M"), dest]),
+        &["-s", &format!("{total_size_mb}M"), dest],
         false,
     )?;
 
     mkfs_args.push("-d");
     mkfs_args.push(src);
     mkfs_args.push(dest);
-    execute_command("fakeroot", Some(mkfs_args), false)?;
+    runner.execute_command("fakeroot", &mkfs_args, false)?;
     Ok(())
 }
 
-fn build_pkgfs_erofs_image(src: &str, dest: &str, mkfs_args: &[&str]) -> Result<()> {
+fn build_pkgfs_erofs_image(
+    src: &str,
+    dest: &str,
+    mkfs_args: &[&str],
+    runner: &dyn CommandRunner,
+) -> Result<()> {
     let mut mkfs_args = Vec::from(mkfs_args);
     mkfs_args.push(dest);
     mkfs_args.push(src);
-    execute_command("fakeroot", Some(mkfs_args), false)?;
+    runner.execute_command("fakeroot", &mkfs_args, false)?;
     Ok(())
 }
 
@@ -218,6 +228,7 @@ fn build_pkgfs_image(
     pkgfs_src_path: impl AsRef<Path>,
     image_type: ImageType,
 ) -> Result<PathBuf> {
+    let runner = workspace.runner.as_ref();
     let (image_file_name, mkfs_args) = image_type.into();
     let pkgfs_src_path = pkgfs_src_path.as_ref();
 
@@ -244,10 +255,10 @@ fn build_pkgfs_image(
 
     match image_type {
         ImageType::Erofs | ImageType::ErofsLz4 | ImageType::ErofsLz4hc => {
-            build_pkgfs_erofs_image(pkgfs_src_path_str, image_file_path_str, &mkfs_args)?;
+            build_pkgfs_erofs_image(pkgfs_src_path_str, image_file_path_str, &mkfs_args, runner)?;
         }
         ImageType::Ext4 => {
-            build_pkgfs_ext4_image(pkgfs_src_path_str, image_file_path_str, &mkfs_args)?;
+            build_pkgfs_ext4_image(pkgfs_src_path_str, image_file_path_str, &mkfs_args, runner)?;
         }
     }
 

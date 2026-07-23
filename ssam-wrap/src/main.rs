@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use clap::{Args, CommandFactory, FromArgMatches, Parser};
+use command::CommandRunner;
 use libssam::ssam_package::{PackageFile, PackageFilesystem};
 use libssam::superblock;
 use serde_json::Value;
@@ -10,6 +11,7 @@ use std::path::Path;
 use std::process;
 use std::{fs, path::PathBuf};
 
+mod command;
 mod pkgfs;
 mod veritysetup;
 
@@ -75,10 +77,14 @@ struct Workspace {
     seccomp_policy: PathBuf,
     pkgfs: PathBuf,
     intermediate_dir: PathBuf,
+    /// Runner used for all external command execution. Owned so `Workspace` is
+    /// self-contained; tests pass a `Box<MockCommandRunner>` and keep a shared
+    /// clone to inspect recorded calls.
+    runner: Box<dyn CommandRunner>,
 }
 
 impl Workspace {
-    fn new(workspace_root: impl AsRef<Path>) -> Self {
+    fn new(workspace_root: impl AsRef<Path>, runner: Box<dyn CommandRunner>) -> Self {
         let workspace_root = workspace_root.as_ref();
         let workspace_root = if workspace_root.is_absolute() {
             workspace_root.to_path_buf()
@@ -136,6 +142,7 @@ impl Workspace {
             seccomp_policy,
             pkgfs,
             intermediate_dir,
+            runner,
         }
     }
 
@@ -229,7 +236,7 @@ fn main() -> anyhow::Result<()> {
             .mut_arg("pkgfs_src", |a| a.long_help(supported_transports_help))
             .get_matches(),
     )?;
-    let workspace = Workspace::new(&args.workspace);
+    let workspace = Workspace::new(&args.workspace, Box::new(command::SystemCommandRunner));
 
     // TODO
     // If given pkgfs_src is a directory outside of the workspace,
@@ -263,7 +270,7 @@ fn main() -> anyhow::Result<()> {
 
     let verity_info =
         veritysetup::FormatVerity::new(&pkgfs_image_file, Some(&root_hash_filepath), true, vec![])?
-            .run()?;
+            .run(workspace.runner.as_ref())?;
 
     let pkgfs_type = superblock::FileSystemSuperBlockBroker::new(&pkgfs_image_file)?.fs_type();
 
