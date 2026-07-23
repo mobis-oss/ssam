@@ -180,7 +180,16 @@ mod rootfs {
 
     #[cfg(test)]
     mod tests {
-        use super::is_systemd_notify_type;
+        use super::{
+            BASE_MANDATORY_MOUNTS, BASE_OPTIONAL_MOUNTS, Rootfs, ensure_mandatory_dirs,
+            ensure_mounts_config, ensure_optional_dirs, find_missing_path, is_systemd_notify_type,
+            mount_destinations, mounts_list,
+        };
+        use crate::command::testing::MockCommandRunner;
+        use libssam::utils::PrettyJsonWriter;
+        use oci_spec::runtime::{MountBuilder, Spec};
+        use std::path::Path;
+        use tempfile::tempdir;
 
         fn package_config(service_type: &str) -> String {
             format!(
@@ -223,6 +232,100 @@ mod rootfs {
         fn invalid_config_returns_err() {
             // Previously panicked via .expect(); now surfaces as an error.
             assert!(is_systemd_notify_type("this is = = not valid toml").is_err());
+        }
+
+        #[test]
+        fn mounts_list_appends_run_only_when_requested() {
+            let base = mounts_list(&BASE_MANDATORY_MOUNTS, false);
+            assert_eq!(base, vec![Path::new("/dev"), Path::new("/dev/pts")]);
+
+            let with_run = mounts_list(&BASE_MANDATORY_MOUNTS, true);
+            assert_eq!(
+                with_run,
+                vec![Path::new("/dev"), Path::new("/dev/pts"), Path::new("/run")]
+            );
+
+            let optional = mounts_list(&BASE_OPTIONAL_MOUNTS, false);
+            assert_eq!(
+                optional,
+                vec![Path::new("/proc"), Path::new("/sys"), Path::new("/tmp")]
+            );
+        }
+
+        #[test]
+        fn mount_destinations_extracts_paths() {
+            let mounts = vec![
+                MountBuilder::default().destination("/dev").build().unwrap(),
+                MountBuilder::default()
+                    .destination("/proc")
+                    .build()
+                    .unwrap(),
+            ];
+            assert_eq!(
+                mount_destinations(&mounts),
+                vec![Path::new("/dev"), Path::new("/proc")]
+            );
+        }
+
+        #[test]
+        fn find_missing_path_reports_first_absent_mandatory() {
+            let mandatory = [Path::new("/dev"), Path::new("/dev/pts")];
+            let all_present = [Path::new("/dev"), Path::new("/dev/pts"), Path::new("/proc")];
+            assert!(find_missing_path(&mandatory, &all_present).is_none());
+
+            let partial = [Path::new("/dev")];
+            assert_eq!(
+                find_missing_path(&mandatory, &partial).copied(),
+                Some(Path::new("/dev/pts"))
+            );
+        }
+
+        #[test]
+        fn ensure_mandatory_dirs_creates_dev_but_skips_devpts() {
+            let dir = tempdir().unwrap();
+            let mandatory = [Path::new("/dev"), Path::new("/dev/pts")];
+            ensure_mandatory_dirs(dir.path(), &mandatory).unwrap();
+            assert!(dir.path().join("dev").is_dir());
+            // /dev/pts is a devpts mount, not a directory to create.
+            assert!(!dir.path().join("dev/pts").exists());
+        }
+
+        #[test]
+        fn ensure_optional_dirs_creates_only_configured() {
+            let dir = tempdir().unwrap();
+            let optional = [Path::new("/proc"), Path::new("/sys"), Path::new("/tmp")];
+            let mount_dests = [Path::new("/proc")]; // only /proc declared in config
+            ensure_optional_dirs(dir.path(), &optional, &mount_dests).unwrap();
+            assert!(dir.path().join("proc").is_dir());
+            assert!(!dir.path().join("sys").exists());
+            assert!(!dir.path().join("tmp").exists());
+        }
+
+        #[test]
+        fn ensure_mounts_config_bails_on_missing_mandatory_mount() {
+            let dir = tempdir().unwrap();
+            let ws = crate::Workspace::new(dir.path(), Box::new(MockCommandRunner::new()));
+
+            // Runtime spec is missing the mandatory /dev mount.
+            let mut spec = Spec::default();
+            spec.set_mounts(Some(vec![
+                MountBuilder::default()
+                    .destination("/dev/pts")
+                    .build()
+                    .unwrap(),
+                MountBuilder::default()
+                    .destination("/proc")
+                    .build()
+                    .unwrap(),
+            ]));
+            spec.save_pretty(&ws.runtime_config).unwrap();
+            std::fs::write(&ws.package_config, package_config("simple")).unwrap();
+
+            let rootfs_dir = dir.path().join("rootfs");
+            std::fs::create_dir(&rootfs_dir).unwrap();
+
+            let res = ensure_mounts_config(&Rootfs::new(&rootfs_dir), &ws);
+            assert!(res.is_err());
         }
     }
 }
@@ -337,9 +440,44 @@ pub fn create(
 
 #[cfg(test)]
 mod tests {
-    use super::ext4_image_size_mb;
+    use super::{
+        ImageType, build_pkgfs_erofs_image, build_pkgfs_ext4_image, build_pkgfs_image,
+        ext4_image_size_mb,
+    };
+    use crate::command::testing::MockCommandRunner;
+    use crate::pkgfs::build_image;
+    use libssam::utils::PrettyJsonWriter;
+    use oci_spec::runtime::{MountBuilder, Spec};
+    use tempfile::tempdir;
 
     const MIB: u64 = 1024 * 1024;
+
+    fn package_config(service_type: &str) -> String {
+        format!(
+            r#"
+            [package]
+            name = "test_package"
+            version = "0.0.1"
+            description = "A test package"
+            autostart = true
+
+            [container]
+            storage_limit = 2000
+            data_dirs = "/app/data:/app/logs"
+
+            [container.security]
+            seccomp = true
+            mac = true
+
+            [container.network]
+
+            [service]
+            service_type = "{service_type}"
+            bus_name = "com.test.service"
+            remain_after_exit = false
+            "#
+        )
+    }
 
     #[test]
     fn enforces_3mib_floor() {
@@ -361,5 +499,97 @@ mod tests {
     fn rounds_partial_mib_up() {
         // Just over 3 MiB after overhead -> rounds up to next whole MiB
         assert_eq!(ext4_image_size_mb(3 * MIB + 1), 4);
+    }
+
+    #[test]
+    fn build_pkgfs_erofs_image_runs_fakeroot_with_dest_then_src() {
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+        build_pkgfs_erofs_image("srcdir", "out.erofs", &["mkfs.erofs", "-zlz4hc"], &mock).unwrap();
+
+        let calls = handle.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cmd, "fakeroot");
+        assert_eq!(
+            calls[0].arg_strs(),
+            vec!["mkfs.erofs", "-zlz4hc", "out.erofs", "srcdir"]
+        );
+    }
+
+    #[test]
+    fn build_pkgfs_ext4_image_truncates_then_mkfs() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap(); // empty dir -> size 0 -> 3 MiB floor
+        let src = src.to_str().unwrap();
+
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+        build_pkgfs_ext4_image(src, "out.ext4", &["mkfs.ext4"], &mock).unwrap();
+
+        let calls = handle.calls();
+        assert_eq!(calls[0].cmd, "truncate");
+        assert_eq!(calls[0].arg_strs(), vec!["-s", "3M", "out.ext4"]);
+        assert_eq!(calls[1].cmd, "fakeroot");
+        assert_eq!(
+            calls[1].arg_strs(),
+            vec!["mkfs.ext4", "-d", src, "out.ext4"]
+        );
+    }
+
+    #[test]
+    fn build_image_creates_erofs_from_directory() {
+        let dir = tempdir().unwrap();
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+        let ws = crate::Workspace::new(dir.path(), Box::new(mock));
+
+        // pkgfs source is a directory.
+        std::fs::create_dir(&ws.pkgfs).unwrap();
+        // Runtime spec declaring all mandatory + optional mounts.
+        let mut spec = Spec::default();
+        spec.set_mounts(Some(
+            ["/dev", "/dev/pts", "/proc", "/sys", "/tmp"]
+                .iter()
+                .map(|d| MountBuilder::default().destination(*d).build().unwrap())
+                .collect(),
+        ));
+        spec.save_pretty(&ws.runtime_config).unwrap();
+        std::fs::write(&ws.package_config, package_config("simple")).unwrap();
+
+        let out = build_image(&ws, Some(ImageType::ErofsLz4hc)).unwrap();
+
+        // Dispatched to the erofs mkfs through fakeroot.
+        let calls = handle.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| { c.cmd == "fakeroot" && c.arg_strs().iter().any(|a| a == "mkfs.erofs") })
+        );
+        assert_eq!(out, ws.intermediate_dir.join("pkgfs.erofs-lz4hc"));
+    }
+
+    #[test]
+    fn build_pkgfs_image_dispatches_ext4() {
+        // Directly exercises the build_pkgfs_image wrapper's ext4 branch (the
+        // build_image happy-path test only covers erofs). No rootfs::prepare
+        // here, so no runtime/package config fixture is needed.
+        let dir = tempdir().unwrap();
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+        let ws = crate::Workspace::new(dir.path(), Box::new(mock));
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+
+        let out = build_pkgfs_image(&ws, &src, ImageType::Ext4).unwrap();
+
+        assert_eq!(out, ws.intermediate_dir.join("pkgfs.ext4"));
+        let calls = handle.calls();
+        assert!(calls.iter().any(|c| c.cmd == "truncate"));
+        assert!(
+            calls
+                .iter()
+                .any(|c| { c.cmd == "fakeroot" && c.arg_strs().iter().any(|a| a == "mkfs.ext4") })
+        );
     }
 }
