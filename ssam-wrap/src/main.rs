@@ -8,7 +8,6 @@ use libssam::ssam_package::{PackageFile, PackageFilesystem};
 use libssam::superblock;
 use serde_json::Value;
 use std::path::Path;
-use std::process;
 use std::{fs, path::PathBuf};
 
 mod command;
@@ -222,7 +221,32 @@ impl Workspace {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn root_hash_path(image_file: &Path, intermediate_dir: &Path) -> anyhow::Result<PathBuf> {
+    let filename = image_file.file_name().with_context(|| {
+        format!(
+            "Unable to get filename from pkgfs image file: {}",
+            image_file.display()
+        )
+    })?;
+    let mut name = filename.to_os_string();
+    name.push(".root_hash");
+    Ok(intermediate_dir.join(name))
+}
+
+fn resolve_output_path(
+    explicit: Option<&str>,
+    workspace_path: &Path,
+    name: &str,
+    version: &str,
+) -> PathBuf {
+    match explicit {
+        Some(filename) => PathBuf::from(filename),
+        None => workspace_path.join(format!("{name}-{version}.ssam")),
+    }
+}
+
+fn parse_cli() -> anyhow::Result<Cli> {
+    // Injecting the long help for `--pkgfs-src` at runtime.
     let supported_transports_help = format!(
         "Specify package filesystem source.\nSupported container transports:\n{}",
         pkgfs::SUPPORTED_CONTAINER_TRANSPORTS
@@ -231,42 +255,38 @@ fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    let args = Cli::from_arg_matches(
+    Ok(Cli::from_arg_matches(
         &Cli::command()
             .mut_arg("pkgfs_src", |a| a.long_help(supported_transports_help))
             .get_matches(),
-    )?;
-    let workspace = Workspace::new(&args.workspace, Box::new(command::SystemCommandRunner));
+    )?)
+}
+
+fn run(args: Cli, runner: Box<dyn CommandRunner>) -> anyhow::Result<()> {
+    let workspace = Workspace::new(&args.workspace, runner);
 
     // TODO
     // If given pkgfs_src is a directory outside of the workspace,
     // workspace.pkgfs_src and the result of pkgfs::prepare() would
     // point different location.
     // This could cause confusion, so might need to fix.
-    let pkgfs_src = args.pkgfs_src;
-    pkgfs::prepare(&workspace, pkgfs_src.as_deref(), args.src_oci_arch)?;
+    pkgfs::prepare(&workspace, args.pkgfs_src.as_deref(), args.src_oci_arch)?;
     if let Some(name) = &args.prepare {
         workspace.prepare(name)?;
-        process::exit(0);
+        return Ok(());
     }
 
     workspace.prepare_intermediate_dir()?;
 
-    let private_key_filename = &args
+    let private_key_filename = args
         .wrap_only_args
         .private_key_file
+        .as_deref()
         .context("Private key file path is required")?;
 
     let pkgfs_image_file = pkgfs::build_image(&workspace, args.wrap_only_args.pkgfs_type)?;
 
-    let pkgfs_image_filename = pkgfs_image_file.file_name().ok_or(anyhow::anyhow!(
-        "Unable to get filename from pkgfs image file: {}",
-        pkgfs_image_file.display()
-    ))?;
-
-    let mut root_hash_filepath = pkgfs_image_filename.to_os_string();
-    root_hash_filepath.push(".root_hash");
-    let root_hash_filepath = workspace.intermediate_dir.join(root_hash_filepath);
+    let root_hash_filepath = root_hash_path(&pkgfs_image_file, &workspace.intermediate_dir)?;
 
     let verity_info =
         veritysetup::FormatVerity::new(&pkgfs_image_file, Some(&root_hash_filepath), true, vec![])?
@@ -283,13 +303,12 @@ fn main() -> anyhow::Result<()> {
         &pkgfs_info,
     )?;
     let metadata = pkg_file.metadata();
-    let package_filepath = match &args.wrap_only_args.package_output_filename {
-        Some(filename) => PathBuf::from(filename),
-        None => workspace.path.join(format!(
-            "{}-{}.ssam",
-            metadata.package.name, metadata.package.version
-        )),
-    };
+    let package_filepath = resolve_output_path(
+        args.wrap_only_args.package_output_filename.as_deref(),
+        &workspace.path,
+        &metadata.package.name,
+        &metadata.package.version,
+    );
     pkg_file.wrap(&package_filepath, private_key_filename)?;
 
     println!(
@@ -307,4 +326,9 @@ fn main() -> anyhow::Result<()> {
         pkgfs_info.verity_info().table_params
     );
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = parse_cli()?;
+    run(args, Box::new(command::SystemCommandRunner))
 }

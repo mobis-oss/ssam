@@ -105,11 +105,29 @@ impl FormatVerity<'_> {
         extra_args: Vec<String>,
     ) -> anyhow::Result<Self> {
         let fs_superblock = superblock::FileSystemSuperBlockBroker::new(image_path)?;
-
         let block_size = u64::from(fs_superblock.block_size()?);
+        let data_size = image_path.metadata()?.size();
+
+        Ok(Self::from_parts(
+            image_path,
+            root_hash_file,
+            block_size,
+            data_size,
+            include_superblock,
+            extra_args,
+        ))
+    }
+
+    fn from_parts(
+        image_path: &Path,
+        root_hash_file: Option<&Path>,
+        block_size: u64,
+        data_size: u64,
+        include_superblock: bool,
+        extra_args: Vec<String>,
+    ) -> Self {
         // dm-verity hash area starts after data area; align data size up to block
         // boundary so hash tree begins at a valid block-aligned offset.
-        let data_size = image_path.metadata()?.size();
         let hash_offset = aligned_hash_offset(data_size, block_size);
 
         let args = build_format_args(
@@ -124,13 +142,13 @@ impl FormatVerity<'_> {
             action: "format",
             args,
         };
-        Ok(Self {
+        Self {
             cmd,
             image_path: image_path.to_path_buf(),
             root_hash_file: root_hash_file.map(Path::to_path_buf),
             data_size,
             hash_offset,
-        })
+        }
     }
 
     pub fn run(&self, runner: &dyn CommandRunner) -> anyhow::Result<PackageFsVerityInfo> {
