@@ -57,6 +57,46 @@ pub struct FormatVerity<'action> {
     hash_offset: u64,
 }
 
+/// Build the argument vector for `veritysetup format`, appending to any
+/// `extra_args`. Pure: takes the already-computed `block_size`/`hash_offset`
+/// so it can be tested without reading a real image's superblock/metadata.
+fn build_format_args(
+    block_size: u64,
+    hash_offset: u64,
+    include_superblock: bool,
+    root_hash_file: Option<&Path>,
+    image_path: &Path,
+    extra_args: Vec<String>,
+) -> Vec<String> {
+    let block_size_str = format!("--data-block-size={block_size}");
+    let hash_offset_str = format!("--hash-offset={hash_offset}");
+    let superblock = if include_superblock {
+        String::default()
+    } else {
+        "--no-superblock".to_owned()
+    };
+    let root_hash_file_str = root_hash_file
+        .as_ref()
+        .map(|p| format!("--root-hash-file={}", p.display()))
+        .unwrap_or_default();
+    let image_path_str = image_path.display().to_string();
+
+    let mut args = extra_args;
+    args.extend(
+        [
+            block_size_str,
+            hash_offset_str,
+            superblock,
+            root_hash_file_str,
+            image_path_str.clone(),
+            image_path_str,
+        ]
+        .into_iter()
+        .filter(|s| !s.is_empty()),
+    );
+    args
+}
+
 impl FormatVerity<'_> {
     pub fn new(
         image_path: &Path,
@@ -67,36 +107,18 @@ impl FormatVerity<'_> {
         let fs_superblock = superblock::FileSystemSuperBlockBroker::new(image_path)?;
 
         let block_size = u64::from(fs_superblock.block_size()?);
-        let block_size_str = format!("--data-block-size={block_size}");
         // dm-verity hash area starts after data area; align data size up to block
         // boundary so hash tree begins at a valid block-aligned offset.
         let data_size = image_path.metadata()?.size();
         let hash_offset = aligned_hash_offset(data_size, block_size);
-        let hash_offset_str = format!("--hash-offset={hash_offset}");
 
-        let superblock = if include_superblock {
-            String::default()
-        } else {
-            "--no-superblock".to_owned()
-        };
-        let root_hash_file_str = root_hash_file
-            .as_ref()
-            .map(|p| format!("--root-hash-file={}", p.display()))
-            .unwrap_or_default();
-        let image_path_str = image_path.display().to_string();
-
-        let mut args = extra_args;
-        args.extend(
-            [
-                block_size_str,
-                hash_offset_str,
-                superblock,
-                root_hash_file_str,
-                image_path_str.clone(),
-                image_path_str,
-            ]
-            .into_iter()
-            .filter(|s| !s.is_empty()),
+        let args = build_format_args(
+            block_size,
+            hash_offset,
+            include_superblock,
+            root_hash_file,
+            image_path,
+            extra_args,
         );
         let cmd = VeritySetup {
             action: "format",
@@ -147,12 +169,66 @@ impl FormatVerity<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::aligned_hash_offset;
+    use super::{aligned_hash_offset, build_format_args};
+    use std::path::Path;
 
     #[test]
     fn computes_aligned_pkgfs_verity_hash_offset() {
         assert_eq!(aligned_hash_offset(4097, 4096), 8192);
         assert_eq!(aligned_hash_offset(4096, 4096), 4096);
         assert_eq!(aligned_hash_offset(0, 4096), 0);
+    }
+
+    #[test]
+    fn format_args_with_superblock_and_root_hash() {
+        let args = build_format_args(
+            4096,
+            8192,
+            true,
+            Some(Path::new("/tmp/root.hash")),
+            Path::new("/tmp/pkgfs.img"),
+            vec![],
+        );
+        // include_superblock=true drops the --no-superblock flag; image path is
+        // repeated (data device + hash device).
+        assert_eq!(
+            args,
+            vec![
+                "--data-block-size=4096",
+                "--hash-offset=8192",
+                "--root-hash-file=/tmp/root.hash",
+                "/tmp/pkgfs.img",
+                "/tmp/pkgfs.img",
+            ]
+        );
+    }
+
+    #[test]
+    fn format_args_without_superblock_or_root_hash() {
+        let args = build_format_args(512, 1024, false, None, Path::new("img"), vec![]);
+        assert_eq!(
+            args,
+            vec![
+                "--data-block-size=512",
+                "--hash-offset=1024",
+                "--no-superblock",
+                "img",
+                "img",
+            ]
+        );
+    }
+
+    #[test]
+    fn format_args_prepends_extra_args() {
+        let args = build_format_args(
+            4096,
+            4096,
+            true,
+            None,
+            Path::new("img"),
+            vec!["--foo".to_owned()],
+        );
+        assert_eq!(args[0], "--foo");
+        assert_eq!(args[1], "--data-block-size=4096");
     }
 }

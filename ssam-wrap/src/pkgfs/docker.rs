@@ -121,18 +121,15 @@ pub fn extract_rootfs(
             &["inspect", "--format='{{.Architecture}}'", docker_uri],
             true,
         ) {
-            let arch = arch.trim();
-            let arch = if arch.starts_with('\'') && arch.ends_with('\'') && arch.len() > 1 {
-                &arch[1..arch.len() - 1]
-            } else {
-                arch
-            };
+            // Parse the architecture out of `docker inspect --format='{{.Architecture}}'`
+            // output since some Docker CLI setups wrap the value in quotes.
+            let arch = arch.trim_matches(|c: char| c == '\'' || c.is_whitespace());
             if arch != architecture.to_string() {
                 return Err(anyhow::anyhow!(
                     "Docker image {} is not for {} architecture, found: {}",
                     docker_uri,
                     architecture,
-                    arch.trim()
+                    arch,
                 ));
             }
         } else {

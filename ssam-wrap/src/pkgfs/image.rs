@@ -179,6 +179,14 @@ mod rootfs {
     }
 }
 
+/// Size in MiB for an ext4 image holding a source directory of `dir_size`
+/// bytes: add 10% overhead, round up to a whole MiB, and enforce a 3 MiB floor
+/// (anything lower makes mkfs.ext4 fall back to ext2).
+fn ext4_image_size_mb(dir_size: u64) -> u64 {
+    let total_size = dir_size + dir_size.div_ceil(10);
+    total_size.div_ceil(1024 * 1024).max(3)
+}
+
 fn build_pkgfs_ext4_image(
     src: &str,
     dest: &str,
@@ -190,11 +198,8 @@ fn build_pkgfs_ext4_image(
     let dir_size = fs_extra::dir::get_size(src)
         .context(anyhow::anyhow!("Failed to get size of pkgfs: {src}"))?;
     println!("Size of package source directory: {dir_size} bytes");
-    // Calculate the size in MiB, adding 10% overhead
-    let overhead = dir_size.div_ceil(10);
-    let total_size = dir_size + overhead;
-    // Lower than 2 MiB makes ext2 forcibly
-    let total_size_mb = total_size.div_ceil(1024 * 1024).max(3);
+    let total_size = dir_size + dir_size.div_ceil(10);
+    let total_size_mb = ext4_image_size_mb(dir_size);
     println!("10% overhead added source directory: {total_size} bytes ({total_size_mb} MiB)");
 
     runner.execute_command(
@@ -280,4 +285,33 @@ pub fn create(
 
     rootfs::prepare(pkgfs_src, workspace)?;
     build_pkgfs_image(workspace, pkgfs_src, image_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ext4_image_size_mb;
+
+    const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn enforces_3mib_floor() {
+        assert_eq!(ext4_image_size_mb(0), 3);
+        assert_eq!(ext4_image_size_mb(1), 3);
+        // 2 MiB + 10% still rounds under the floor
+        assert_eq!(ext4_image_size_mb(2 * MIB), 3);
+    }
+
+    #[test]
+    fn adds_10_percent_overhead_and_rounds_up() {
+        // 10 MiB + 10% = 11 MiB exactly
+        assert_eq!(ext4_image_size_mb(10 * MIB), 11);
+        // 100 MiB + 10% = 110 MiB
+        assert_eq!(ext4_image_size_mb(100 * MIB), 110);
+    }
+
+    #[test]
+    fn rounds_partial_mib_up() {
+        // Just over 3 MiB after overhead -> rounds up to next whole MiB
+        assert_eq!(ext4_image_size_mb(3 * MIB + 1), 4);
+    }
 }
