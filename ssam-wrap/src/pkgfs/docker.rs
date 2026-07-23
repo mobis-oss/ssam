@@ -180,3 +180,165 @@ pub fn extract_rootfs(
     println!("Successfully extracted {docker_uri}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_runtime_config, extract_rootfs, move_dir};
+    use crate::command::testing::{MockCommandRunner, MockResponse};
+    use crate::pkgfs::OciArchitecture;
+    use libssam::utils::PrettyJsonWriter;
+    use oci_spec::runtime::{
+        LinuxBuilder, LinuxIdMappingBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
+        ProcessBuilder, RootBuilder, Spec, SpecBuilder,
+    };
+    use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    /// Write an OCI runtime spec fixture with terminal=true, uid/gid mappings,
+    /// and both a User and a Pid namespace — i.e. everything copy_runtime_config
+    /// is supposed to normalize away (except the Pid namespace, which stays).
+    fn write_spec_fixture(path: &Path) {
+        let process = ProcessBuilder::default().terminal(true).build().unwrap();
+        let root = RootBuilder::default().path("/").build().unwrap();
+        let id_map = LinuxIdMappingBuilder::default()
+            .host_id(1000u32)
+            .container_id(0u32)
+            .size(1u32)
+            .build()
+            .unwrap();
+        let namespaces = vec![
+            LinuxNamespaceBuilder::default()
+                .typ(LinuxNamespaceType::User)
+                .build()
+                .unwrap(),
+            LinuxNamespaceBuilder::default()
+                .typ(LinuxNamespaceType::Pid)
+                .build()
+                .unwrap(),
+        ];
+        let linux = LinuxBuilder::default()
+            .uid_mappings(vec![id_map])
+            .gid_mappings(vec![id_map])
+            .namespaces(namespaces)
+            .build()
+            .unwrap();
+        let spec = SpecBuilder::default()
+            .version("1.0.2")
+            .process(process)
+            .root(root)
+            .linux(linux)
+            .build()
+            .unwrap();
+        spec.save_pretty(path).unwrap();
+    }
+
+    #[test]
+    fn copy_runtime_config_strips_terminal_idmaps_and_user_ns() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("config.json");
+        let dest = dir.path().join("runtime.json");
+        write_spec_fixture(&src);
+
+        copy_runtime_config(&src, &dest).unwrap();
+
+        let out = Spec::load(&dest).unwrap();
+        assert_eq!(out.process().as_ref().unwrap().terminal(), Some(false));
+        let linux = out.linux().as_ref().unwrap();
+        assert!(linux.uid_mappings().is_none());
+        assert!(linux.gid_mappings().is_none());
+        let ns = linux.namespaces().as_ref().unwrap();
+        assert!(ns.iter().all(|n| n.typ() != LinuxNamespaceType::User));
+        // Non-user namespaces are preserved.
+        assert!(ns.iter().any(|n| n.typ() == LinuxNamespaceType::Pid));
+    }
+
+    #[test]
+    fn move_dir_renames_within_partition() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f.txt"), b"hi").unwrap();
+        let dest = dir.path().join("dest");
+
+        move_dir(&src, &dest).unwrap();
+
+        assert!(!src.exists());
+        assert_eq!(fs::read(dest.join("f.txt")).unwrap(), b"hi");
+        // The EXDEV (cross-device) copy fallback isn't reproducible in a unit
+        // test since tempdir is always on a single filesystem.
+    }
+
+    #[test]
+    fn extract_rootfs_bails_when_pkgfs_exists() {
+        let dir = tempdir().unwrap();
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+        let ws = crate::Workspace::new(dir.path(), Box::new(mock));
+        fs::create_dir(&ws.pkgfs).unwrap();
+
+        let res = extract_rootfs(&ws, "docker://busybox", OciArchitecture::Arm64);
+
+        assert!(res.is_err());
+        assert!(handle.calls().is_empty());
+    }
+
+    #[test]
+    fn extract_rootfs_errors_on_arch_mismatch() {
+        let dir = tempdir().unwrap();
+        let mock = MockCommandRunner::with_responses(vec![MockResponse::stdout("amd64")]);
+        let handle = mock.clone();
+        let ws = crate::Workspace::new(dir.path(), Box::new(mock));
+
+        let res = extract_rootfs(&ws, "docker-daemon:img", OciArchitecture::Arm64);
+
+        assert!(res.is_err());
+        let calls = handle.calls();
+        assert_eq!(calls[0].cmd, "docker");
+        // Arch check fails before the copy, so skopeo is never invoked.
+        assert!(!calls.iter().any(|c| c.cmd == "skopeo"));
+    }
+
+    #[test]
+    fn extract_rootfs_normalizes_quoted_arch_and_proceeds() {
+        // [required] The only coverage of the trim/quote normalization now that
+        // parse_docker_arch is inlined: a quoted, whitespace-wrapped arch must
+        // still match and let the flow proceed to skopeo.
+        let dir = tempdir().unwrap();
+        let mock = MockCommandRunner::with_responses(vec![MockResponse::stdout("'arm64'\n")]);
+        let handle = mock.clone();
+        let ws = crate::Workspace::new(dir.path(), Box::new(mock));
+
+        // Proceeds past the arch gate; later fails on missing unpacked files.
+        let _ = extract_rootfs(&ws, "docker-daemon:img", OciArchitecture::Arm64);
+
+        assert!(handle.calls().iter().any(|c| c.cmd == "skopeo"));
+    }
+
+    #[test]
+    fn extract_rootfs_invokes_skopeo_then_umoci() {
+        let dir = tempdir().unwrap();
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+        let ws = crate::Workspace::new(dir.path(), Box::new(mock));
+        // Provide a runtime config so copy_runtime_config is skipped.
+        fs::write(&ws.runtime_config, b"{}").unwrap();
+
+        // Fails later at move_dir (no unpacked rootfs), but the commands run.
+        let _ = extract_rootfs(&ws, "docker://busybox", OciArchitecture::Arm64);
+
+        let calls = handle.calls();
+        let skopeo = calls.iter().position(|c| c.cmd == "skopeo").unwrap();
+        let umoci = calls.iter().position(|c| c.cmd == "umoci").unwrap();
+        assert!(skopeo < umoci, "skopeo must run before umoci");
+
+        let skopeo_args = calls[skopeo].arg_strs();
+        assert!(skopeo_args.contains(&"copy".to_string()));
+        assert!(skopeo_args.contains(&"--override-arch=arm64".to_string()));
+        assert!(skopeo_args.contains(&"docker://busybox".to_string()));
+
+        let umoci_args = calls[umoci].arg_strs();
+        assert!(umoci_args.contains(&"unpack".to_string()));
+        assert!(umoci_args.contains(&"--rootless".to_string()));
+    }
+}
