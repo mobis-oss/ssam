@@ -43,10 +43,10 @@ mod rootfs {
         spec.mounts().as_ref().map(Vec::as_slice)
     }
 
-    fn is_systemd_notify_type(package_config_str: &str) -> bool {
+    fn is_systemd_notify_type(package_config_str: &str) -> Result<bool> {
         let package_config: PackageConfigSpec =
-            toml::from_str(package_config_str).expect("Failed to parse package config");
-        package_config.get_service_service_type() == "notify"
+            toml::from_str(package_config_str).context("Failed to parse package config")?;
+        Ok(package_config.get_service_service_type() == "notify")
     }
 
     const BASE_MANDATORY_MOUNTS: [&str; 2] = ["/dev", "/dev/pts"];
@@ -154,7 +154,7 @@ mod rootfs {
                 )
             })?;
 
-        let systemd_notify = is_systemd_notify_type(&package_config_str);
+        let systemd_notify = is_systemd_notify_type(&package_config_str)?;
         let mandatory = mounts_list(&BASE_MANDATORY_MOUNTS, systemd_notify);
         let optional = mounts_list(&BASE_OPTIONAL_MOUNTS, !systemd_notify);
         let mount_dests = mount_destinations(mounts);
@@ -176,6 +176,54 @@ mod rootfs {
 
         ensure_mounts_config(&rootfs, workspace)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_systemd_notify_type;
+
+        fn package_config(service_type: &str) -> String {
+            format!(
+                r#"
+                [package]
+                name = "test_package"
+                version = "0.0.1"
+                description = "A test package"
+                autostart = true
+
+                [container]
+                storage_limit = 2000
+                data_dirs = "/app/data:/app/logs"
+
+                [container.security]
+                seccomp = true
+                mac = true
+
+                [container.network]
+
+                [service]
+                service_type = "{service_type}"
+                bus_name = "com.test.service"
+                remain_after_exit = false
+                "#
+            )
+        }
+
+        #[test]
+        fn detects_notify_service_type() {
+            assert!(is_systemd_notify_type(&package_config("notify")).unwrap());
+        }
+
+        #[test]
+        fn non_notify_service_type_is_false() {
+            assert!(!is_systemd_notify_type(&package_config("simple")).unwrap());
+        }
+
+        #[test]
+        fn invalid_config_returns_err() {
+            // Previously panicked via .expect(); now surfaces as an error.
+            assert!(is_systemd_notify_type("this is = = not valid toml").is_err());
+        }
     }
 }
 
