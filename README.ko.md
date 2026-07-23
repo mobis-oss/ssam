@@ -35,7 +35,6 @@
 
 ### `ssamd` requirements
 - OCI runtime: [`crun`](https://github.com/containers/crun)과 테스트되었습니다.
-- [`nft`](https://www.netfilter.org/projects/nftables/) (nftables): Bridge 네트워크 모드 (`[container.network] mode = "bridge"`) 사용 시 필요.
 - 다음과 관련된 Linux 커널 설정 (필수):
   * dm-verity
   * container
@@ -43,7 +42,6 @@
 - 다음과 관련된 Linux 커널 설정 (선택적):
   * ext4 project quota
   * Bridge networking (`bridge`/`veth`/network namespaces)
-  * Netfilter NAT (`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`)
 
 ### `ssam-wrap` requirements
 - `lz4`

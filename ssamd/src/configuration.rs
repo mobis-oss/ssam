@@ -2,9 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context, Result};
+use ipnet::Ipv4Net;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+/// Per-bridge subnet size used when `[network.bridge] size` is omitted.
+pub(crate) const DEFAULT_SUBNET_SIZE: u8 = 29;
+
+/// Address pool base CIDR used when `[network.bridge] base` is omitted — RFC1918 private space.
+pub(crate) const DEFAULT_POOL_BASE: &str = "172.20.0.0/16";
 
 /// Get the default config file path (same directory as the ssamd binary)
 #[cfg(not(test))]
@@ -56,18 +63,73 @@ pub(crate) struct Common {
 /// Daemon-global network configuration, parsed from the optional `[network]` TOML section
 #[derive(Debug, Clone, Deserialize)]
 pub struct NetworkConfig {
+    /// Per-container bridge networking (`[network.bridge]`); `None` when absent.
+    pub bridge: Option<BridgeConfig>,
+}
+
+/// Per-container bridge networking config, parsed from `[network.bridge]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BridgeConfig {
     /// Whether the daemon-managed bridge network is enabled. Gates only bridge
     /// networking; host/none container network modes work regardless.
-    pub bridge_enabled: bool,
+    pub enabled: bool,
 
-    /// Linux bridge interface name (e.g. "ssam-br0")
-    pub bridge_name: String,
+    /// Address pool bridges carve per-container subnets from
+    /// (`[network.bridge.addr_pool]`); `None` → built-in default.
+    pub addr_pool: Option<PoolConfig>,
+}
 
-    /// IPv4 subnet in CIDR notation (e.g. "172.20.0.0/16")
-    pub subnet: String,
+/// Address pool definition, parsed from `[network.bridge.addr_pool]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PoolConfig {
+    /// Pool base CIDR (e.g. "172.20.0.0/16"); `None` → default (172.20.0.0/16).
+    pub base: Option<String>,
 
-    /// Gateway address assigned to the bridge interface
-    pub gateway: std::net::Ipv4Addr,
+    /// Per-bridge subnet size (prefix length); `None` → default (29).
+    pub size: Option<u8>,
+}
+
+impl BridgeConfig {
+    /// The per-bridge subnet size, from the pool or the default.
+    pub(crate) fn size(&self) -> u8 {
+        self.addr_pool
+            .as_ref()
+            .and_then(|p| p.size)
+            .unwrap_or(DEFAULT_SUBNET_SIZE)
+    }
+
+    /// The address pool base CIDR, from the pool or the default.
+    pub(crate) fn base(&self) -> &str {
+        self.addr_pool
+            .as_ref()
+            .and_then(|p| p.base.as_deref())
+            .unwrap_or(DEFAULT_POOL_BASE)
+    }
+
+    /// Check the bridge settings are usable, so a bad `[network.bridge]` section
+    /// fails when the config loads instead of at the first container attach.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `base` is not a valid IPv4 CIDR, the pool is too small to hold one
+    /// `/size` subnet, or `size` is longer than /30 (e.g. /31 or /32), which
+    /// leaves no usable host address.
+    pub(crate) fn validate(&self) -> Result<()> {
+        let pool: Ipv4Net = self
+            .base()
+            .parse()
+            .with_context(|| format!("Invalid network base {:?}", self.base()))?;
+        let size = self.size();
+        anyhow::ensure!(
+            pool.prefix_len().max(1) <= size,
+            "network base {pool} is too small for /{size} bridge subnets"
+        );
+        anyhow::ensure!(
+            size <= 30,
+            "network size /{size} leaves no usable host (use /30 or larger)"
+        );
+        Ok(())
+    }
 }
 
 /// Runtime configuration structure for TOML file
@@ -105,6 +167,16 @@ impl Configuration {
                 config_path.display()
             )
         })?;
+
+        if let Some(bridge) = runtime_config
+            .network
+            .as_ref()
+            .and_then(|n| n.bridge.as_ref())
+        {
+            bridge
+                .validate()
+                .context("Invalid [network.bridge] section in config file")?;
+        }
 
         log::info!(
             "Successfully loaded runtime configuration from '{}'",
@@ -162,6 +234,11 @@ impl Configuration {
     /// Get daemon network configuration (`None` when `[network]` section is absent)
     pub(crate) fn network_config(&self) -> Option<&NetworkConfig> {
         self.runtime_config.network.as_ref()
+    }
+
+    /// Get bridge networking config (`None` when `[network.bridge]` is absent).
+    pub(crate) fn bridge_config(&self) -> Option<&BridgeConfig> {
+        self.network_config()?.bridge.as_ref()
     }
 }
 
@@ -309,16 +386,16 @@ pub(crate) fn rpc_bind_ip() -> Option<&'static str> {
         .rpc_bind_ip()
 }
 
-/// Get the daemon network configuration (`None` when `[network]` section is absent)
+/// Get the bridge networking config (`None` when `[network.bridge]` is absent)
 ///
 /// # Panics
 ///
 /// Panics if `init()` has not been called before this function.
-pub(crate) fn network_config() -> Option<&'static NetworkConfig> {
+pub(crate) fn bridge_config() -> Option<&'static BridgeConfig> {
     RUNTIME_CONFIG
         .get()
         .expect("Configuration not initialized. Call init() first.")
-        .network_config()
+        .bridge_config()
 }
 
 /// Ensures test configuration is initialized. Safe to call multiple times.
@@ -553,11 +630,12 @@ mod tests {
             packages_cgroup = ""
             packages_ext = "ssam"
 
-            [network]
-            bridge_enabled = true
-            bridge_name = "ssam-br0"
-            subnet = "172.20.0.0/16"
-            gateway = "172.20.0.1"
+            [network.bridge]
+            enabled = true
+
+            [network.bridge.addr_pool]
+            base = "172.20.0.0/16"
+            size = 29
         "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
@@ -565,14 +643,11 @@ mod tests {
         let config = Configuration::load_from_path(temp_file.path()).unwrap();
         let net = config.network_config();
         assert!(net.is_some());
-        let net = net.unwrap();
-        assert!(net.bridge_enabled);
-        assert_eq!(net.bridge_name, "ssam-br0");
-        assert_eq!(net.subnet, "172.20.0.0/16");
-        assert_eq!(
-            net.gateway,
-            "172.20.0.1".parse::<std::net::Ipv4Addr>().unwrap()
-        );
+        let bridge = net.unwrap().bridge.as_ref().unwrap();
+        assert!(bridge.enabled);
+        let pool = bridge.addr_pool.as_ref().unwrap();
+        assert_eq!(pool.base.as_deref(), Some("172.20.0.0/16"));
+        assert_eq!(pool.size, Some(29));
     }
 
     #[test]
@@ -594,5 +669,109 @@ mod tests {
 
         let config = Configuration::load_from_path(temp_file.path()).unwrap();
         assert!(config.network_config().is_none());
+    }
+
+    #[test]
+    fn test_network_config_optional_fields_none_when_omitted() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            bundled_packages_dir = "/var/lib/ssamd/bundled"
+            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
+            packages_data_root = "/var/lib/ssamd/data"
+            packages_overlayfs_root = ""
+            packages_mnt_root = "/var/lib/ssamd/mnt"
+            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
+            packages_cgroup = ""
+            packages_ext = "ssam"
+
+            [network.bridge]
+            enabled = true
+
+            [network.bridge.addr_pool]
+            base = "172.20.0.0/16"
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+        let bridge = config.bridge_config().unwrap();
+        assert_eq!(bridge.addr_pool.as_ref().unwrap().size, None);
+    }
+
+    fn net_cfg(base: &str, size: Option<u8>) -> BridgeConfig {
+        BridgeConfig {
+            enabled: true,
+            addr_pool: Some(PoolConfig {
+                base: Some(base.to_owned()),
+                size,
+            }),
+        }
+    }
+
+    #[test]
+    fn network_validate_accepts_valid() {
+        assert!(net_cfg("172.20.0.0/16", Some(29)).validate().is_ok());
+        // An omitted size defaults to /29, still valid inside a /16.
+        assert!(net_cfg("172.20.0.0/16", None).validate().is_ok());
+    }
+
+    #[test]
+    fn base_defaults_when_omitted() {
+        // No pool at all: base()/size() fall back to the built-in defaults.
+        let bridge = BridgeConfig {
+            enabled: true,
+            addr_pool: None,
+        };
+        assert_eq!(bridge.base(), DEFAULT_POOL_BASE);
+        assert!(bridge.validate().is_ok());
+    }
+
+    #[test]
+    fn network_validate_rejects_bad_base() {
+        let err = net_cfg("not-a-pool", Some(29)).validate().unwrap_err();
+        assert!(err.to_string().contains("base"));
+    }
+
+    #[test]
+    fn network_validate_rejects_pool_too_small_for_subnet() {
+        // A /30 pool cannot hold a /29 subnet.
+        let err = net_cfg("10.0.0.0/30", Some(29)).validate().unwrap_err();
+        assert!(err.to_string().contains("too small"));
+    }
+
+    #[test]
+    fn network_validate_rejects_prefix_with_no_host() {
+        // /31 leaves no usable host address.
+        let err = net_cfg("10.0.0.0/16", Some(31)).validate().unwrap_err();
+        assert!(err.to_string().contains("usable host"));
+    }
+
+    #[test]
+    fn load_rejects_invalid_network_section() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            bundled_packages_dir = "/var/lib/ssamd/bundled"
+            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
+            packages_data_root = "/var/lib/ssamd/data"
+            packages_overlayfs_root = ""
+            packages_mnt_root = "/var/lib/ssamd/mnt"
+            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
+            packages_cgroup = ""
+            packages_ext = "ssam"
+
+            [network.bridge]
+            enabled = true
+
+            [network.bridge.addr_pool]
+            base = "10.0.0.0/30"
+            size = 29
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        // A pool too small for one subnet must fail at load, not at first attach.
+        assert!(Configuration::load_from_path(temp_file.path()).is_err());
     }
 }

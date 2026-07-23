@@ -1,87 +1,67 @@
 // Copyright 2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `NetworkActor` and its [`NetworkManager`] wrapper: the rsactor front-end
-//! that serializes the single bridge network's allocator state and drives the
-//! netavark 2.0 bridge/veth/NAT integration.
+//! `NetworkActor` and its [`NetworkManager`] wrapper: the rsactor front-end that
+//! serializes per-bridge network state and drives the netavark 2.0
+//! bridge/veth/NAT integration.
 //!
-//! The actor owns an [`IpAllocator`] plus the parsed subnet/gateway and
-//! exposes four idempotent operations:
+//! The actor carves per-container bridges out of a shared `pool` supernet: a
+//! [`SubnetAllocator`] hands each bridge a distinct `/subnet_prefix`, and each
+//! live bridge is a [`BridgeIpAllocator`] over its own subnet (empty = no
+//! attachments). Several containers may share one bridge by resolving to the same
+//! bridge id; the bridge is created on first attach and destroyed on last detach.
+//! It exposes four idempotent operations:
 //! - [`CreateNetns`](messages::CreateNetns): create the persistent named
 //!   network namespace (never destroys an existing one).
 //! - [`Attach`](messages::Attach): run netavark `setup` to wire veth + IP +
-//!   NAT into the namespace.
-//! - [`Detach`](messages::Detach): delete the host veth (its container-side peer
-//!   and per-container state go with it) and release the in-memory IP mark. The
-//!   shared bridge/NAT and the namespace are kept.
+//!   NAT into the namespace, creating the bridge on first attach.
+//! - [`Detach`](messages::Detach): delete the host veth and release the IP; on
+//!   last detach the empty bridge is torn down.
 //! - [`DestroyNetns`](messages::DestroyNetns): delete the named namespace.
 //!
-//! Only the netavark `setup` (which forks the `nft` binary) runs on
+//! Only the netavark bridge `setup` (blocking netlink I/O) runs on
 //! [`tokio::task::spawn_blocking`]; the remaining short netlink/mount syscalls
 //! run inline. Either way each handler is serialized through this single actor
-//! — the property that keeps the allocator state race-free.
+//! — the property that keeps the allocator/refcount state race-free.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::{AsFd as _, BorrowedFd};
-use std::path::{Path, PathBuf};
+use std::collections::hash_map::Entry;
+use std::net::Ipv4Addr;
+use std::path::Path;
 
 use anyhow::Context as _;
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::Ipv4Net;
 use rsactor::{Actor, ActorRef, message_handlers};
 
-use netavark::firewall::{FirewallDriver, get_supported_firewall_driver};
-use netavark::network::core_utils::open_netlink_sockets;
-use netavark::network::driver::{DriverInfo, NetworkDriver, get_network_driver};
-use netavark::network::netlink_route::LinkID;
-use netavark::network::types::{
-    NamedPerNetworkOptions, Network, NetworkOptions, PerNetworkOptions, PortMapping, Subnet,
-};
-use netlink_packet_route::address::AddressAttribute;
-
-use crate::network::allocator::{self, IpAllocator};
+use crate::network::allocator::{self, BridgeIpAllocator, SubnetAllocator};
 use crate::network::{link, netns};
 use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor, spawn_with};
 
-/// Nominal netavark config directory. With `rootless: true` netavark never
-/// reads or writes this path (it skips all on-disk state persistence), so the
-/// daemon does not create it; the value only fills the required `DriverInfo`
-/// field.
-const NETAVARK_CONFIG_DIR: &str = "/run/ssam/netavark";
-
-/// Force the nftables firewall backend (firewalld/fwnone are not used).
-const FIREWALL_DRIVER: &str = "nftables";
-
-/// netavark per-network option pinning the host-side veth name. Without it the
-/// bridge driver auto-generates a random host interface, breaking the module's
-/// `ssam-<hash>` naming assumption used for idempotency and sysfs scans.
-const OPTION_HOST_INTERFACE_NAME: &str = "host_interface_name";
+mod netavark_ops;
+mod restore;
 
 pub(crate) mod messages {
     //! Plain message structs handled by [`super::NetworkActor`].
-
-    use netavark::network::types::PortMapping;
 
     /// Create the persistent named network namespace for `pkg`.
     pub(crate) struct CreateNetns {
         pub pkg: String,
     }
 
-    /// Wire veth + IP + NAT into `pkg`'s namespace, exposing the resolved
+    /// Wire veth + IP + NAT into `pkg`'s namespace on the bridge resolved from
+    /// `bridge_id` (`network_name` or package name), exposing the resolved
     /// container-side interface as `container_interface`.
     pub(crate) struct Attach {
         pub pkg: String,
+        pub bridge_id: String,
         pub container_interface: String,
-        pub port_mappings: Option<Vec<PortMapping>>,
     }
 
-    /// Delete `pkg`'s host veth and release its IP mark, keeping its namespace.
-    /// When `port_mappings` are present, a netavark teardown runs before the
-    /// veth delete to drop the published-port DNAT rules.
+    /// Detach `pkg` from the bridge resolved from `bridge_id`: on last detach the
+    /// host veth is deleted and, once empty, the bridge is torn down.
     pub(crate) struct Detach {
         pub pkg: String,
-        pub container_interface: String,
-        pub port_mappings: Option<Vec<PortMapping>>,
+        pub bridge_id: String,
     }
 
     /// Delete `pkg`'s named network namespace.
@@ -90,39 +70,23 @@ pub(crate) mod messages {
     }
 }
 
-/// Result of a successful [`messages::Attach`].
-#[derive(Clone, Debug)]
-pub struct NetworkHandle {
-    /// Persistent path of the package's named network namespace.
-    pub netns_path: PathBuf,
-    /// Deterministic container IP assigned inside the subnet.
-    pub container_ip: Ipv4Addr,
-    /// Bridge gateway address.
-    pub gateway_ip: Ipv4Addr,
-    /// Subnet prefix length (CIDR suffix).
-    pub prefix_len: u8,
-    /// Container-side interface name (e.g. `eth0`).
-    pub container_interface: String,
-}
-
-/// rsactor actor owning the single bridge network's allocator state.
+/// Owns every live bridge's subnet/IP/refcount state.
 #[derive(Debug)]
 pub struct NetworkActor {
-    bridge_name: String,
-    subnet: Ipv4Net,
-    gateway: Ipv4Addr,
-    allocator: IpAllocator,
+    subnets: SubnetAllocator,
+    /// Live bridges keyed by `ssb-<hash>` interface name; each value is that
+    /// bridge's IP allocator over its subnet (empty = no attachments).
+    bridges: HashMap<String, BridgeIpAllocator>,
 }
 
 impl Actor for NetworkActor {
     type Args = Self;
     type Error = std::convert::Infallible;
 
-    /// Claim every running container's in-use IP into the fresh allocator once,
-    /// before any attach/detach is handled, so a restart cannot reissue a live
-    /// address. Best-effort — an untrusted netns tree or scan error just skips.
+    /// Rebuild bridge/subnet/IP state from host truth so a container that
+    /// outlived the daemon keeps its exact address.
     async fn on_start(mut actor: Self, _actor_ref: &ActorRef<Self>) -> Result<Self, Self::Error> {
-        actor.claim_in_use_ips().await;
+        actor.restore_from_host().await;
         Ok(actor)
     }
 }
@@ -133,37 +97,22 @@ impl SupervisedActor for NetworkActor {
 
 #[message_handlers]
 impl NetworkActor {
-    /// Build an actor instance from daemon network configuration.
+    /// Build an actor from bridge network configuration. `[network.bridge]` is
+    /// already validated at config load (`BridgeConfig::validate`).
     ///
     /// # Errors
     ///
-    /// Returns an error if `config.bridge_name` is not a valid Linux interface
-    /// name, if `config.subnet` is not a valid IPv4 CIDR, or if the gateway lies
-    /// outside the subnet.
-    pub fn new(config: &crate::configuration::NetworkConfig) -> anyhow::Result<Self> {
-        validate_interface_name(&config.bridge_name)
-            .with_context(|| format!("Invalid bridge_name {:?}", config.bridge_name))?;
-        let subnet: Ipv4Net = config
-            .subnet
+    /// Returns an error if `config.base` is not a valid IPv4 CIDR or the pool is
+    /// too coarse to hold one `/subnet_prefix` subnet.
+    pub fn new(config: &crate::configuration::BridgeConfig) -> anyhow::Result<Self> {
+        let pool: Ipv4Net = config
+            .base()
             .parse()
-            .with_context(|| format!("Invalid network subnet {:?}", config.subnet))?;
-        anyhow::ensure!(
-            subnet.contains(&config.gateway),
-            "Gateway {} is not within subnet {}",
-            config.gateway,
-            subnet
-        );
-        if !link::exists(&config.bridge_name) {
-            log::info!(
-                "Bridge {} absent; it is created by netavark on first attach",
-                config.bridge_name
-            );
-        }
+            .with_context(|| format!("Invalid network base {:?}", config.base()))?;
+        let subnets = SubnetAllocator::new(pool, config.size())?;
         Ok(Self {
-            bridge_name: config.bridge_name.clone(),
-            subnet,
-            gateway: config.gateway,
-            allocator: IpAllocator::new(),
+            subnets,
+            bridges: HashMap::new(),
         })
     }
 
@@ -184,164 +133,162 @@ impl NetworkActor {
         netns::create_named_netns(&path)
     }
 
-    /// Idempotently attach veth + IP + NAT for the package.
+    /// Idempotently attach veth + IP + NAT for the package onto its bridge.
     ///
-    /// If the host veth and the namespace are both already present, the existing
-    /// wiring is reused and a handle is returned without re-running netavark. A
-    /// veth left over from a destroyed namespace is removed and recreated.
+    /// Creates the bridge (allocating a distinct subnet from the pool) on first
+    /// attach. If the host veth and the namespace are both already present the
+    /// existing wiring is reused without re-running netavark or re-counting the
+    /// refcount. A veth left over from a destroyed namespace is removed and
+    /// recreated.
     #[handler]
     async fn handle_attach(
         &mut self,
         msg: messages::Attach,
         _actor_ref: &ActorRef<Self>,
-    ) -> anyhow::Result<NetworkHandle> {
-        // No netns-tree trust check here: `new()` validated the tree at actor
-        // construction and a root-0700 tree under sticky /tmp cannot then be
-        // tampered by non-root.
+    ) -> anyhow::Result<()> {
+        // netns tree already validated at startup by `NetworkManager::new`.
         let messages::Attach {
             pkg,
+            bridge_id,
             container_interface,
-            port_mappings,
         } = msg;
-        validate_interface_name(&container_interface).with_context(|| {
+        netavark_ops::validate_interface_name(&container_interface).with_context(|| {
             format!("Invalid container network interface_name {container_interface:?}")
         })?;
         let veth = allocator::veth_host_name(&pkg);
+        let br = crate::network::bridge_name(&bridge_id);
         let ns_name = netns::netns_name(&pkg);
         let ns_path = netns::netns_path(&ns_name);
 
-        // Idempotency check. The veth name is a full-length hash of the package
-        // name, so a present veth belongs to this package; a foreign collision is
-        // not a practical concern.
-        if link::exists(&veth) {
-            if ns_path.exists() {
-                // Already attached (container adopted across a daemon restart).
-                // The scan at handler entry already claimed this netid's in-use
-                // address, so read it back; a missing entry fails closed rather
-                // than minting a possibly-wrong fresh one.
-                let ip = self.allocator.ip_for(&veth).with_context(|| {
-                    format!(
-                        "{pkg}: veth and netns exist but no tracked address \
-                         (boot scan could not read it); refusing to mint a \
-                         possibly-wrong one"
-                    )
-                })?;
-                return Ok(self.handle_for(ns_path, ip, container_interface));
-            }
-            // Stale leftover: the namespace is gone but the veth remains. netavark
-            // setup would fail with EEXIST, so remove it first and let a fresh
-            // setup recreate it.
-            if let Err(e) = link::delete(&veth) {
-                log::warn!("Failed to remove stale veth {veth} before re-setup: {e}");
-            }
+        if self.adopt_existing(&br, &veth, &ns_path)? {
+            return Ok(());
+        }
+        if let Err(e) = link::delete(&veth) {
+            log::warn!("Failed to remove stale veth {veth} before re-setup: {e}");
         }
 
-        // Fresh setup.
-        let ip = self.allocator.allocate(&veth, &self.subnet, self.gateway)?;
-
-        let options = build_network_options(
-            &pkg,
-            &self.bridge_name,
-            self.subnet,
-            self.gateway,
-            ip,
-            &container_interface,
-            port_mappings,
-        );
+        // Resolve the netns path before allocating: a non-UTF8 path must not strand
+        // an allocated IP/subnet (the allocation is rolled back only below).
         let netns_path = ns_path
             .to_str()
             .context("netns path is not valid UTF-8")?
             .to_owned();
 
-        // netavark setup forks+execs the `nft` binary and performs multiple
-        // netlink round-trips (tens to hundreds of ms). It runs on a blocking
-        // thread so it never stalls other tasks on the shared tokio runtime.
-        let setup_result =
-            tokio::task::spawn_blocking(move || run_netavark_setup(&netns_path, &options))
-                .await
-                .context("netavark setup task failed to join")?;
+        let (subnet, ip) = self.allocate_container_ip(&br, &veth)?;
+        let options =
+            netavark_ops::build_network_options(&pkg, &br, subnet, ip, &container_interface);
 
-        if let Err(e) = setup_result {
-            // Roll back the in-memory mark; keep the namespace intact.
-            self.allocator.release(&veth);
-            // netavark may have created the host veth before failing. Remove it so
-            // the next attach is not fooled by a leftover veth into reporting the
-            // half-built network as already attached.
+        let setup =
+            tokio::task::spawn_blocking(move || netavark_ops::run_setup(&netns_path, &options))
+                .await;
+
+        // Roll back on any failure — a setup error OR a panic in netavark (surfaced
+        // as a JoinError). Skipping rollback on panic would leak the IP/subnet and
+        // leave a half-wired veth a later attach could adopt as if it were live.
+        let setup_err = match setup {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(join) => Some(anyhow::Error::new(join).context("netavark setup task panicked")),
+        };
+        if let Some(e) = setup_err {
+            // Delete the half-created veth before rollback: else the bridge's
+            // slave-check still sees it and leaks the now-empty bridge.
             if let Err(del) = link::delete(&veth) {
                 log::warn!("Failed to remove veth {veth} after netavark setup failure: {del}");
             }
+            self.rollback_attach(&br, &veth);
             return Err(e);
         }
 
-        Ok(self.handle_for(ns_path, ip, container_interface))
+        Ok(())
     }
 
-    /// Idempotently delete the package's host veth, keeping its namespace.
+    /// Whether a live veth+netns can be adopted as-is. `Ok(false)` means there is
+    /// nothing to adopt (proceed to a fresh setup).
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if the veth+netns are live but the actor has no tracked
+    /// bridge or address for them (refuse to trust a half-known attachment).
+    fn adopt_existing(&self, br: &str, veth: &str, ns_path: &Path) -> anyhow::Result<bool> {
+        if !(link::exists(veth) && ns_path.exists()) {
+            return Ok(false);
+        }
+        let state = self.bridges.get(br).with_context(|| {
+            format!(
+                "veth {veth} and its netns exist but bridge {br} is untracked; refusing to allocate"
+            )
+        })?;
+        state.ip_for(veth).with_context(|| {
+            format!("veth {veth} and its netns exist but no tracked address; refusing to allocate")
+        })?;
+        Ok(true)
+    }
+
+    /// Ensure the bridge exists (allocating a pool subnet on first attach) and
+    /// allocate a container IP for `veth`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pool has no free subnet or the bridge subnet is
+    /// exhausted.
+    fn allocate_container_ip(
+        &mut self,
+        br: &str,
+        veth: &str,
+    ) -> anyhow::Result<(Ipv4Net, Ipv4Addr)> {
+        let created = !self.bridges.contains_key(br);
+        let state = match self.bridges.entry(br.to_owned()) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let subnet = self
+                    .subnets
+                    .allocate(br)
+                    .with_context(|| format!("allocate subnet for bridge {br}"))?;
+                e.insert(BridgeIpAllocator::new(subnet))
+            }
+        };
+        match state.allocate(veth) {
+            Ok(ip) => Ok((state.subnet(), ip)),
+            Err(e) => {
+                // Undo a first-attach bridge creation so its subnet isn't stranded.
+                if created {
+                    self.destroy_bridge(br);
+                }
+                Err(e).with_context(|| format!("allocate IP on bridge {br}"))
+            }
+        }
+    }
+
+    /// Idempotently detach the package from its bridge, keeping its namespace.
     /// Best-effort and forgiving: always returns `Ok`.
     ///
-    /// Non-empty `port_mappings` trigger a netavark teardown before the veth
-    /// delete to drop the published-port DNAT rules; teardown errors are logged,
-    /// not propagated.
+    /// Deletes the host veth and releases its IP. On last detach (the bridge's
+    /// IP set becomes empty) the bridge link is removed and its subnet released
+    /// back to the pool.
     #[handler]
+    // rsactor #[handler] requires async fn signature even without await
+    #[allow(clippy::unused_async)]
     async fn handle_detach(
         &mut self,
         msg: messages::Detach,
         _actor_ref: &ActorRef<Self>,
     ) -> anyhow::Result<()> {
-        let messages::Detach {
-            pkg,
-            container_interface,
-            port_mappings,
-        } = msg;
+        let messages::Detach { pkg, bridge_id } = msg;
         let veth = allocator::veth_host_name(&pkg);
+        let br = crate::network::bridge_name(&bridge_id);
 
-        if port_mappings.as_ref().is_some_and(|m| !m.is_empty()) {
-            // Target the real address (claimed by the boot scan at handler entry),
-            // never a synthesized one: netavark's DNAT-rule removal is keyed by the
-            // ip we pass it. No known address -> skip rather than target a fake one.
-            match self.allocator.ip_for(&veth) {
-                Some(ip) => {
-                    let teardown_result = async {
-                        let options = build_network_options(
-                            &pkg,
-                            &self.bridge_name,
-                            self.subnet,
-                            self.gateway,
-                            ip,
-                            &container_interface,
-                            port_mappings,
-                        );
-                        let ns_name = netns::netns_name(&pkg);
-                        let netns_path = netns::netns_path(&ns_name)
-                            .to_str()
-                            .context("netns path is not valid UTF-8")?
-                            .to_owned();
-                        tokio::task::spawn_blocking(move || {
-                            run_netavark_teardown(&netns_path, &options)
-                        })
-                        .await
-                        .context("netavark teardown task failed to join")?
+        // On delete failure keep the IP mark: reusing it would collide with the
+        // surviving veth.
+        match link::delete(&veth) {
+            Ok(()) => {
+                if let Some(state) = self.bridges.get_mut(&br) {
+                    state.release(&veth);
+                    if state.is_empty() {
+                        self.destroy_bridge(&br);
                     }
-                    .await;
-                    if let Err(e) = teardown_result {
-                        log::warn!("Best-effort netavark teardown for {pkg} failed: {e}");
-                    }
-                }
-                None => {
-                    log::warn!(
-                        "{pkg}: no known address for port-mapping teardown; skipping \
-                         netavark teardown rather than target a synthesized address"
-                    );
                 }
             }
-        }
-
-        // Release the IP mark only once the host veth is confirmed gone. link::delete
-        // returns Ok when the link is already absent, so Ok means no container still
-        // holds this address. On delete failure keep the mark: leaking it is safe,
-        // but reusing it would let another package collide with the lingering veth.
-        match link::delete(&veth) {
-            Ok(()) => self.allocator.release(&veth),
             Err(e) => {
                 log::warn!("Best-effort veth teardown for {pkg} failed; keeping IP marked: {e}");
             }
@@ -363,368 +310,148 @@ impl NetworkActor {
         netns::delete_named_netns(&path)
     }
 
-    /// Assemble a [`NetworkHandle`] from per-package data plus actor state.
-    fn handle_for(
-        &self,
-        netns_path: PathBuf,
-        container_ip: Ipv4Addr,
-        container_interface: String,
-    ) -> NetworkHandle {
-        NetworkHandle {
-            netns_path,
-            container_ip,
-            gateway_ip: self.gateway,
-            prefix_len: self.subnet.prefix_len(),
-            container_interface,
+    /// Roll back a failed fresh attach: release the IP and tear down the bridge
+    /// if it is now empty.
+    fn rollback_attach(&mut self, br: &str, veth: &str) {
+        let should_destroy = match self.bridges.get_mut(br) {
+            Some(state) => {
+                state.release(veth);
+                state.is_empty()
+            }
+            None => return,
+        };
+        if should_destroy {
+            self.destroy_bridge(br);
         }
     }
 
-    /// Scan every running container's in-use address into the fresh allocator
-    /// (keyed by its `ssam-<hash>` netid) so a later allocate cannot reissue an
-    /// adopted container's address. Runs once at actor start, before any message.
-    ///
-    /// The netns tree is already validated in `new()`; a scan error just skips,
-    /// best-effort.
-    async fn claim_in_use_ips(&mut self) {
-        let subnet = self.subnet;
-        let gateway = self.gateway;
-        // The scan enters each container's network namespace via `setns` and
-        // relies on netavark restoring the host namespace afterward; that
-        // restore is not unwind-safe, so a panic (or a failed restore) would
-        // leave the running thread pinned in a container namespace. Run it on a
-        // dedicated OS thread that dies as soon as the scan returns, so any
-        // pinned thread is discarded rather than a reused blocking-pool worker
-        // (tokio keeps that worker alive after catching the panic). The outer
-        // spawn_blocking only parks on the join and never touches `setns`.
-        let claims = match tokio::task::spawn_blocking(move || {
-            std::thread::spawn(move || scan_in_use_host_ips(subnet, gateway)).join()
+    /// Remove a now-unused bridge — but only once the host bridge is slave-less.
+    /// While a real `ssam-*` veth is still enslaved (refcount diverged from host),
+    /// keep the subnet claimed: freeing it could reissue a live bridge's subnet.
+    fn destroy_bridge(&mut self, br: &str) {
+        if bridge_has_managed_slaves(br) {
+            log::warn!(
+                "bridge {br} still has a managed slave; keeping its subnet claimed (refcount diverged from host)"
+            );
+            return;
+        }
+        self.subnets.release(br);
+        self.bridges.remove(br);
+        if let Err(e) = link::delete(br) {
+            log::warn!("Failed to remove empty bridge {br}: {e}");
+        }
+    }
+
+    /// Rebuild bridge/subnet/IP state from host truth, then sweep orphans.
+    /// Best-effort: a failure skips one attachment and is logged, never aborts start.
+    pub(super) async fn restore_from_host(&mut self) {
+        let pool = self.subnets.pool();
+        let subnet_prefix = self.subnets.subnet_prefix();
+        // setns is not unwind-safe, so run the scan on a throwaway OS thread — a
+        // panic discards the thread, not a tokio worker. A failed scan yields an
+        // empty plan but still falls through to the orphan sweep.
+        let plan = match tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || restore::collect_restore_plan(pool, subnet_prefix)).join()
         })
         .await
         {
-            Ok(Ok(claims)) => claims,
+            Ok(Ok(plan)) => plan,
             Ok(Err(_)) => {
-                log::warn!("in-use host IP scan thread panicked; skipping IP claim");
-                return;
+                log::warn!("network restore scan thread panicked; skipping bridge restore");
+                Vec::new()
             }
             Err(e) => {
-                log::warn!("in-use host IP scan task failed to join: {e}");
-                return;
+                log::warn!("network restore scan task failed to join: {e}");
+                Vec::new()
             }
         };
-        for (netid, ip) in claims {
-            if let Err(e) = self.allocator.claim(&netid, ip) {
-                log::warn!("in-use host IP scan: {e}");
+        self.apply_restore_plan(plan);
+        Self::cleanup_orphans();
+    }
+
+    /// Apply the restore plan: claim each restored bridge's subnet + live IP,
+    /// then reserve slots for stragglers. Attaches run first.
+    fn apply_restore_plan(&mut self, plan: Vec<restore::RestoreEntry>) {
+        let mut reserves = Vec::new();
+        for entry in plan {
+            match entry {
+                restore::RestoreEntry::Attach(att) => self.claim_restored_attach(att),
+                restore::RestoreEntry::ReserveIp { ip, veth, master } => {
+                    reserves.push((ip, veth, master));
+                }
             }
+        }
+        for (ip, veth, master) in reserves {
+            self.reserve_ip(ip, &veth, master.as_deref());
         }
     }
-}
 
-/// Read each running container's in-use IPv4 within `subnet` from the persistent
-/// netns directory, returning `(netid, ip)` pairs to claim. A missing directory
-/// or per-entry error yields fewer pairs, never an error. Blocking netlink I/O —
-/// run on a blocking executor.
-fn scan_in_use_host_ips(subnet: Ipv4Net, gateway: Ipv4Addr) -> Vec<(String, Ipv4Addr)> {
-    let dir = netns::netns_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(e) => {
-            log::warn!(
-                "in-use host IP scan: cannot read netns dir {}: {e}",
-                dir.display()
-            );
-            return Vec::new();
-        }
-    };
-
-    let mut claims = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                log::warn!("in-use host IP scan: cannot read a netns dir entry: {e}");
-                continue;
+    /// Reserve `ip` under its real veth id in the known sibling bridge, if
+    /// restored; else fall back to a pool-level-only reservation.
+    fn reserve_ip(&mut self, ip: Ipv4Addr, veth: &str, master: Option<&str>) {
+        if let Some(br) = master
+            && let Some(alloc) = self.bridges.get_mut(br)
+        {
+            if let Err(e) = alloc.claim(veth, ip) {
+                log::warn!("network restore: reserve ip {ip} for veth {veth} on {br}: {e}");
             }
-        };
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        // The netns file name equals the veth/allocator netid (`ssam-<hash>`).
-        if !name.starts_with("ssam-") {
-            continue;
+            return;
         }
-        match read_container_ipv4(&entry.path(), subnet, gateway) {
-            Ok(Some(ip)) => claims.push((name.to_owned(), ip)),
-            Ok(None) => {}
-            Err(e) => log::error!(
-                "in-use host IP scan: probe of live container {name} failed: {e}; \
-                 its address is unprotected from reallocation"
-            ),
+        self.subnets.reserve_containing(ip);
+    }
+
+    /// Claim a fully-restored attachment: its bridge subnet and live container IP.
+    fn claim_restored_attach(&mut self, att: restore::RestoredAttach) {
+        let restore::RestoredAttach {
+            br,
+            subnet,
+            veth,
+            ip,
+        } = att;
+        if let Err(e) = self.subnets.claim(&br, subnet) {
+            log::warn!("network restore: claim subnet {subnet} for bridge {br}: {e}");
+            return;
+        }
+        let state = self
+            .bridges
+            .entry(br)
+            .or_insert_with(|| BridgeIpAllocator::new(subnet));
+        if let Err(e) = state.claim(&veth, ip) {
+            log::warn!("network restore: claim ip {ip} for veth {veth}: {e}");
         }
     }
-    claims
-}
 
-/// Read the container's own IPv4 configured inside the namespace at `netns_path`.
-///
-/// A ssam bridge container's veth carries exactly one unicast address in
-/// `subnet` — its own. Loopback/link-local fall outside `subnet`, and the
-/// network/broadcast are never assigned to an interface as unicast, so the
-/// single in-`subnet` unicast that is not the `gateway` is unambiguously it.
-/// Excluding the gateway also stops a tampered container that self-assigned it
-/// from being claimed as its owner. `Ok(None)` = nothing to claim.
-///
-/// Blocking netlink I/O + a transient `setns` — MUST run on a blocking executor.
-///
-/// # Errors
-///
-/// Errors if the path is not valid UTF-8, the netlink sockets cannot be opened,
-/// or the address dump fails.
-fn read_container_ipv4(
-    netns_path: &Path,
-    subnet: Ipv4Net,
-    gateway: Ipv4Addr,
-) -> anyhow::Result<Option<Ipv4Addr>> {
-    let netns_path = netns_path
-        .to_str()
-        .context("netns path is not valid UTF-8")?;
-
-    // netavark binds this socket inside the namespace; the returned File handles
-    // must outlive the dump because the socket fds borrow from them.
-    let (_hostns, mut netns) = open_netlink_sockets(netns_path)
-        .map_err(|e| anyhow::anyhow!("open netlink sockets for {netns_path}: {e}"))?;
-
-    let addresses = netns
-        .netlink
-        .dump_addresses(None)
-        .map_err(|e| anyhow::anyhow!("dump addresses in {netns_path}: {e}"))?;
-
-    for addr in addresses {
-        for attr in addr.attributes {
-            if let AddressAttribute::Address(IpAddr::V4(v4)) = attr
-                && subnet.contains(&v4)
-                && v4 != gateway
+    /// Delete orphaned `ssam-*` veths (netns gone), then slave-less `ssb-*`
+    /// bridges — veths first so a bridge only looks slave-less once cleared.
+    fn cleanup_orphans() {
+        let (veths, bridges) = restore::enumerate_managed_links();
+        for veth in veths.into_iter().filter(|v| !netns::netns_path(v).exists()) {
+            if let Err(e) = link::delete(&veth) {
+                log::warn!("network restore: orphan veth {veth} delete failed: {e}");
+            }
+        }
+        for br in &bridges {
+            if !bridge_has_managed_slaves(br)
+                && let Err(e) = link::delete(br)
             {
-                return Ok(Some(v4));
+                log::warn!("network restore: orphan bridge {br} delete failed: {e}");
             }
         }
     }
-    Ok(None)
 }
 
-/// Validate a Linux network interface name against kernel `IFNAMSIZ` rules.
-///
-/// The name must be 1..=15 bytes and must not be `.`/`..` or contain `/`,
-/// whitespace, or control characters. Rejecting bad names here makes a
-/// misconfigured `bridge_name` fail at daemon startup rather than at the first
-/// attach deep inside netavark.
-///
-/// # Errors
-///
-/// Returns an error describing the first violated constraint.
-fn validate_interface_name(name: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(!name.is_empty(), "interface name is empty");
-    anyhow::ensure!(
-        name.len() <= 15,
-        "interface name exceeds 15 bytes (IFNAMSIZ): {} bytes",
-        name.len()
-    );
-    anyhow::ensure!(name != "." && name != "..", "interface name is '.' or '..'");
-    anyhow::ensure!(
-        !name
-            .chars()
-            .any(|c| c == '/' || c == ':' || c.is_whitespace() || c.is_control()),
-        "interface name contains '/' ':' whitespace or a control character"
-    );
-    Ok(())
-}
-
-fn build_bridge_network(bridge_name: &str, subnet: Ipv4Net, gateway: Ipv4Addr) -> Network {
-    Network {
-        created: None,
-        dns_enabled: false,
-        driver: "bridge".to_owned(),
-        id: bridge_name.to_owned(),
-        internal: false,
-        ipv6_enabled: false,
-        name: bridge_name.to_owned(),
-        network_interface: Some(bridge_name.to_owned()),
-        options: None,
-        ipam_options: None,
-        subnets: Some(vec![Subnet {
-            gateway: Some(IpAddr::V4(gateway)),
-            lease_range: None,
-            subnet: IpNet::V4(subnet),
-        }]),
-        routes: None,
-        network_dns_servers: None,
-        labels: None,
+/// Whether bridge `br` still has an enslaved `ssam-*` veth, read from
+/// `/sys/class/net/<br>/brif`. A missing directory counts as no slaves.
+fn bridge_has_managed_slaves(br: &str) -> bool {
+    let brif = Path::new(link::SYS_CLASS_NET).join(br).join("brif");
+    match std::fs::read_dir(brif) {
+        Ok(entries) => entries.flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("ssam-"))
+        }),
+        Err(_) => false,
     }
-}
-
-fn build_per_network_opts(
-    pkg: &str,
-    container_ip: Ipv4Addr,
-    container_interface: &str,
-) -> PerNetworkOptions {
-    let mut options = HashMap::new();
-    options.insert(
-        OPTION_HOST_INTERFACE_NAME.to_owned(),
-        allocator::veth_host_name(pkg),
-    );
-    PerNetworkOptions {
-        aliases: None,
-        interface_name: container_interface.to_owned(),
-        static_ips: Some(vec![IpAddr::V4(container_ip)]),
-        static_mac: None,
-        options: Some(options),
-    }
-}
-
-/// Assemble netavark's owned `NetworkOptions` for attaching `pkg` to the bridge.
-fn build_network_options(
-    pkg: &str,
-    bridge_name: &str,
-    subnet: Ipv4Net,
-    gateway: Ipv4Addr,
-    container_ip: Ipv4Addr,
-    container_interface: &str,
-    port_mappings: Option<Vec<PortMapping>>,
-) -> NetworkOptions {
-    let mut network_info = HashMap::new();
-    network_info.insert(
-        bridge_name.to_owned(),
-        build_bridge_network(bridge_name, subnet, gateway),
-    );
-    NetworkOptions {
-        container_id: pkg.to_owned(),
-        container_name: pkg.to_owned(),
-        container_hostname: None,
-        networks: vec![NamedPerNetworkOptions {
-            name: bridge_name.to_owned(),
-            opts: build_per_network_opts(pkg, container_ip, container_interface),
-        }],
-        network_info,
-        port_mappings,
-        dns_servers: None,
-    }
-}
-
-/// Run a blocking netavark bridge `setup` for the pre-built `options`.
-///
-/// Opens netlink sockets, brings up loopback inside the namespace at
-/// `netns_path`, and invokes the bridge driver. Performs blocking netlink I/O
-/// and MUST run on a blocking executor (`spawn_blocking`). Teardown is
-/// intentionally not handled here: removing the host veth via
-/// [`link::delete`] plus destroying the namespace cleans up all
-/// per-container state, and the per-subnet NAT rule is shared.
-///
-/// # Errors
-///
-/// Returns an error if any netavark stage (firewall driver, netlink sockets,
-/// driver construction/validation, setup) fails.
-fn run_netavark_setup(netns_path: &str, options: &NetworkOptions) -> anyhow::Result<()> {
-    let firewall = get_supported_firewall_driver(Some(FIREWALL_DRIVER.to_owned()))
-        .map_err(|e| anyhow::anyhow!("netavark firewall driver: {e}"))?;
-
-    // The returned File handles MUST stay alive for the whole call: the fds in
-    // DriverInfo borrow from them.
-    let (mut hostns, mut netns) = open_netlink_sockets(netns_path)
-        .map_err(|e| anyhow::anyhow!("netavark open netlink sockets for {netns_path}: {e}"))?;
-
-    // Bring loopback (ifindex 1) up inside the container namespace.
-    netns
-        .netlink
-        .set_up(LinkID::ID(1))
-        .map_err(|e| anyhow::anyhow!("netavark set loopback up: {e}"))?;
-
-    let driver = build_netavark_driver(
-        netns_path,
-        options,
-        firewall.as_ref(),
-        hostns.file.as_fd(),
-        netns.file.as_fd(),
-    )?;
-
-    let sockets = (&mut hostns.netlink, &mut netns.netlink);
-    driver
-        .setup(sockets)
-        .map(|_status| ())
-        .map_err(|e| anyhow::anyhow!("netavark setup: {e}"))
-}
-
-/// Run a blocking netavark bridge `teardown` for the pre-built `options`.
-///
-/// Mirrors [`run_netavark_setup`] with fresh netlink sockets and an identical
-/// [`DriverInfo`]; removes the published-port DNAT rules carried in
-/// `options.port_mappings`. Performs blocking netlink I/O and MUST run on a
-/// blocking executor (`spawn_blocking`).
-///
-/// # Errors
-///
-/// Returns an error if any netavark stage (firewall driver, netlink sockets,
-/// driver construction/validation, teardown) fails.
-fn run_netavark_teardown(netns_path: &str, options: &NetworkOptions) -> anyhow::Result<()> {
-    let firewall = get_supported_firewall_driver(Some(FIREWALL_DRIVER.to_owned()))
-        .map_err(|e| anyhow::anyhow!("netavark firewall driver: {e}"))?;
-
-    let (mut hostns, mut netns) = open_netlink_sockets(netns_path)
-        .map_err(|e| anyhow::anyhow!("netavark open netlink sockets for {netns_path}: {e}"))?;
-
-    let driver = build_netavark_driver(
-        netns_path,
-        options,
-        firewall.as_ref(),
-        hostns.file.as_fd(),
-        netns.file.as_fd(),
-    )?;
-
-    let sockets = (&mut hostns.netlink, &mut netns.netlink);
-    driver
-        .teardown(sockets)
-        .map_err(|e| anyhow::anyhow!("netavark teardown: {e}"))
-}
-
-fn build_netavark_driver<'a>(
-    netns_path: &'a str,
-    options: &'a NetworkOptions,
-    firewall: &'a dyn FirewallDriver,
-    hostns_fd: BorrowedFd<'a>,
-    netns_fd: BorrowedFd<'a>,
-) -> anyhow::Result<Box<dyn NetworkDriver + 'a>> {
-    let named = &options.networks[0];
-    let network = &options.network_info[&named.name];
-    let info = DriverInfo {
-        firewall,
-        container_id: &options.container_id,
-        container_name: &options.container_name,
-        container_dns_servers: &options.dns_servers,
-        netns_host: hostns_fd,
-        netns_container: netns_fd,
-        netns_path,
-        network,
-        per_network_opts: &named.opts,
-        port_mappings: &options.port_mappings,
-        // 53 is a sentinel: netavark adds a DNS DNAT redirect for every gateway
-        // nameserver whenever dns_port != 53 (independent of dns_enabled), so any
-        // other value — including 0 — would inject a bogus port-0 redirect rule.
-        dns_port: 53,
-        config_dir: Path::new(NETAVARK_CONFIG_DIR),
-        // rootless suppresses netavark's only on-disk writes (firewall-state
-        // files under config_dir and the /run/sysctl.d advisory file) while the
-        // bridge/veth/NAT and sysctls are still applied via netlink/sysctl. This
-        // keeps the daemon free of any writable-filesystem dependency. Do NOT set
-        // this to false: it reintroduces on-disk state the target may not allow.
-        rootless: true,
-        container_hostname: &options.container_hostname,
-    };
-    let mut driver =
-        get_network_driver(info, &None).map_err(|e| anyhow::anyhow!("netavark get driver: {e}"))?;
-    driver
-        .validate()
-        .map_err(|e| anyhow::anyhow!("netavark validate: {e}"))?;
-    Ok(driver)
 }
 
 /// Async wrapper over a spawned [`NetworkActor`].
@@ -738,9 +465,9 @@ impl NetworkManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the actor cannot be constructed (invalid subnet) or
-    /// the netns tree fails its trust check.
-    pub fn new(config: &crate::configuration::NetworkConfig) -> anyhow::Result<Self> {
+    /// Returns an error if the actor cannot be constructed (invalid pool /
+    /// `subnet_prefix`) or the netns tree fails its trust check.
+    pub fn new(config: &crate::configuration::BridgeConfig) -> anyhow::Result<Self> {
         let actor = NetworkActor::new(config)?;
         // Establish and validate the netns tree once, here at daemon startup. A
         // confirmed root-0700 tree under sticky /tmp cannot then be tampered by
@@ -765,49 +492,40 @@ impl NetworkManager {
             .context("NetworkActor has died?")?
     }
 
-    /// Idempotently attach veth + IP + NAT for the package.
+    /// Idempotently attach veth + IP + NAT for the package onto the bridge
+    /// resolved from `bridge_id` (`network_name` or the package name).
     ///
     /// # Errors
     ///
-    /// Returns an error if the actor has stopped, an IP collision is detected,
-    /// the veth is foreign-owned, or netavark setup fails.
+    /// Returns an error if the actor has stopped, the pool/subnet is exhausted, or
+    /// netavark setup fails.
     pub async fn attach(
         &self,
         pkg: &str,
+        bridge_id: &str,
         container_interface: &str,
-        port_mappings: Option<Vec<PortMapping>>,
-    ) -> anyhow::Result<NetworkHandle> {
+    ) -> anyhow::Result<()> {
         self.actor
             .ask(messages::Attach {
                 pkg: pkg.to_owned(),
+                bridge_id: bridge_id.to_owned(),
                 container_interface: container_interface.to_owned(),
-                port_mappings,
             })
             .await
             .context("NetworkActor has died?")?
     }
 
-    /// Idempotently detach the package's host veth (keeps the namespace).
-    ///
-    /// Non-empty `port_mappings` trigger a netavark teardown before the veth
-    /// delete; the same `container_interface` passed to [`attach`](Self::attach)
-    /// must be supplied so netavark can rebuild the teardown options.
+    /// Idempotently detach the package from the bridge resolved from `bridge_id`.
     ///
     /// # Errors
     ///
     /// Returns an error only if the actor has stopped; teardown itself is
     /// best-effort and always reports success.
-    pub async fn detach(
-        &self,
-        pkg: &str,
-        container_interface: &str,
-        port_mappings: Option<Vec<PortMapping>>,
-    ) -> anyhow::Result<()> {
+    pub async fn detach(&self, pkg: &str, bridge_id: &str) -> anyhow::Result<()> {
         self.actor
             .ask(messages::Detach {
                 pkg: pkg.to_owned(),
-                container_interface: container_interface.to_owned(),
-                port_mappings,
+                bridge_id: bridge_id.to_owned(),
             })
             .await
             .context("NetworkActor has died?")?
@@ -832,91 +550,160 @@ impl NetworkManager {
 mod tests {
     use super::*;
 
-    fn config(subnet: &str) -> crate::configuration::NetworkConfig {
-        crate::configuration::NetworkConfig {
-            bridge_enabled: true,
-            bridge_name: "ssam-br0".to_owned(),
-            subnet: subnet.to_owned(),
-            gateway: Ipv4Addr::new(172, 20, 0, 1),
+    fn config(base: &str) -> crate::configuration::BridgeConfig {
+        crate::configuration::BridgeConfig {
+            enabled: true,
+            addr_pool: Some(crate::configuration::PoolConfig {
+                base: Some(base.to_owned()),
+                size: Some(29),
+            }),
         }
     }
 
     #[test]
-    fn new_parses_valid_subnet() {
+    fn new_parses_valid_pool() {
         let actor = NetworkActor::new(&config("172.20.0.0/16")).unwrap();
-        assert_eq!(actor.subnet.prefix_len(), 16);
-        assert_eq!(actor.gateway, Ipv4Addr::new(172, 20, 0, 1));
+        assert!(actor.bridges.is_empty());
     }
 
     #[test]
-    fn new_errors_on_bad_subnet() {
-        let err = NetworkActor::new(&config("not-a-subnet")).unwrap_err();
-        assert!(err.to_string().contains("subnet"));
-    }
-
-    #[test]
-    fn new_errors_on_gateway_outside_subnet() {
+    fn new_defaults_size_when_omitted() {
         let mut cfg = config("172.20.0.0/16");
-        cfg.gateway = Ipv4Addr::new(10, 0, 0, 1);
-        let err = NetworkActor::new(&cfg).unwrap_err();
-        assert!(err.to_string().contains("not within subnet"));
+        cfg.addr_pool.as_mut().unwrap().size = None;
+        // Omitted size defaults to /29 (a valid slot in /16), so construction
+        // succeeds.
+        NetworkActor::new(&cfg).unwrap();
     }
 
     #[test]
-    fn new_errors_on_bad_bridge_name() {
-        let mut cfg = config("172.20.0.0/16");
-        cfg.bridge_name = "this-name-is-way-too-long".to_owned();
-        let err = NetworkActor::new(&cfg).unwrap_err();
-        assert!(err.to_string().contains("bridge_name"));
+    fn new_errors_on_bad_base() {
+        let err = NetworkActor::new(&config("not-a-pool")).unwrap_err();
+        assert!(err.to_string().contains("base"));
     }
 
     #[test]
-    fn validate_interface_name_accepts_and_rejects() {
-        assert!(validate_interface_name("ssam-br0").is_ok());
-        assert!(validate_interface_name("eth0").is_ok());
-        assert!(validate_interface_name("").is_err());
-        assert!(validate_interface_name("0123456789abcdef").is_err()); // 16 bytes
-        assert!(validate_interface_name("eth/0").is_err());
-        assert!(validate_interface_name("eth 0").is_err());
-        assert!(validate_interface_name("..").is_err());
-    }
-
-    fn port_mapping() -> PortMapping {
-        PortMapping {
-            container_port: 80,
-            host_ip: "0.0.0.0".to_owned(),
-            host_port: 8080,
-            protocol: "tcp".to_owned(),
-            range: 1,
-        }
-    }
-
-    #[test]
-    fn build_network_options_carries_port_mappings() {
-        let opts = build_network_options(
-            "pkg-a",
-            "ssam-br0",
-            "172.20.0.0/16".parse().unwrap(),
-            Ipv4Addr::new(172, 20, 0, 1),
-            Ipv4Addr::new(172, 20, 0, 2),
-            "eth0",
-            Some(vec![port_mapping()]),
+    fn apply_restore_plan_attach_registers_bridge_and_ip() {
+        let mut actor = NetworkActor::new(&config("172.20.0.0/16")).unwrap();
+        let br = crate::network::bridge_name("x");
+        let veth = allocator::veth_host_name("x");
+        let plan = vec![restore::RestoreEntry::Attach(restore::RestoredAttach {
+            br: br.clone(),
+            subnet: "172.20.0.0/29".parse().unwrap(),
+            veth: veth.clone(),
+            ip: "172.20.0.1".parse().unwrap(),
+        })];
+        actor.apply_restore_plan(plan);
+        assert!(actor.bridges.contains_key(&br));
+        assert_eq!(
+            actor.bridges[&br].ip_for(&veth),
+            Some("172.20.0.1".parse().unwrap())
         );
-        assert_eq!(opts.port_mappings, Some(vec![port_mapping()]));
     }
 
     #[test]
-    fn build_network_options_omits_absent_port_mappings() {
-        let opts = build_network_options(
-            "pkg-a",
-            "ssam-br0",
-            "172.20.0.0/16".parse().unwrap(),
-            Ipv4Addr::new(172, 20, 0, 1),
-            Ipv4Addr::new(172, 20, 0, 2),
-            "eth0",
-            None,
+    fn apply_restore_plan_reserve_blocks_reissue() {
+        let mut actor = NetworkActor::new(&config("172.20.0.0/16")).unwrap();
+        let plan = vec![restore::RestoreEntry::ReserveIp {
+            ip: "172.20.0.3".parse().unwrap(),
+            veth: allocator::veth_host_name("unknown"),
+            master: None,
+        }];
+        actor.apply_restore_plan(plan);
+        // .3 sits in slot 172.20.0.0/29; a fresh subnet alloc must skip it.
+        assert_eq!(
+            actor.subnets.allocate("fresh").unwrap(),
+            "172.20.0.8/29".parse().unwrap()
         );
-        assert_eq!(opts.port_mappings, None);
+    }
+
+    #[test]
+    fn apply_restore_plan_attach_wins_over_reserve_in_same_slot() {
+        let mut actor = NetworkActor::new(&config("172.20.0.0/16")).unwrap();
+        let br = crate::network::bridge_name("x");
+        let veth = allocator::veth_host_name("x");
+        let demoted_veth = allocator::veth_host_name("y");
+        let plan = vec![
+            restore::RestoreEntry::ReserveIp {
+                ip: "172.20.0.3".parse().unwrap(),
+                veth: demoted_veth.clone(),
+                master: Some(br.clone()),
+            },
+            restore::RestoreEntry::Attach(restore::RestoredAttach {
+                br: br.clone(),
+                subnet: "172.20.0.0/29".parse().unwrap(),
+                veth: veth.clone(),
+                ip: "172.20.0.1".parse().unwrap(),
+            }),
+        ];
+        actor.apply_restore_plan(plan);
+        // Sibling's own IP is untouched.
+        assert_eq!(
+            actor.bridges[&br].ip_for(&veth),
+            Some("172.20.0.1".parse().unwrap())
+        );
+        // Demoted sibling's IP claimed under its real veth id — protected too.
+        assert_eq!(
+            actor.bridges[&br].ip_for(&demoted_veth),
+            Some("172.20.0.3".parse().unwrap())
+        );
+        assert_eq!(
+            actor
+                .bridges
+                .get_mut(&br)
+                .unwrap()
+                .allocate("new-sibling-1")
+                .unwrap(),
+            "172.20.0.2".parse::<Ipv4Addr>().unwrap()
+        );
+        assert_eq!(
+            actor
+                .bridges
+                .get_mut(&br)
+                .unwrap()
+                .allocate("new-sibling-2")
+                .unwrap(),
+            "172.20.0.4".parse::<Ipv4Addr>().unwrap()
+        );
+        // Real key: detach frees it — no permanent leak.
+        actor.bridges.get_mut(&br).unwrap().release(&demoted_veth);
+        assert_eq!(
+            actor
+                .bridges
+                .get_mut(&br)
+                .unwrap()
+                .allocate("new-sibling-3")
+                .unwrap(),
+            "172.20.0.3".parse::<Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn apply_restore_plan_reserve_falls_back_when_bridge_unseen() {
+        // Known master, but its bridge is unseen this boot — falls back.
+        let mut actor = NetworkActor::new(&config("172.20.0.0/16")).unwrap();
+        let br = crate::network::bridge_name("x");
+        let plan = vec![restore::RestoreEntry::ReserveIp {
+            ip: "172.20.0.3".parse().unwrap(),
+            veth: allocator::veth_host_name("y"),
+            master: Some(br.clone()),
+        }];
+        actor.apply_restore_plan(plan);
+        assert!(!actor.bridges.contains_key(&br));
+        assert_eq!(
+            actor.subnets.allocate("fresh").unwrap(),
+            "172.20.0.8/29".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn rollback_attach_destroys_now_empty_bridge() {
+        let mut actor = NetworkActor::new(&config("172.20.0.0/16")).unwrap();
+        let br = crate::network::bridge_name("x");
+        let veth = allocator::veth_host_name("x");
+        actor.allocate_container_ip(&br, &veth).unwrap();
+        assert!(actor.bridges.contains_key(&br));
+        actor.rollback_attach(&br, &veth);
+        assert!(!actor.bridges.contains_key(&br));
     }
 
     #[tokio::test]

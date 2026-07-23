@@ -39,7 +39,6 @@ To address these limitations, a high-performance, security-enhanced container so
 
 ### `ssamd` requirements
 - OCI runtime: Tested with [`crun`](https://github.com/containers/crun).
-- [`nft`](https://www.netfilter.org/projects/nftables/) (nftables) required for Bridge network mode (`[container.network] mode = "bridge"`).
 - Mandatory Linux kernel support for the following features:
   * dm-verity
   * container
@@ -47,7 +46,6 @@ To address these limitations, a high-performance, security-enhanced container so
 - Optional Linux kernel support for the following features:
   * ext4 project quota
   * Bridge networking (`bridge`/`veth`/network namespaces)
-  * Netfilter NAT (`nf_tables`/`nf_nat`/`nf_conntrack`/`nft_nat`/`nft_masq`)
 
 ### `ssam-wrap` requirements
 - `lz4`

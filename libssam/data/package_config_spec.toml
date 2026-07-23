@@ -26,8 +26,6 @@ mode = "host" # one of: host | bridge | none
 network_name = "shared-net-a"
 #:Opt:# container.network.bridge.interface_name
 interface_name = "eth0"
-#:Opt:# container.network.bridge.port_mappings
-port_mappings = ["8080:80", "8443:443/tcp", "5353:53/udp"]
 
 [service]
 service_type = "simple"

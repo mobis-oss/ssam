@@ -9,8 +9,9 @@ public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
 packages_cgroup = ""
 packages_ext = "ssam"
 
-[network]
-bridge_enabled = true
-bridge_name = "ssam-br0"
-subnet = "172.20.0.0/16"
-gateway = "172.20.0.1"
+[network.bridge]
+enabled = true
+
+[network.bridge.addr_pool]
+base = "172.20.0.0/16"
+size = 29

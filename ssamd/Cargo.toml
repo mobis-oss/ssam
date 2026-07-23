@@ -44,10 +44,10 @@ strum.workspace = true
 strum_macros.workspace = true
 once_cell = "1.20.2"
 tempfile.workspace = true
-rustix = { version = "1.0.3", features = ["mount", "time", "thread"] }
+rustix = { version = "1.0.3", features = ["fs", "mount", "time", "thread"] }
 quotactl-rs = { path = "../quotactl-rs" }
 thiserror.workspace = true
-linux-raw-sys = { workspace = true, features = ["loop_device"] }
+linux-raw-sys = { workspace = true, features = ["loop_device", "general", "ioctl"] }
 procfs = "0.18"
 oci-spec.workspace = true
 cgroups-rs = "0.5"

@@ -166,7 +166,7 @@ struct InstallInfo {
 
 impl PackageManagerActor {
     /// Build the manager from daemon configuration, creating the bridge
-    /// `NetworkManager` only when `[network] bridge_enabled` is set.
+    /// `NetworkManager` only when `[network.bridge] enabled` is set.
     ///
     /// # Errors
     ///
@@ -176,11 +176,21 @@ impl PackageManagerActor {
         bundled_dir_str: &str,
         downloaded_dir_str: &str,
     ) -> anyhow::Result<Self> {
-        let network = crate::configuration::network_config()
-            .filter(|c| c.bridge_enabled)
+        let bridge_cfg = crate::configuration::bridge_config();
+        match bridge_cfg {
+            Some(c) => log::info!(
+                "network config: bridge enabled={}, base={}, /{} subnets",
+                c.enabled,
+                c.base(),
+                c.size()
+            ),
+            None => log::info!("network: no [network.bridge] config"),
+        }
+        let network = bridge_cfg
+            .filter(|c| c.enabled)
             .map(NetworkManager::new)
             .transpose()
-            .context("Failed to initialize NetworkManager from [network] config")?;
+            .context("Failed to initialize NetworkManager from [network.bridge] config")?;
         Self::new(bundled_dir_str, downloaded_dir_str, network).await
     }
 

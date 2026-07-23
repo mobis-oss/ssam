@@ -7,7 +7,6 @@ use std::sync::Arc;
 use crate::executor::container::ContainerCommand;
 use crate::executor::{self, ContainerRuntime, ExecuteCommand, ExecutionResult, ExecutionStatus};
 use crate::network::NetworkManager;
-use crate::network::parse_port_mappings;
 use crate::package_volume::messages::GetQuotaInfo;
 use crate::package_volume::{PackageFsBackend, PackageVolume, PackageVolumeManagerActor};
 use crate::utils::{timeline_complete, timeline_start};
@@ -17,7 +16,6 @@ use libssam::container::NetworkMode;
 use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{self, BrokenReason};
 use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
-use netavark::network::types::PortMapping;
 use rsactor::ActorRef;
 use strum::Display;
 use tokio::sync::mpsc;
@@ -191,8 +189,8 @@ struct DefaultPackageTransitioner {
     executor: Arc<LazyExecutor>,
     pkgfs_handle: Arc<dyn PackageFsBackend>,
     network: Option<NetworkManager>,
+    bridge_id: String,
     container_interface: String,
-    port_mappings: Option<Vec<PortMapping>>,
 }
 
 impl DefaultPackageTransitioner {
@@ -201,16 +199,16 @@ impl DefaultPackageTransitioner {
         executor: Arc<LazyExecutor>,
         pkgfs_handle: Arc<dyn PackageFsBackend>,
         network: Option<NetworkManager>,
+        bridge_id: String,
         container_interface: String,
-        port_mappings: Option<Vec<PortMapping>>,
     ) -> Self {
         Self {
             package_name,
             executor,
             pkgfs_handle,
             network,
+            bridge_id,
             container_interface,
-            port_mappings,
         }
     }
 
@@ -273,15 +271,13 @@ impl PackageTransitioner for DefaultPackageTransitioner {
 
         let pkg_name = self.package_name.clone();
         let netns_net = self.bridge_network().cloned();
+        let netns_bridge_id = self.bridge_id.clone();
         let netns_iface = self.container_interface.clone();
-        let netns_ports = self.port_mappings.clone();
         let netns_handle = tokio::spawn(async move {
             match netns_net {
                 Some(net) => {
                     net.create_netns(&pkg_name).await?;
-                    net.attach(&pkg_name, &netns_iface, netns_ports)
-                        .await
-                        .map(|_| ())
+                    net.attach(&pkg_name, &netns_bridge_id, &netns_iface).await
                 }
                 None => Ok(()),
             }
@@ -305,11 +301,7 @@ impl PackageTransitioner for DefaultPackageTransitioner {
 
         if let Some(net) = self.bridge_network() {
             let _ = net
-                .detach(
-                    &self.package_name,
-                    &self.container_interface,
-                    self.port_mappings.clone(),
-                )
+                .detach(&self.package_name, &self.bridge_id)
                 .await
                 .inspect_err(|e| {
                     log::warn!("{}: detach during cleanup failed: {e:#}", self.package_name);
@@ -376,11 +368,7 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         // netns/veth would collide with a reinstall or fresh daemon start.
         if let Some(net) = self.bridge_network() {
             let _ = net
-                .detach(
-                    &self.package_name,
-                    &self.container_interface,
-                    self.port_mappings.clone(),
-                )
+                .detach(&self.package_name, &self.bridge_id)
                 .await
                 .inspect_err(|e| {
                     log::warn!(
@@ -441,7 +429,9 @@ pub struct Package {
 impl Package {
     /// # Errors
     ///
-    /// Returns an error if building the OCI runtime config or systemd service info fails.
+    /// Returns an error if the package requests bridge mode while the daemon
+    /// network is disabled, or if building the OCI runtime config or systemd
+    /// service info fails.
     pub fn new(
         context: PackageContext,
         pkg_volume: &PackageVolume,
@@ -457,7 +447,7 @@ impl Package {
 
         // Authoritative network-mode parse: resolved once here and passed to both
         // the container command and the transitioner so they never diverge.
-        let mut network_mode = metadata
+        let network_mode = metadata
             .get_container_network_mode()
             .map(|m| m.parse::<NetworkMode>())
             .transpose()
@@ -471,15 +461,13 @@ impl Package {
                 std::string::ToString::to_string,
             );
 
-        // A package may request bridge mode while the daemon network is disabled.
-        // Rather than rejecting it, fall back to host networking so the package
-        // still runs, warning that the requested isolation is lost.
+        // Reject bridge mode when the daemon network is disabled rather than
+        // silently downgrading to host networking, which would misrepresent the
+        // isolation the package declared.
         if network_mode == NetworkMode::Bridge && network.is_none() {
-            log::warn!(
-                "{pkg_name}: bridge network mode requested but the daemon network is disabled; \
-                 falling back to host network mode"
+            anyhow::bail!(
+                "{pkg_name}: bridge network mode requested but the daemon network is disabled"
             );
-            network_mode = NetworkMode::Host;
         }
 
         // netns is needed only when the (container) command runs in bridge mode.
@@ -491,17 +479,15 @@ impl Package {
             None
         };
 
-        // Port bindings apply only in effective bridge mode; host/none/fallback
-        // ignore them so a forwarded port never leaks onto the host network.
-        let port_mappings = if network_mode == NetworkMode::Bridge {
-            parse_port_mappings(
-                metadata
-                    .get_container_network_bridge_port_mappings()
-                    .map_or(&[][..], Vec::as_slice),
-            )
-            .context("Invalid port mapping in package config")?
+        // bridge_id groups packages onto a shared bridge: an explicit
+        // network_name shares one, its absence gives a private bridge per package.
+        let bridge_id = if network_mode == NetworkMode::Bridge {
+            metadata
+                .get_container_network_bridge_network_name()
+                .cloned()
+                .unwrap_or_else(|| pkg_name.clone())
         } else {
-            None
+            pkg_name.clone()
         };
 
         let command: Arc<dyn ExecuteCommand> = Arc::new(ContainerCommand::from_package(
@@ -530,8 +516,8 @@ impl Package {
             executor,
             pkgfs_handle,
             effective_network,
+            bridge_id,
             container_interface,
-            port_mappings,
         );
         let transition_mgr = TransitionManager::new(Box::new(ops));
         let transition_mgr_ref = transition_mgr.clone();

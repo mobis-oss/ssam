@@ -156,7 +156,6 @@ mod tests {
                     bridge: Some(Bridge {
                         network_name: None,
                         interface_name: Some("eth1".to_string()),
-                        port_mappings: None,
                     }),
                 }),
             },
@@ -204,7 +203,6 @@ mod tests {
                     bridge: Some(Bridge {
                         network_name: Some("shared-net".to_string()),
                         interface_name: None,
-                        port_mappings: None,
                     }),
                 }),
             },

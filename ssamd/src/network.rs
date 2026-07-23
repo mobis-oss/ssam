@@ -1,16 +1,12 @@
 // Copyright 2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
-
-use anyhow::Context as _;
-use netavark::network::types::PortMapping;
 use rsa::sha2::{Digest, Sha256};
 
 pub mod actor;
 pub mod allocator;
 
-pub use actor::{NetworkHandle, NetworkManager};
+pub use actor::NetworkManager;
 
 /// Default in-container network interface name when the package config omits
 /// `[container.network] interface_name`.
@@ -28,22 +24,74 @@ pub(crate) fn pkg_hash10(pkg: &str) -> String {
     hex::encode(&Sha256::digest(pkg.as_bytes())[..5])
 }
 
-/// Host-side link helpers over `/sys/class/net` and netlink: existence checks
-/// plus link deletion. Bridge creation itself is netavark's responsibility;
-/// this module only queries and removes existing links.
+/// Host bridge interface name for a bridge id (`network_name` or package name).
+///
+/// `ssb-<hash10>`. The `ssb-` prefix (vs. `ssam-` for veth/netns) both marks it
+/// as a bridge in a sysfs scan and is what the netavark firewall hash rebuilds
+/// from — keep it stable.
+#[must_use]
+pub fn bridge_name(bridge_id: &str) -> String {
+    format!("ssb-{}", pkg_hash10(bridge_id))
+}
+
+/// Host-side link helpers over `/sys/class/net` and netlink: existence checks,
+/// master/address lookups, and link deletion. Bridge creation itself is
+/// netavark's responsibility; this module only queries and removes existing links.
 pub mod link {
     use std::path::Path;
 
     use netavark::network::netlink::Socket;
     use netavark::network::netlink_route::{LinkID, NetlinkRoute};
+    use netlink_packet_route::link::LinkAttribute;
 
     /// Sysfs root for network interfaces.
-    const SYS_CLASS_NET: &str = "/sys/class/net";
+    pub(crate) const SYS_CLASS_NET: &str = "/sys/class/net";
 
     /// Whether a host link (bridge, veth, …) named `name` exists.
     #[must_use]
     pub fn exists(name: &str) -> bool {
         Path::new(SYS_CLASS_NET).join(name).exists()
+    }
+
+    /// Open a netlink route socket to the host network namespace.
+    fn open_route_socket() -> anyhow::Result<Socket<NetlinkRoute>> {
+        Socket::<NetlinkRoute>::new()
+            .map_err(|e| anyhow::anyhow!("Failed to open host netlink socket: {e}"))
+    }
+
+    /// The bridge that `veth` is a port of (its netlink master), or `None` if
+    /// `veth` is not enslaved to any bridge.
+    ///
+    /// The kernel stores the master as an ifindex (`IFLA_MASTER`, the
+    /// "controller"), so this reads the index then looks up its name in a second
+    /// query.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the netlink socket cannot be opened or a link query fails. A veth
+    /// with no master is `Ok(None)`, not an error.
+    pub fn enslaving_bridge(veth: &str) -> anyhow::Result<Option<String>> {
+        let mut socket = open_route_socket()?;
+        let link = socket
+            .get_link(LinkID::Name(veth.to_owned()))
+            .map_err(|e| anyhow::anyhow!("Failed to get link {veth}: {e}"))?;
+
+        let controller = link.attributes.iter().find_map(|attr| match attr {
+            LinkAttribute::Controller(index) => Some(*index),
+            _ => None,
+        });
+
+        let Some(index) = controller else {
+            return Ok(None);
+        };
+
+        let master = socket
+            .get_link(LinkID::ID(index))
+            .map_err(|e| anyhow::anyhow!("Failed to get master link {index}: {e}"))?;
+        Ok(master.attributes.into_iter().find_map(|attr| match attr {
+            LinkAttribute::IfName(name) => Some(name),
+            _ => None,
+        }))
     }
 
     /// Delete a host-side link (e.g. a veth) by name via netlink. Absent = success.
@@ -60,8 +108,7 @@ pub mod link {
         if !exists(name) {
             return Ok(());
         }
-        let mut socket = Socket::<NetlinkRoute>::new()
-            .map_err(|e| anyhow::anyhow!("Failed to open host netlink socket: {e}"))?;
+        let mut socket = open_route_socket()?;
         socket
             .del_link(LinkID::Name(name.to_owned()))
             .map_err(|e| anyhow::anyhow!("Failed to delete link {name}: {e}"))
@@ -104,7 +151,9 @@ pub mod netns {
     use std::thread;
 
     use anyhow::{Context, anyhow};
+    use rustix::fs::{Mode, OFlags, open};
     use rustix::io::Errno;
+    use rustix::ioctl::{Ioctl, IoctlOutput, Opcode, ioctl as rustix_ioctl};
     use rustix::mount::{UnmountFlags, mount_bind, unmount};
     use rustix::thread::{UnshareFlags, unshare_unsafe};
 
@@ -189,9 +238,16 @@ pub mod netns {
         // (`NetworkManager::new`). Under sticky /tmp a confirmed root-0700 tree
         // cannot then be tampered by non-root, so callers trust it here without
         // re-checking; existence below is only meaningful under that trusted tree.
-        // Idempotent: a surviving namespace is preserved across restart.
+        // Idempotent: a real surviving netns is preserved across restart. A bare
+        // target left by a crash mid-create is not a netns — clear it and recreate,
+        // else a later setns on the plain file fails forever.
         if path.exists() {
-            return Ok(());
+            if verify_is_netns(path).is_ok() {
+                return Ok(());
+            }
+            delete_named_netns(path).with_context(|| {
+                format!("Failed to clear stale netns target {}", path.display())
+            })?;
         }
 
         // Create the empty bind-mount target.
@@ -248,12 +304,11 @@ pub mod netns {
     /// Returns an error only for unexpected unmount or removal failures (an absent
     /// target is not an error).
     pub fn delete_named_netns(path: &Path) -> anyhow::Result<()> {
-        if let Err(e) = unmount(path, UnmountFlags::DETACH) {
-            // Not mounted (EINVAL) or absent (ENOENT) are expected and ignored.
-            if !matches!(e, Errno::INVAL | Errno::NOENT) {
-                return Err(e)
-                    .with_context(|| format!("Failed to unmount netns {}", path.display()));
-            }
+        // Not mounted (EINVAL) or absent (ENOENT) are expected and ignored.
+        if let Err(e) = unmount(path, UnmountFlags::DETACH)
+            && !matches!(e, Errno::INVAL | Errno::NOENT)
+        {
+            return Err(e).with_context(|| format!("Failed to unmount netns {}", path.display()));
         }
 
         match fs::remove_file(path) {
@@ -263,6 +318,63 @@ pub mod netns {
                 Err(e).with_context(|| format!("Failed to remove netns target {}", path.display()))
             }
         }
+    }
+
+    /// `NS_GET_NSTYPE` (`linux/nsfs.h`, `_IO(0xb7, 3)`) takes no data; the
+    /// namespace type is the ioctl's own return value rather than something
+    /// written through a pointer, so `output_from_ptr` reads `out` instead of
+    /// the (null) argument pointer.
+    struct NsGetNsType;
+
+    unsafe impl Ioctl for NsGetNsType {
+        type Output = i32;
+
+        const IS_MUTATING: bool = false;
+
+        fn opcode(&self) -> Opcode {
+            linux_raw_sys::ioctl::NS_GET_NSTYPE
+        }
+
+        fn as_ptr(&mut self) -> *mut rustix::ffi::c_void {
+            std::ptr::null_mut()
+        }
+
+        unsafe fn output_from_ptr(
+            out: IoctlOutput,
+            _extract_output: *mut rustix::ffi::c_void,
+        ) -> rustix::io::Result<Self::Output> {
+            Ok(out)
+        }
+    }
+
+    /// Verify `path` is an existing network namespace (`NS_GET_NSTYPE` == `CLONE_NEWNET`).
+    /// Used for the external-netns container mode: the sysadmin provisions the netns;
+    /// this only fails fast+clean on a wrong/missing path rather than deep in crun.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the path cannot be opened or is not a network namespace.
+    // Safety: Debug format ({:?}) for paths instead of Display to prevent log
+    // injection via special characters in netns paths.
+    #[allow(clippy::use_debug, clippy::unnecessary_debug_formatting)]
+    pub fn verify_is_netns(path: &Path) -> anyhow::Result<()> {
+        // NONBLOCK: a package-controlled path could be a writer-less FIFO whose
+        // O_RDONLY open would block this thread forever.
+        let fd = open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .with_context(|| format!("Failed to open {path:?}"))?;
+        // SAFETY: NS_GET_NSTYPE takes no arguments and only reads namespace type
+        // metadata off `fd`; it does not mutate userspace memory.
+        let ns_type = unsafe { rustix_ioctl(fd, NsGetNsType) }
+            .with_context(|| format!("NS_GET_NSTYPE ioctl failed on {path:?}"))?;
+        anyhow::ensure!(
+            ns_type == linux_raw_sys::general::CLONE_NEWNET.cast_signed(),
+            "{path:?} is not a network namespace (NS_GET_NSTYPE returned {ns_type:#x})"
+        );
+        Ok(())
     }
 
     #[cfg(test)]
@@ -312,6 +424,15 @@ pub mod netns {
         }
 
         #[test]
+        fn bridge_name_is_stable_sized_and_distinct() {
+            let name = crate::network::bridge_name("foo");
+            assert_eq!(name, crate::network::bridge_name("foo"));
+            assert_eq!(name.len(), 14);
+            assert!(name.starts_with("ssb-"));
+            assert_ne!(name, crate::network::allocator::veth_host_name("foo"));
+        }
+
+        #[test]
         fn netns_path_is_under_temp_dir() {
             let path = netns_path("ssam-abcdef0123");
             let expected = std::env::temp_dir()
@@ -344,138 +465,41 @@ pub mod netns {
             assert!(!path.exists());
             // Idempotent delete on an absent namespace is a no-op.
             delete_named_netns(&path).unwrap();
+
+            // A stale bare target (crash mid-create) is not a netns: create must
+            // clear and recreate it rather than trust bare existence.
+            fs::File::create(&path).unwrap();
+            assert!(verify_is_netns(&path).is_err());
+            create_named_netns(&path).unwrap();
+            verify_is_netns(&path).expect("stale target must be recreated as a real netns");
+            delete_named_netns(&path).unwrap();
         }
-    }
-}
 
-const MIN_PUBLISHABLE_HOST_PORT: u16 = 1024;
-
-const PROTO_TCP: &str = "tcp";
-const PROTO_UDP: &str = "udp";
-const PROTO_SCTP: &str = "sctp";
-
-/// Parse Docker-style `port_mappings` strings into netavark [`PortMapping`]s.
-///
-/// An empty or absent list yields `None` (not `Some(vec![])`).
-pub(crate) fn parse_port_mappings(bindings: &[String]) -> anyhow::Result<Option<Vec<PortMapping>>> {
-    if bindings.is_empty() {
-        return Ok(None);
-    }
-    let mappings = bindings
-        .iter()
-        .map(|b| parse_port_mapping(b))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut seen = HashSet::new();
-    for mapping in &mappings {
-        anyhow::ensure!(
-            seen.insert((mapping.protocol.clone(), mapping.host_port)),
-            "duplicate host port {}/{} in port mappings",
-            mapping.host_port,
-            mapping.protocol
-        );
-    }
-    Ok(Some(mappings))
-}
-
-/// Parse a single `HOST_PORT:CONTAINER_PORT[/PROTOCOL]` binding.
-///
-/// Protocol defaults to `tcp`; only lowercase `tcp`, `udp`, `sctp` are accepted.
-fn parse_port_mapping(binding: &str) -> anyhow::Result<PortMapping> {
-    let (ports, protocol) = binding.split_once('/').unwrap_or((binding, PROTO_TCP));
-    let protocol = match protocol {
-        PROTO_TCP | PROTO_UDP | PROTO_SCTP => protocol.to_owned(),
-        other => anyhow::bail!("invalid protocol {other:?} in port mapping {binding:?}"),
-    };
-    let (host, container) = ports
-        .split_once(':')
-        .with_context(|| format!("missing ':' in port mapping {binding:?}"))?;
-    let host_port: u16 = host
-        .parse()
-        .with_context(|| format!("invalid host port in port mapping {binding:?}"))?;
-    let container_port: u16 = container
-        .parse()
-        .with_context(|| format!("invalid container port in port mapping {binding:?}"))?;
-    anyhow::ensure!(
-        host_port >= MIN_PUBLISHABLE_HOST_PORT && host_port != libssam::remocon::CONTROL_PORT,
-        "host port {host_port} is reserved in port mapping {binding:?}"
-    );
-    anyhow::ensure!(
-        container_port != 0,
-        "container port 0 is invalid in port mapping {binding:?}"
-    );
-    Ok(PortMapping {
-        host_port,
-        container_port,
-        host_ip: "0.0.0.0".to_owned(),
-        protocol,
-        range: 1,
-    })
-}
-
-#[cfg(test)]
-mod port_tests {
-    use super::*;
-
-    #[test]
-    fn parse_port_mapping_defaults_to_tcp() {
-        let m = parse_port_mapping("8080:80").expect("valid binding");
-        assert_eq!(m.host_port, 8080);
-        assert_eq!(m.container_port, 80);
-        assert_eq!(m.protocol, "tcp");
-        assert_eq!(m.host_ip, "0.0.0.0");
-        assert_eq!(m.range, 1);
-    }
-
-    #[test]
-    fn parse_port_mapping_explicit_udp() {
-        let m = parse_port_mapping("5353:53/udp").expect("valid udp binding");
-        assert_eq!(m.host_port, 5353);
-        assert_eq!(m.container_port, 53);
-        assert_eq!(m.protocol, "udp");
-    }
-
-    #[test]
-    fn parse_port_mapping_explicit_sctp() {
-        let m = parse_port_mapping("9899:9899/sctp").expect("valid sctp binding");
-        assert_eq!(m.host_port, 9899);
-        assert_eq!(m.container_port, 9899);
-        assert_eq!(m.protocol, "sctp");
-    }
-
-    #[test]
-    fn parse_port_mappings_empty_is_none() {
-        assert!(parse_port_mappings(&[]).expect("empty ok").is_none());
-    }
-
-    #[test]
-    fn parse_port_mappings_rejects_duplicate_host_protocol() {
-        let bindings = ["8080:80".to_owned(), "8080:81/tcp".to_owned()];
-        assert!(parse_port_mappings(&bindings).is_err());
-    }
-
-    #[test]
-    fn parse_port_mapping_rejects_malformed() {
-        for bad in [
-            "8080",
-            "8080:",
-            ":80",
-            "8080:80:90",
-            "70000:80",
-            "8080:70000",
-            "8080:80/icmp",
-            "8080:80/tcp,udp",
-            "8080:80/TCP",
-            "8080:80/",
-            "0:80",
-            "8080:0",
-            "22:22",
-            "443:443",
-            "63737:80",
-        ] {
+        #[test]
+        fn verify_is_netns_rejects_non_netns_path() {
+            // /proc/self/ns/mnt supports NS_GET_NSTYPE (it is a namespace fd) but
+            // reports CLONE_NEWNS, not CLONE_NEWNET, so this exercises the real
+            // "wrong namespace type" rejection without requiring root.
+            let path = Path::new("/proc/self/ns/mnt");
+            let err =
+                verify_is_netns(path).expect_err("a mount namespace is not a network namespace");
             assert!(
-                parse_port_mapping(bad).is_err(),
-                "expected {bad:?} to be rejected"
+                format!("{err:#}").contains("not a network namespace"),
+                "unexpected error: {err:#}"
             );
+        }
+
+        #[test]
+        #[ignore = "requires root and CLONE_NEWNET; run under the Docker test harness"]
+        fn verify_is_netns_accepts_real_netns() {
+            let path = netns_path("ssam-verify-test");
+            let _ = delete_named_netns(&path);
+            ensure_netns_tree_trusted().unwrap();
+            create_named_netns(&path).unwrap();
+
+            verify_is_netns(&path).expect("a real netns must pass verification");
+
+            delete_named_netns(&path).unwrap();
         }
     }
 }
