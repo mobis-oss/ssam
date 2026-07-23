@@ -185,6 +185,11 @@ test_runtime_config_only() {
     verify_file_content "$output_file" "public_key_file_path = \"/usr/share/ssamd/prod.pub.key\"" "Runtime config - public key"
     verify_file_content "$output_file" "packages_cgroup = \"mcontainer.slice\"" "Runtime config - cgroup"
     verify_file_content "$output_file" "packages_ext = \"pkg\"" "Runtime config - extension"
+    verify_file_content "$output_file" "\[network\.bridge\]" "Runtime config - network section"
+    verify_file_content "$output_file" "enabled = false" "Runtime config - default bridge enabled"
+    verify_file_content "$output_file" "\[network\.bridge\.addr_pool\]" "Runtime config - addr_pool section"
+    verify_file_content "$output_file" 'base = "172.20.0.0/16"' "Runtime config - default base"
+    verify_file_content "$output_file" "size = 29" "Runtime config - default size"
     verify_no_placeholders "$output_file" "Runtime config"
 }
 
@@ -480,6 +485,116 @@ test_rpc_bind_ip() {
     verify_file_content "$output_file" "rpc_bind_ip = \"192.168.1.100\"" "Runtime config - rpc_bind_ip"
 }
 
+# Test 19: Network section CLI overrides
+test_network_overrides() {
+    print_test_header "Test 19: Network Section CLI Overrides"
+
+    local test_dir="${TEST_OUTPUT_DIR}/test19"
+    mkdir -p "$test_dir"
+    local output_file="${test_dir}/ssamd.toml"
+
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        --bridge-enabled true \
+        --bridge-pool-base 10.10.0.0/16 \
+        --bridge-pool-size 28
+
+    verify_file_content "$output_file" "\[network\.bridge\]" "Runtime config - network section (override)"
+    verify_file_content "$output_file" "enabled = true" "Runtime config - bridge enabled override"
+    verify_file_content "$output_file" "\[network\.bridge\.addr_pool\]" "Runtime config - addr_pool section (override)"
+    verify_file_content "$output_file" 'base = "10.10.0.0/16"' "Runtime config - base override"
+    verify_file_content "$output_file" "size = 28" "Runtime config - size override"
+    verify_no_placeholders "$output_file" "Runtime config (network override)"
+}
+
+# Test 20: Error handling - network arg validation
+test_network_arg_validation() {
+    print_test_header "Test 20: Error Handling - Network Arg Validation"
+
+    local output rc
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --bridge-enabled notabool 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "bridge-enabled must be 'true' or 'false'"; then
+        print_result "Error handling - invalid bridge-enabled" "PASS"
+    else
+        print_result "Error handling - invalid bridge-enabled" "FAIL"
+    fi
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --bridge-pool-size 99 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "bridge-pool-size must be an integer in \[1, 30\]"; then
+        print_result "Error handling - bridge-pool-size out of range" "PASS"
+    else
+        print_result "Error handling - bridge-pool-size out of range" "FAIL"
+    fi
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --bridge-pool-size abc 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "bridge-pool-size must be an integer in \[1, 30\]"; then
+        print_result "Error handling - bridge-pool-size non-integer" "PASS"
+    else
+        print_result "Error handling - bridge-pool-size non-integer" "FAIL"
+    fi
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --bridge-pool-base not-a-cidr 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "bridge-pool-base must be an IPv4 CIDR"; then
+        print_result "Error handling - bridge-pool-base malformed shape" "PASS"
+    else
+        print_result "Error handling - bridge-pool-base malformed shape" "FAIL"
+    fi
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --bridge-pool-base '172.20.0.0/16"; extra = 1 #' 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "bridge-pool-base must be an IPv4 CIDR"; then
+        print_result "Error handling - bridge-pool-base rejects TOML injection" "PASS"
+    else
+        print_result "Error handling - bridge-pool-base rejects TOML injection" "FAIL"
+    fi
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --bridge-pool-base 172.20.0.999/16 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "octet > 255"; then
+        print_result "Error handling - bridge-pool-base octet out of range" "PASS"
+    else
+        print_result "Error handling - bridge-pool-base octet out of range" "FAIL"
+    fi
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --bridge-pool-base 172.20.0.0/40 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "prefix must be <= 32"; then
+        print_result "Error handling - bridge-pool-base prefix out of range" "PASS"
+    else
+        print_result "Error handling - bridge-pool-base prefix out of range" "FAIL"
+    fi
+
+    local test_dir="${TEST_OUTPUT_DIR}/test20"
+    mkdir -p "$test_dir"
+    local output_file="${test_dir}/ssamd.toml"
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        --bridge-pool-size 29 \
+        --bridge-pool-base 10.0.0.0/8 \
+        --bridge-enabled true
+    verify_file_content "$output_file" "size = 29" "Valid bridge-pool-size still succeeds"
+    verify_file_content "$output_file" 'base = "10.0.0.0/8"' "Valid bridge-pool-base still succeeds"
+}
+
 # Test 15: AppArmor profile with /var/run special case
 test_apparmor_var_run_special_case() {
     print_test_header "Test 15: AppArmor Profile with /var/run Special Case"
@@ -612,6 +727,8 @@ main() {
     test_all_configs_simultaneously
     test_service_unit_defaults
     test_rpc_bind_ip
+    test_network_overrides
+    test_network_arg_validation
     test_apparmor_var_run_special_case
     test_apparmor_run_special_case
     test_apparmor_var_run_prefix_collision

@@ -33,6 +33,9 @@ SSAMD_CONFIG=(
     [CONF_RPC_BIND_IP]="127.0.0.1"
     [CONF_PACKAGES_CGROUP]=""
     [CONF_PACKAGES_OVERLAYFS_ROOT]=""
+    [CONF_BRIDGE_ENABLED]="false"
+    [CONF_BRIDGE_POOL_BASE]="172.20.0.0/16"
+    [CONF_BRIDGE_POOL_SIZE]="29"
 )
 
 error_exit() {
@@ -81,6 +84,12 @@ Arguments for SSAMD configuration (All paths below are on the target device)
                                  (default: "${SSAMD_CONFIG[CONF_PACKAGES_EXT]}")
     --rpc-bind-ip          IP    IP address to bind the ssamd RPC server
                                  (default: "${SSAMD_CONFIG[CONF_RPC_BIND_IP]}")
+    --bridge-enabled       BOOL  Enable per-container bridge networking.
+                                 (default: ${SSAMD_CONFIG[CONF_BRIDGE_ENABLED]})
+    --bridge-pool-base     CIDR  IP pool bridges carve container subnets from.
+                                 (default: "${SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]}")
+    --bridge-pool-size     BITS  Prefix size of each per-bridge subnet.
+                                 (default: ${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]})
 
 Example - Generate all available configuration files:
     $(basename "$0") \\
@@ -129,6 +138,9 @@ update_template_common () {
         -e "s|@CONF_PACKAGES_CGROUP@|${SSAMD_CONFIG[CONF_PACKAGES_CGROUP]}|g" \
         -e "s|@CONF_PACKAGES_EXT@|${SSAMD_CONFIG[CONF_PACKAGES_EXT]}|g" \
         -e "s|@CONF_RPC_BIND_IP@|${SSAMD_CONFIG[CONF_RPC_BIND_IP]}|g" \
+        -e "s|@CONF_BRIDGE_ENABLED@|${SSAMD_CONFIG[CONF_BRIDGE_ENABLED]}|g" \
+        -e "s|@CONF_BRIDGE_POOL_BASE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]}|g" \
+        -e "s|@CONF_BRIDGE_POOL_SIZE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]}|g" \
         - > "$output_filename"
 }
 
@@ -290,7 +302,7 @@ generate_ssamd_config() {
 # Parse command line arguments
 parse_arguments() {
     temp_args=$(getopt -o h \
-        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,rpc-bind-ip: \
+        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,rpc-bind-ip:,bridge-enabled:,bridge-pool-base:,bridge-pool-size: \
         -n "$(basename "$0")" -- "$@") || error_exit "Invalid argument"
 
     eval set -- "$temp_args"
@@ -362,6 +374,40 @@ parse_arguments() {
                 SSAMD_CONFIG[CONF_RPC_BIND_IP]="$2"
                 shift 2
                 ;;
+            --bridge-enabled)
+                case "$2" in
+                    true|false) ;;
+                    *) error_exit "--bridge-enabled must be 'true' or 'false', got: '$2'" ;;
+                esac
+                SSAMD_CONFIG[CONF_BRIDGE_ENABLED]="$2"
+                shift 2
+                ;;
+            --bridge-pool-base)
+                # Shape-validate: gets sed-substituted into quoted TOML as-is.
+                if ! [[ "$2" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+                    error_exit "--bridge-pool-base must be an IPv4 CIDR (e.g. 172.20.0.0/16), got: '$2'"
+                fi
+                IFS='./' read -r o1 o2 o3 o4 prefix <<< "$2"
+                for octet in "$o1" "$o2" "$o3" "$o4"; do
+                    if [ "$octet" -gt 255 ]; then
+                        error_exit "--bridge-pool-base has an octet > 255, got: '$2'"
+                    fi
+                done
+                if [ "$prefix" -gt 32 ]; then
+                    error_exit "--bridge-pool-base prefix must be <= 32, got: '$2'"
+                fi
+                SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]="$2"
+                shift 2
+                ;;
+            --bridge-pool-size)
+                # Bare TOML int: reject non-ints (unparsable TOML panics ssamd at
+                # init); /31,/32 leave no usable host, so cap at 30.
+                if ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -lt 1 ] || [ "$2" -gt 30 ]; then
+                    error_exit "--bridge-pool-size must be an integer in [1, 30], got: '$2'"
+                fi
+                SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]="$2"
+                shift 2
+                ;;
             --)
                 shift
                 break
@@ -420,6 +466,13 @@ public_key_file_path = \"@CONF_PUBLIC_KEY_FILE_PATH@\"
 packages_cgroup = \"@CONF_PACKAGES_CGROUP@\"
 packages_ext = \"@CONF_PACKAGES_EXT@\"
 rpc_bind_ip = \"@CONF_RPC_BIND_IP@\"
+
+[network.bridge]
+enabled = @CONF_BRIDGE_ENABLED@
+
+[network.bridge.addr_pool]
+base = \"@CONF_BRIDGE_POOL_BASE@\"
+size = @CONF_BRIDGE_POOL_SIZE@
 "
 
 TEMPLATE_SSAMD_SERVICE_UNIT="
