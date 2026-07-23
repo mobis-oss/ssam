@@ -332,3 +332,201 @@ fn main() -> anyhow::Result<()> {
     let args = parse_cli()?;
     run(args, Box::new(command::SystemCommandRunner))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::testing::MockCommandRunner;
+    use tempfile::tempdir;
+
+    fn workspace_at(root: &Path) -> Workspace {
+        Workspace::new(root, Box::new(MockCommandRunner::new()))
+    }
+
+    #[test]
+    fn new_derives_paths_and_creates_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("ws"); // absolute, not yet existing
+        let ws = workspace_at(&root);
+
+        assert!(ws.path.is_absolute());
+        assert_eq!(ws.path, root);
+        assert_eq!(ws.package_config, root.join(PACKAGE_CONFIG_FILENAME));
+        assert_eq!(ws.runtime_config, root.join(RUNTIME_CONFIG_FILENAME));
+        assert_eq!(ws.seccomp_policy, root.join(SECCOMP_POLICY_FILENAME));
+        assert_eq!(ws.pkgfs, root.join(PACKAGE_FILESYSTEM_PATH));
+        assert_eq!(ws.intermediate_dir, root.join(PACKAGE_INTERMEDIATE_PATH));
+        // new() creates the workspace root.
+        assert!(root.is_dir());
+        // Relative-path / AppImage-OWD resolution is CWD/env-dependent and not
+        // exercised here to keep the test hermetic.
+    }
+
+    #[test]
+    fn prepare_generates_missing_config_files() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+
+        ws.prepare("myapp").unwrap();
+
+        let cfg = std::fs::read_to_string(&ws.package_config).unwrap();
+        assert!(cfg.contains("name = \"myapp\""));
+        let runtime = std::fs::read_to_string(&ws.runtime_config).unwrap();
+        assert!(serde_json::from_str::<Value>(&runtime).is_ok());
+        let seccomp = std::fs::read_to_string(&ws.seccomp_policy).unwrap();
+        assert!(serde_json::from_str::<Value>(&seccomp).is_ok());
+    }
+
+    #[test]
+    fn prepare_keeps_existing_files() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        std::fs::write(&ws.package_config, "SENTINEL_CONFIG").unwrap();
+        std::fs::write(&ws.runtime_config, "SENTINEL_RUNTIME").unwrap();
+        std::fs::write(&ws.seccomp_policy, "SENTINEL_SECCOMP").unwrap();
+
+        ws.prepare("myapp").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&ws.package_config).unwrap(),
+            "SENTINEL_CONFIG"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ws.runtime_config).unwrap(),
+            "SENTINEL_RUNTIME"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ws.seccomp_policy).unwrap(),
+            "SENTINEL_SECCOMP"
+        );
+    }
+
+    #[test]
+    fn prepare_intermediate_dir_creates_when_missing() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        assert!(!ws.intermediate_dir.exists());
+
+        ws.prepare_intermediate_dir().unwrap();
+
+        assert!(ws.intermediate_dir.is_dir());
+    }
+
+    #[test]
+    fn prepare_intermediate_dir_is_idempotent_for_existing_dir() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        std::fs::create_dir(&ws.intermediate_dir).unwrap();
+
+        ws.prepare_intermediate_dir().unwrap();
+
+        assert!(ws.intermediate_dir.is_dir());
+    }
+
+    #[test]
+    fn prepare_intermediate_dir_bails_when_path_is_file() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        std::fs::write(&ws.intermediate_dir, b"x").unwrap();
+
+        assert!(ws.prepare_intermediate_dir().is_err());
+    }
+
+    // --- pure helpers (B) ---
+
+    #[test]
+    fn root_hash_path_appends_suffix_in_intermediate_dir() {
+        let out = root_hash_path(
+            Path::new("/tmp/build/pkgfs.erofs-lz4hc"),
+            Path::new("/ws/intermediate"),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            Path::new("/ws/intermediate/pkgfs.erofs-lz4hc.root_hash")
+        );
+    }
+
+    #[test]
+    fn root_hash_path_errors_without_filename() {
+        assert!(root_hash_path(Path::new("/"), Path::new("/ws/intermediate")).is_err());
+    }
+
+    #[test]
+    fn resolve_output_path_prefers_explicit() {
+        let out = resolve_output_path(Some("/out/custom.ssam"), Path::new("/ws"), "app", "1.2.3");
+        assert_eq!(out, Path::new("/out/custom.ssam"));
+    }
+
+    #[test]
+    fn resolve_output_path_defaults_to_name_version() {
+        let out = resolve_output_path(None, Path::new("/ws"), "app", "1.2.3");
+        assert_eq!(out, Path::new("/ws/app-1.2.3.ssam"));
+    }
+
+    // --- CLI parsing (C) ---
+
+    #[test]
+    fn cli_requires_workspace() {
+        assert!(Cli::try_parse_from(["ssam-wrap"]).is_err());
+    }
+
+    #[test]
+    fn cli_parses_workspace_and_pkgfs_type() {
+        let cli = Cli::try_parse_from(["ssam-wrap", "-t", "erofs-lz4", "myws"]).unwrap();
+        assert_eq!(cli.workspace, "myws");
+        assert_eq!(
+            cli.wrap_only_args.pkgfs_type,
+            Some(pkgfs::ImageType::ErofsLz4)
+        );
+        assert!(cli.prepare.is_none());
+    }
+
+    #[test]
+    fn cli_parses_src_oci_arch() {
+        let cli = Cli::try_parse_from(["ssam-wrap", "-a", "amd64", "myws"]).unwrap();
+        assert_eq!(cli.src_oci_arch, Some(pkgfs::OciArchitecture::Amd64));
+    }
+
+    #[test]
+    fn cli_rejects_invalid_pkgfs_type() {
+        assert!(Cli::try_parse_from(["ssam-wrap", "-t", "bogus", "myws"]).is_err());
+    }
+
+    #[test]
+    fn cli_prepare_conflicts_with_wrap_only_args() {
+        // --prepare cannot be combined with wrap-only args like --private-key.
+        assert!(Cli::try_parse_from(["ssam-wrap", "-p", "app", "-k", "key.pem", "myws"]).is_err());
+    }
+
+    // --- run() orchestration (A) ---
+
+    #[test]
+    fn run_prepare_mode_generates_workspace_and_runs_no_commands() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let cli = Cli::try_parse_from(["ssam-wrap", "-p", "myapp", ws.to_str().unwrap()]).unwrap();
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+
+        run(cli, Box::new(mock)).unwrap();
+
+        assert!(ws.join(PACKAGE_CONFIG_FILENAME).exists());
+        assert!(ws.join(RUNTIME_CONFIG_FILENAME).exists());
+        assert!(ws.join(SECCOMP_POLICY_FILENAME).exists());
+        assert!(ws.join(PACKAGE_FILESYSTEM_PATH).is_dir());
+        // Prepare mode invokes no external commands.
+        assert!(handle.calls().is_empty());
+    }
+
+    #[test]
+    fn run_wrap_mode_requires_private_key() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        // Wrap mode (no --prepare) without --private-key.
+        let cli = Cli::try_parse_from(["ssam-wrap", ws.to_str().unwrap()]).unwrap();
+
+        let err = run(cli, Box::new(MockCommandRunner::new())).unwrap_err();
+        assert!(err.to_string().contains("Private key"));
+    }
+}
