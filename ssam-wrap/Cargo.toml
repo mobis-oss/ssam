@@ -20,3 +20,6 @@ toml.workspace = true
 [build-dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

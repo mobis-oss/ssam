@@ -142,3 +142,169 @@ pub fn build_image(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::testing::MockCommandRunner;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn workspace_at(root: &Path) -> crate::Workspace {
+        crate::Workspace::new(root, Box::new(MockCommandRunner::new()))
+    }
+
+    #[test]
+    fn image_type_maps_to_filename_and_mkfs_args() {
+        let cases = [
+            (ImageType::Ext4, "pkgfs.ext4", vec!["mkfs.ext4"]),
+            (ImageType::Erofs, "pkgfs.erofs", vec!["mkfs.erofs"]),
+            (
+                ImageType::ErofsLz4,
+                "pkgfs.erofs-lz4",
+                vec!["mkfs.erofs", "-zlz4"],
+            ),
+            (
+                ImageType::ErofsLz4hc,
+                "pkgfs.erofs-lz4hc",
+                vec!["mkfs.erofs", "-zlz4hc"],
+            ),
+        ];
+        for (ty, name, args) in cases {
+            let (n, a): (&str, Vec<&str>) = ty.into();
+            assert_eq!(n, name);
+            assert_eq!(a, args);
+        }
+    }
+
+    #[test]
+    fn image_type_strum_roundtrip_and_default() {
+        assert_eq!(ImageType::default(), ImageType::ErofsLz4hc);
+        assert_eq!(ImageType::ErofsLz4hc.to_string(), "erofs-lz4hc");
+        assert_eq!(ImageType::ErofsLz4.to_string(), "erofs-lz4");
+        assert_eq!("ext4".parse::<ImageType>().unwrap(), ImageType::Ext4);
+        assert_eq!(
+            "erofs-lz4hc".parse::<ImageType>().unwrap(),
+            ImageType::ErofsLz4hc
+        );
+        assert!("bogus".parse::<ImageType>().is_err());
+    }
+
+    #[test]
+    fn oci_architecture_display_and_default() {
+        assert_eq!(OciArchitecture::default(), OciArchitecture::Arm64);
+        assert_eq!(OciArchitecture::Arm64.to_string(), "arm64");
+        assert_eq!(OciArchitecture::Amd64.to_string(), "amd64");
+    }
+
+    #[test]
+    fn supported_transports_prefix_matching() {
+        let is_container = |s: &str| {
+            SUPPORTED_CONTAINER_TRANSPORTS
+                .iter()
+                .any(|p| s.starts_with(p))
+        };
+        assert!(is_container("docker://busybox"));
+        assert!(is_container("docker-daemon:img"));
+        assert!(is_container("oci:/path:tag"));
+        assert!(!is_container("/local/path"));
+        assert!(!is_container("./rel"));
+    }
+
+    #[test]
+    fn get_pkgfs_src_errors_when_missing() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        assert!(get_pkgfs_src(&ws).is_err());
+    }
+
+    #[test]
+    fn get_pkgfs_src_returns_directory() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        std::fs::create_dir(&ws.pkgfs).unwrap();
+        assert_eq!(get_pkgfs_src(&ws).unwrap(), ws.pkgfs);
+    }
+
+    #[test]
+    fn get_pkgfs_src_follows_symlink() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("real_src");
+        std::fs::create_dir(&target).unwrap();
+        let ws = workspace_at(dir.path());
+        symlink(&target, &ws.pkgfs).unwrap();
+        assert_eq!(get_pkgfs_src(&ws).unwrap(), target.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn get_pkgfs_src_rejects_plain_file() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        std::fs::write(&ws.pkgfs, b"x").unwrap();
+        assert!(get_pkgfs_src(&ws).is_err());
+    }
+
+    #[test]
+    fn prepare_creates_pkgfs_dir_when_no_src() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        prepare(&ws, None, None).unwrap();
+        assert!(ws.pkgfs.is_dir());
+    }
+
+    #[test]
+    fn prepare_symlinks_local_src() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let ws = workspace_at(dir.path());
+        prepare(&ws, Some(src.to_str().unwrap()), None).unwrap();
+        assert!(ws.pkgfs.is_symlink());
+        assert_eq!(
+            ws.pkgfs.canonicalize().unwrap(),
+            src.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn prepare_overwrites_existing_pkgfs_with_local_src() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        std::fs::create_dir(&ws.pkgfs).unwrap(); // pre-existing pkgfs
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        prepare(&ws, Some(src.to_str().unwrap()), None).unwrap();
+        assert!(ws.pkgfs.is_symlink());
+    }
+
+    #[test]
+    fn prepare_dispatches_docker_src_to_skopeo() {
+        let dir = tempdir().unwrap();
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+        let ws = crate::Workspace::new(dir.path(), Box::new(mock));
+        // Fails later (no real umoci output on disk), but the docker branch must
+        // reach skopeo.
+        let _ = prepare(&ws, Some("docker://busybox"), None);
+        assert!(handle.calls().iter().any(|c| c.cmd == "skopeo"));
+    }
+
+    #[test]
+    fn build_image_returns_image_file_as_is() {
+        let dir = tempdir().unwrap();
+        let img = dir.path().join("image.bin");
+        std::fs::write(&img, b"img").unwrap();
+        let ws = workspace_at(dir.path());
+        symlink(&img, &ws.pkgfs).unwrap(); // pkgfs points at an image file
+        let out = build_image(&ws, None).unwrap();
+        assert_eq!(out, img.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn build_image_errors_when_pkgfs_missing() {
+        let dir = tempdir().unwrap();
+        let ws = workspace_at(dir.path());
+        assert!(build_image(&ws, None).is_err());
+    }
+}
