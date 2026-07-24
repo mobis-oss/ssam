@@ -187,8 +187,10 @@ impl FormatVerity<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{aligned_hash_offset, build_format_args};
+    use super::{FormatVerity, VeritySetup, aligned_hash_offset, build_format_args};
+    use crate::command::testing::{MockCommandRunner, MockResponse};
     use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn computes_aligned_pkgfs_verity_hash_offset() {
@@ -248,5 +250,81 @@ mod tests {
         );
         assert_eq!(args[0], "--foo");
         assert_eq!(args[1], "--data-block-size=4096");
+    }
+
+    // --- FormatVerity::from_parts (A) ---
+
+    #[test]
+    fn from_parts_builds_format_command_and_offset() {
+        let image = Path::new("/tmp/pkgfs.img");
+        let root_hash = Path::new("/tmp/root.hash");
+        let fv = FormatVerity::from_parts(image, Some(root_hash), 4096, 8000, true, vec![]);
+
+        // hash_offset aligns data_size up to the block boundary.
+        assert_eq!(fv.hash_offset, aligned_hash_offset(8000, 4096));
+        assert_eq!(fv.hash_offset, 8192);
+        assert_eq!(fv.data_size, 8000);
+        assert_eq!(fv.root_hash_file.as_deref(), Some(root_hash));
+        assert_eq!(fv.image_path, image);
+        assert_eq!(fv.cmd.action, "format");
+        assert_eq!(
+            fv.cmd.args,
+            build_format_args(4096, 8192, true, Some(root_hash), image, vec![])
+        );
+    }
+
+    // --- VeritySetup::run command wiring (B) ---
+
+    #[test]
+    fn veritysetup_run_prepends_action_and_captures_both_streams() {
+        let vs = VeritySetup {
+            action: "format",
+            args: vec!["--foo".to_owned(), "img".to_owned()],
+        };
+        let mock = MockCommandRunner::new();
+        let handle = mock.clone();
+
+        vs.run(&mock).unwrap();
+
+        let calls = handle.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cmd, "veritysetup");
+        assert_eq!(calls[0].arg_strs(), vec!["format", "--foo", "img"]);
+        // veritysetup output is captured so FormatVerity::run can inspect it.
+        assert!(calls[0].capture.stdout);
+        assert!(calls[0].capture.stderr);
+    }
+
+    // --- FormatVerity::run error branches (C) ---
+
+    #[test]
+    fn run_bails_on_command_failure() {
+        let dir = tempdir().unwrap();
+        let img = dir.path().join("pkgfs.img");
+        std::fs::write(&img, vec![0u8; 100]).unwrap();
+        let fv = FormatVerity::from_parts(&img, None, 4096, 100, true, vec![]);
+
+        let mock = MockCommandRunner::with_responses(vec![MockResponse::failure(1, "boom")]);
+        let err = fv.run(&mock).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to create dm-verity hash tree")
+        );
+    }
+
+    #[test]
+    fn run_bails_when_hash_offset_exceeds_file_size() {
+        let dir = tempdir().unwrap();
+        let img = dir.path().join("pkgfs.img");
+        std::fs::write(&img, vec![0u8; 100]).unwrap(); // 100-byte file
+
+        // data_size=100 -> hash_offset = aligned(100, 4096) = 4096 > 100.
+        let fv = FormatVerity::from_parts(&img, None, 4096, 100, true, vec![]);
+
+        // Command "succeeds" but the mock doesn't grow the file, so the hash
+        // area would start past EOF.
+        let mock = MockCommandRunner::new();
+        let err = fv.run(&mock).unwrap_err();
+        assert!(err.to_string().contains("Image file smaller than expected"));
     }
 }
