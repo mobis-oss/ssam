@@ -36,8 +36,6 @@ flowchart TB
   DEC -->|"bundled only"| L1["load bundled"]
   DEC -->|"downloaded only"| L2["load downloaded"]
   DEC -->|"both — shadow"| L3["load downloaded<br/>bundled not loaded, path recorded<br/>(restored on removal)"]
-  classDef data fill:#eef1f5,stroke:#94a3b8,color:#334155;
-  class BD,DL data
 ```
 
 ## Components

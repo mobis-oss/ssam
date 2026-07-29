@@ -10,9 +10,8 @@ file, or a Docker/OCI container image — and produces a signed,
 integrity-protected SSAM package that `ssamd` can install and run as a
 container.
 
-> For a step-by-step walkthrough of creating a package, see the
+> 📖 For a step-by-step walkthrough of creating a package, see the
 > **[Wrapping a SSAM — Package Creation Guide](../guides/wrapping-a-ssam.md)**.
-> This document is the command-line **reference**: options, modes, and behavior.
 
 ---
 
@@ -54,14 +53,13 @@ are installed and available on `PATH`:
 
 `ssam-wrap` operates in one of two mutually exclusive modes:
 
-- **Prepare mode** (`--prepare`) — scaffolds template config files (`config.toml`,
+- **Prepare mode** (`--prepare`) — generates template config files (`config.toml`,
   `runtime.json`, `seccomp.json`) in the workspace. Never overwrites existing files.
 - **Wrap mode** (default, requires `--private-key`) — builds the package filesystem
   image, computes the *dm-verity* hash tree, and signs it into the final SSAM
   package file.
 
-For each step in detail and how to use them, see the
-[Package Creation Guide](../guides/wrapping-a-ssam.md).
+> 📖 For each step in detail and how to use them, see the [Package Creation Guide](../guides/wrapping-a-ssam.md).
 
 ---
 
@@ -81,14 +79,14 @@ ssam-wrap [OPTIONS] <WORKSPACE>
 
 | Option | Long form | Wrap-only | Description |
 | --- | --- | --- | --- |
-| `-p <PACKAGE_NAME>` | `--prepare <PACKAGE_NAME>` | — | Run in **prepare mode**: generate `config.toml`, `runtime.json`, and `seccomp.json` scaffolding for a package of that name. |
+| `-p <PACKAGE_NAME>` | `--prepare <PACKAGE_NAME>` | — | Run in **prepare mode**: generate `config.toml`, `runtime.json`, and `seccomp.json` for a package of that name. |
 | `-s <SRC>` | `--pkgfs-src <SRC>` | — | Package filesystem source. Either a local path (directory or image file) or a supported container transport URI (see below). |
 | `-a <ARCH>` | `--src-oci-arch <ARCH>` | — | Source image architecture for container transports: `arm64` (default) or `amd64`. Ignored for non-container sources. |
 | `-k <FILE>` | `--private-key <FILE>` | ✓ | RSA private key used to sign the package. **Required in wrap mode.** |
 | `-o <FILE>` | `--output <FILE>` | ✓ | Output package path. Defaults to `<WORKSPACE>/<name>-<version>.ssam`. |
 | `-t <TYPE>` | `--pkgfs-type <TYPE>` | ✓ | Package filesystem image type. Only used when the source is a directory. One of `ext4`, `erofs`, `erofs-lz4`, `erofs-lz4hc` (default). |
 
-> **Wrap-only** (✓) options passed together with `--prepare` are an error.
+> ⚠️ **Wrap-only** (✓) options passed together with `--prepare` are an error.
 
 ### Supported container transports
 
@@ -112,7 +110,7 @@ contains:
 ```
 <workspace>/
 ├── config.toml        # package configuration (metadata, security, service)
-├── runtime.json       # OCI Runtime spec (process args, mounts, capabilities)
+├── runtime.json       # OCI Runtime config (process args, mounts, capabilities)
 ├── seccomp.json       # seccomp policy
 ├── pkgfs/             # package filesystem: directory, symlink, or rootfs
 ├── intermediate/      # build artifacts (fs image, root hash) — safe to delete
@@ -125,9 +123,7 @@ contains:
 - The `intermediate/` directory holds the built image and the `.root_hash`
   file. It can be deleted between builds.
 
-For what the three config files contain and how to fill them in, see the
-[Package Creation Guide](../guides/wrapping-a-ssam.md) and the
-[`config.toml` Reference](package-config.md).
+> 📖 For what the three config files contain and how to fill them in, see the [Package Creation Guide](../guides/wrapping-a-ssam.md) and the [`config.toml` Reference](package-config.md).
 
 ---
 
@@ -148,20 +144,13 @@ Selected with `-t` / `--pkgfs-type` (only when the source is a directory):
 
 ## Signing
 
-Every package is signed with an *RSA* private key; `ssamd` verifies it against
-the corresponding public key. Generate a 2048-bit key pair with OpenSSL:
-
-```console
-$ openssl genpkey -algorithm RSA -out private_key.pem -pkeyopt rsa_keygen_bits:2048
-$ openssl rsa -in private_key.pem -pubout -out public_key.pem
-```
-
-- Pass `private_key.pem` to `ssam-wrap` via `--private-key`.
-- Configure `ssamd` with the matching `public_key.pem`
-  ([`public_key_file_path`](daemon-config.md#public_key_file_path) in `ssamd.toml`).
+wrap mode signs each package with an *RSA* private key, which `ssamd` verifies
+against the corresponding public key. Pass the private key via `--private-key`.
 
 On success, `ssam-wrap` prints the package name, service type, the signing key
-used, and the signed dm-verity table.
+used, and the signed *dm-verity* table.
+
+> 📖 For generating the *RSA* key pair and protecting the private and public keys, see [Package Integrity → Package signing](../guides/package-integrity.md#package-signing--rsa).
 
 ---
 
@@ -169,14 +158,11 @@ used, and the signed dm-verity table.
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| `Private key file path is required` | You ran wrap mode without `--private-key`. Add `-k <key>`, or use `--prepare` if you only want to scaffold. |
+| `Private key file path is required` | You ran wrap mode without `--private-key`. Add `-k <key>`, or use `--prepare` if you only want to generate the templates. |
 | `Package filesystem already exists, please delete ...` | A previous Docker/OCI extraction left a `pkgfs/`. Remove it before re-extracting. |
 | `Required definition of mount '/dev' is missing ...` | `runtime.json` lacks a mandatory mount. Add `/dev`, `/dev/pts` (and `/run` for `notify` services). |
 | `Docker image ... is not for <arch> architecture` | The `docker-daemon:` image's architecture differs from `--src-oci-arch`. Pass the correct `-a` value. |
 | `skopeo` / `umoci` not found | Install the container tools (see [Requirements](#requirements)). |
 | `WARN: Given package filesystem type would be ignored!` | The source resolved to an image file, not a directory; `-t` only applies to directory sources. |
 
-For the full package-creation walkthrough, see the
-[Wrapping a SSAM guide](../guides/wrapping-a-ssam.md). For a complete end-to-end example
-including running the package as a container under `ssamd`, see the
-[Quick-start Guide](../quick-start.md).
+> 📖 For the full package-creation walkthrough, see the [Wrapping a SSAM guide](../guides/wrapping-a-ssam.md); for a complete end-to-end example including running the package as a container under `ssamd`, see the [Quick-start Guide](../../README.md#quick-start).

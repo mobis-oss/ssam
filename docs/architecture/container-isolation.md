@@ -69,9 +69,7 @@ For each isolation, what SSAM does and who enforces it:
 | **data quota** | Sets a filesystem quota on the data area | ext4 |
 | **network** | Sets up the network namespace for the selected mode | kernel |
 
-For *how to configure* these, see the guides
-([Securing Containers](../guides/securing-containers.md),
-[Networking](../guides/networking.md)).
+> 📖 For *how to configure* these, see the guides ([Container Isolation](../guides/container-isolation.md), [Container Hardening](../guides/container-hardening.md), [Package Integrity](../guides/package-integrity.md)).
 
 ---
 
@@ -79,7 +77,7 @@ For *how to configure* these, see the guides
 
 Design specifics of the delegation that the table doesn't capture:
 
-- **MAC profiles originate on the host, not in SSAM** — authoring a profile and
+- **MAC profiles originate on the host** — authoring a profile and
   loading it into the kernel is the host's job; SSAM selects a loaded profile by
   name and sets it in the OCI config. This contrasts with *seccomp*, where the
   package carries the policy.
@@ -91,5 +89,4 @@ Design specifics of the delegation that the table doesn't capture:
 
 ---
 
-For the integrity guarantees that sit underneath all of this — the part SSAM does
-implement — see [Package Integrity](package-integrity.md).
+> 📖 For the integrity guarantees that sit underneath all of this — the part SSAM does implement — see [Package Integrity](package-integrity.md).

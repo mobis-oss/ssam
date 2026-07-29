@@ -4,22 +4,23 @@
   <a href="remocon-rpc.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
 </p>
 
-이 문서는 패키지를 제어하기 위해 `ssamd` 가 *gRPC* 로 제공하는 Remocon API를 설명합니다.
+이 문서는 패키지를 제어하기 위해 `ssamd`가 *gRPC* 로 제공하는 Remocon API를 설명합니다.
 
-> gRPC 클라이언트 작성의 단계별 안내는 **[Remocon 클라이언트 작성](../guides/writing-a-remocon-client.ko.md)** 을
-> 참고하세요. 이 문서는 API **레퍼런스** 입니다.
+> 📖 Remocon 클라이언트 작성의 단계별 안내는 **[Remocon 클라이언트 작성](../guides/writing-a-remocon-client.ko.md)** 을
+> 참고하세요.
 
 ---
 
 ## Table of Contents
 
 1. [Connection](#connection)
-2. [API at a Glance](#api-at-a-glance)
-3. [Methods](#methods)
-4. [Request messages](#request-messages)
-5. [Response messages](#response-messages)
-6. [Response data types](#response-data-types)
-7. [Examples](#examples)
+2. [Request metadata](#request-metadata)
+3. [API at a Glance](#api-at-a-glance)
+4. [Methods](#methods)
+5. [Request messages](#request-messages)
+6. [Response messages](#response-messages)
+7. [Response data types](#response-data-types)
+8. [Examples](#examples)
 
 ---
 
@@ -39,33 +40,40 @@
 
 ---
 
-### API version metadata
+## Request metadata
 
-모든 Remocon RPC request에는 `x-ssam-api-version` metadata가 있어야 합니다.
-이 metadata의 값은 proto 파일의 `ApiVersion` enum에 정의된 `CURRENT` 값과
-일치해야 하며, `ApiVersion.UNSPECIFIED`는 허용되는 request version이 아닙니다.
-숫자 값을 직접 하드코딩하지 말고 codegen으로 생성된 해당 enum 값을 사용하는
-것을 권장합니다.
+*gRPC* metadata는 요청과 함께 실리는 key-value 쌍으로, 요청 헤더에 해당합니다.
 
-`x-ssam-api-version` metadata가 없거나 잘못된 request는 RPC handler가 실행되기
-전에 gRPC `FAILED_PRECONDITION`으로 거부됩니다.
+### `x-ssam-api-version`
 
-단, 개행이나 NUL byte가 포함된 header처럼 client의 metadata 생성 단계 또는 HTTP/2
-transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECONDITION` status가
-보장되지 않습니다.
+**필수.** 클라이언트가 사용하는 API 버전. 값은 `ApiVersion` enum의 `CURRENT`와 일치해야 하며,
+없거나 `CURRENT`가 아니면 RPC handler가 실행되기 전에 *gRPC* `FAILED_PRECONDITION`
+으로 거부됩니다. 숫자 값을 직접 하드코딩하지 말고 codegen으로 생성된 enum 값을
+사용하세요.
+
+| 값 | 의미 |
+| --- | --- |
+| `UNSPECIFIED` | 미지정 — 유효한 request version이 아님 |
+| `CURRENT` | 현재 API 버전 — request에 사용 |
+
+> ⚠️ 개행이나 NUL byte가 포함된 header처럼 클라이언트의 metadata 생성 단계 또는 HTTP/2
+> transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECONDITION` status가
+> 보장되지 않습니다.
+
+---
 
 ## API at a Glance
 
 | Method | Request | Response | Response data type |
 | --- | --- | --- | --- |
-| [`InstallPackage`](#installpackage) | [`InstallPackageRequest`](#installpackagerequest) | [`InstallPackageResponse`](#installpackageresponse) | [`PackageData`](#packagedata) |
-| [`RemovePackage`](#removepackage) | [`RemovePackageRequest`](#removepackagerequest) | `google.protobuf.Empty` | *(없음)* |
-| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#startpackageresponse) | array of [`PackageActionResult`](#packageactionresult) |
-| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#stoppackageresponse) | array of [`PackageActionResult`](#packageactionresult) |
-| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#wipepackagedataresponse) | array of [`PackageActionResult`](#packageactionresult) |
-| [`ListPackages`](#listpackages) | `google.protobuf.Empty` | [`ListPackagesResponse`](#listpackagesresponse) | array of [`PackageStatusEntry`](#packagestatusentry) |
-| [`ListPackageInfo`](#listpackageinfo) | [`ListPackageInfoRequest`](#listpackageinforequest) | [`ListPackageInfoResponse`](#listpackageinforesponse) | array of [`PackageInfo`](#packageinfo) |
-| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest) | [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse) | array of [`InspectLocalPackageResult`](#inspectlocalpackageresult) |
+| [`InstallPackage`](#installpackage) | [`InstallPackageRequest`](#installpackagerequest) | [`InstallPackageResponse`](#response-messages) | [`PackageData`](#packagedata) |
+| [`RemovePackage`](#removepackage) | [`RemovePackageRequest`](#removepackagerequest) | `google.protobuf.Empty` | *(none)* |
+| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#response-messages) | array of [`PackageActionResult`](#packageactionresult) |
+| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#response-messages) | array of [`PackageActionResult`](#packageactionresult) |
+| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#response-messages) | array of [`PackageActionResult`](#packageactionresult) |
+| [`ListPackages`](#listpackages) | `google.protobuf.Empty` | [`ListPackagesResponse`](#response-messages) | array of [`PackageStatusEntry`](#packagestatusentry) |
+| [`ListPackageInfo`](#listpackageinfo) | [`ListPackageInfoRequest`](#listpackageinforequest) | [`ListPackageInfoResponse`](#response-messages) | array of [`PackageInfo`](#packageinfo) |
+| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest) | [`ListPackageInfoFromFilesResponse`](#response-messages) | array of [`InspectLocalPackageResult`](#inspectlocalpackageresult) |
 | [`GetTimelineInfo`](#gettimelineinfo) | `google.protobuf.Empty` | [`TimelineData`](#timelinedata) | [`TimelineData`](#timelinedata) |
 
 ---
@@ -77,7 +85,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 로컬 경로에서 패키지 설치.
 
 - **Request:** [`InstallPackageRequest`](#installpackagerequest)
-- **Response:** [`InstallPackageResponse`](#installpackageresponse)
+- **Response:** [`InstallPackageResponse`](#response-messages)
 - **Response data type:** [`PackageData`](#packagedata)
 
 허용된 설치 RPC는 `downgrade` 설정과 무관하게 항상 서명·무결성 검사를 거칩니다
@@ -88,8 +96,8 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 설치 허용 여부는 같은 패키지의 이미 설치된 버전과 비교해 결정됩니다:
 
 - **동일 버전** — `downgrade` 값과 무관하게 항상 거부됩니다.
-- **낮은 버전** — `downgrade: true` 를 지정하지 않으면 거부됩니다.
-- **높은 버전** — `downgrade: true` 를 지정하면 오히려 거부됩니다. 업그레이드에는
+- **낮은 버전** — `downgrade: true`를 지정하지 않으면 거부됩니다.
+- **높은 버전** — `downgrade: true`를 지정하면 오히려 거부됩니다. 업그레이드에는
   기본값(`false`)을 사용하세요.
 
 ### `RemovePackage`
@@ -98,9 +106,9 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 
 - **Request:** [`RemovePackageRequest`](#removepackagerequest)
 - **Response:** `google.protobuf.Empty`
-- **Response data type:** *(없음)*
+- **Response data type:** *(none)*
 
-패키지가 없으면 gRPC `NotFound`를 반환하며, 그 외 제거 오류는 `Internal`을
+패키지가 없으면 *gRPC* `NotFound`를 반환하며, 그 외 제거 오류는 `Internal`을
 반환합니다.
 
 ### `StartPackage`
@@ -108,7 +116,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 하나 이상의 패키지 시작.
 
 - **Request:** [`StartPackageRequest`](#startpackagerequest--stoppackagerequest)
-- **Response:** [`StartPackageResponse`](#startpackageresponse)
+- **Response:** [`StartPackageResponse`](#response-messages)
 - **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `StopPackage`
@@ -116,7 +124,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 하나 이상의 패키지 중지.
 
 - **Request:** [`StopPackageRequest`](#startpackagerequest--stoppackagerequest)
-- **Response:** [`StopPackageResponse`](#stoppackageresponse)
+- **Response:** [`StopPackageResponse`](#response-messages)
 - **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `WipePackageData`
@@ -124,7 +132,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 하나 이상의 패키지의 저장 데이터 삭제.
 
 - **Request:** [`WipePackageDataRequest`](#wipepackagedatarequest)
-- **Response:** [`WipePackageDataResponse`](#wipepackagedataresponse)
+- **Response:** [`WipePackageDataResponse`](#response-messages)
 - **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `ListPackages`
@@ -132,16 +140,15 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 설치된 패키지와 상태 목록. `Broken` 항목도 포함합니다.
 
 - **Request:** `google.protobuf.Empty`
-- **Response:** [`ListPackagesResponse`](#listpackagesresponse)
+- **Response:** [`ListPackagesResponse`](#response-messages)
 - **Response data type:** array of [`PackageStatusEntry`](#packagestatusentry)
 
 ### `ListPackageInfo`
 
-설치된 하나 이상의 패키지 상세 정보. `package_names`가 비어 있으면 설치된 모든
-패키지를 반환하며, 공백만 있는 이름은 무시합니다.
+설치된 하나 이상의 패키지 상세 정보. 공백만 있는 이름은 무시합니다.
 
 - **Request:** [`ListPackageInfoRequest`](#listpackageinforequest)
-- **Response:** [`ListPackageInfoResponse`](#listpackageinforesponse)
+- **Response:** [`ListPackageInfoResponse`](#response-messages)
 - **Response data type:** array of [`PackageInfo`](#packageinfo)
 
 ### `ListPackageInfoFromFiles`
@@ -151,7 +158,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 검사 실패는 해당 결과의 `success=false`로 표시합니다.
 
 - **Request:** [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest)
-- **Response:** [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse)
+- **Response:** [`ListPackageInfoFromFilesResponse`](#response-messages)
 - **Response data type:** array of [`InspectLocalPackageResult`](#inspectlocalpackageresult)
 
 ### `GetTimelineInfo`
@@ -166,8 +173,8 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 
 ## Request messages
 
-`ListPackages`, `GetTimelineInfo` 는
-`google.protobuf.Empty` 를 받으며 자체 요청 필드가 없습니다 — 아래
+`ListPackages`, `GetTimelineInfo`는
+`google.protobuf.Empty`를 받으며 자체 요청 필드가 없습니다 — 아래
 메시지에만 필드가 있습니다.
 
 ### `InstallPackageRequest`
@@ -200,7 +207,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
-| `package_names` | `repeated string` | 조회할 설치된 패키지 이름. 비어 있으면 설치된 모든 패키지 |
+| `package_names` | `repeated string` | 조회할 설치된 패키지 이름. 목록이 비어 있으면(`[]`) 설치된 모든 패키지를 대상으로 합니다. |
 
 ### `ListPackageInfoFromFilesRequest`
 
@@ -218,15 +225,15 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 
 | RPC | Response | Fields |
 | --- | --- | --- |
-| `InstallPackage` | `InstallPackageResponse` | `package_data` |
-| `RemovePackage` | `google.protobuf.Empty` | *(없음)* |
-| `StartPackage` | `StartPackageResponse` | `results` |
-| `StopPackage` | `StopPackageResponse` | `results` |
-| `WipePackageData` | `WipePackageDataResponse` | `results` |
-| `ListPackages` | `ListPackagesResponse` | `entries` |
-| `ListPackageInfo` | `ListPackageInfoResponse` | `packages`: `repeated PackageInfo` |
-| `ListPackageInfoFromFiles` | `ListPackageInfoFromFilesResponse` | `packages`: `repeated InspectLocalPackageResult` |
-| `GetTimelineInfo` | `TimelineData` | `events`, `ssamd_uptime` |
+| [`InstallPackage`](#installpackage) | `InstallPackageResponse` | `package_data`: [`PackageData`](#packagedata) |
+| [`RemovePackage`](#removepackage) | `google.protobuf.Empty` | *(none)* |
+| [`StartPackage`](#startpackage) | `StartPackageResponse` | `results`: repeated [`PackageActionResult`](#packageactionresult) |
+| [`StopPackage`](#stoppackage) | `StopPackageResponse` | `results`: repeated [`PackageActionResult`](#packageactionresult) |
+| [`WipePackageData`](#wipepackagedata) | `WipePackageDataResponse` | `results`: repeated [`PackageActionResult`](#packageactionresult) |
+| [`ListPackages`](#listpackages) | `ListPackagesResponse` | `entries`: repeated [`PackageStatusEntry`](#packagestatusentry) |
+| [`ListPackageInfo`](#listpackageinfo) | `ListPackageInfoResponse` | `packages`: repeated [`PackageInfo`](#packageinfo) |
+| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | `ListPackageInfoFromFilesResponse` | `packages`: repeated [`InspectLocalPackageResult`](#inspectlocalpackageresult) |
+| [`GetTimelineInfo`](#gettimelineinfo) | `TimelineData` | `events`: repeated [`TimelineEvent`](#timelineevent), `ssamd_uptime`: [`google.protobuf.Duration`](#googleprotobufduration) |
 
 ---
 
@@ -254,7 +261,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 ### `PackageInfo`
 
 `ListPackageInfo`가 요청한 각 패키지에 대해 반환합니다. `status`가 패키지의
-단일 상태값이며, 패키지가 없거나 조회 오류이면 `success=false`입니다. `Broken`
+단일 상태 값이고, 패키지가 없거나 조회 오류이면 `success=false`입니다. `Broken`
 항목은 `success=true`와 오류 field를 함께 반환합니다.
 
 | 필드 | 타입 | 존재 | 의미 |
@@ -286,12 +293,6 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 | `success` | `bool` | 항상 | 해당 패키지에 대한 작업 성공 여부 |
 | `message` | `string` | 선택 | 상세, 보통 실패 시 |
 
-### `InstallPackageResponse`
-
-| 필드 | 타입 | 의미 |
-| --- | --- | --- |
-| `package_data` | `PackageData` | 새로 설치된 패키지의 패키지 데이터 |
-
 ### `InspectLocalPackageResult`
 
 | 필드 | 타입 | 의미 |
@@ -306,7 +307,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
-| `events` | `repeated TimelineEvent` | 기록된 수명주기 이벤트 |
+| `events` | `repeated TimelineEvent` | 기록된 생명주기 이벤트 |
 | `ssamd_uptime` | `google.protobuf.Duration` | `ssamd` 시작 시점의 시스템 가동 시간 |
 
 ### `TimelineEvent`
@@ -314,7 +315,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
 | `pkg` | `string` | 패키지 이름 |
-| `phase` | `string` | 수명주기 단계 |
+| `phase` | `string` | 생명주기 단계 |
 | `duration_ns` | `uint64` | 단계 소요 시간(나노초) |
 | `kind` | `TimelineEventKind` | 이벤트 종류 |
 
@@ -337,7 +338,7 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 
 ## Examples
 
-다음은 실제 wire 형식이 아닌 protobuf text-format pseudo-output입니다.
+아래 예시는 protobuf **text 형식**으로 나타낸 것이며, *gRPC* 로 실제 전송되는 wire(바이너리) 형식은 아닙니다.
 
 `ListPackageInfo` — 성공:
 

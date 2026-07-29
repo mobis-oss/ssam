@@ -49,7 +49,7 @@ The daemon's effective GID is always allowed. Additional peer effective GIDs
 can be configured with `[rpc].allowed_gids`; the list defaults to empty. UID is
 not used for authorization.
 
-Remote TCP access is not supported. For the control API details, see the
+For the control API details, see the
 [Remocon gRPC control API](remocon-rpc.md).
 
 ---
@@ -67,7 +67,7 @@ $ ssam remove helloworld                  # uninstall
 ```
 
 Container stdout/stderr and lifecycle appear in `journalctl` under the package's
-systemd unit (see [Serving SSAM → Verify](../guides/serving-ssam.md#step-5--verify)).
+*systemd* unit (see [Serving SSAM → Verify](../guides/serving-ssam.md#step-6--verify)).
 
 ---
 
@@ -200,10 +200,10 @@ $ ssam wipe-data helloworld
 
 ### `pkg-info`
 
-Show information about a package, referenced by URI.
+Show information about one or more packages, referenced by URI.
 
 ```
-ssam pkg-info <PACKAGE_URI>
+ssam pkg-info <PACKAGE_URI>...
 ```
 
 | URI form | Meaning |
@@ -226,5 +226,5 @@ ssam timeline-info
 
 ---
 
-For the underlying request/response contract these commands map onto, see the
-[Remocon gRPC Control API Reference](remocon-rpc.md).
+> 📖 For the underlying request/response contract these commands map onto, see the
+> [Remocon gRPC Control API Reference](remocon-rpc.md).

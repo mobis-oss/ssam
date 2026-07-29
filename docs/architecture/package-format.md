@@ -10,7 +10,7 @@ integrity chain work. It is a specification for tooling that parses, verifies, o
 reconstructs packages.
 
 - For the **conceptual** "what's inside a package" overview, see
-  [Anatomy of a SSAM package](../guides/wrapping-a-ssam.md#anatomy-of-a-ssam-package).
+  [The SSAM package](../guides/wrapping-a-ssam.md#the-ssam-package).
 - This document describes **format version `0.6.0`**.
 
 ---
@@ -54,7 +54,7 @@ Entries are written in `PayloadType` order:
 | Entry name | Payload | Encoding | In signed digest? |
 | --- | --- | --- | --- |
 | `metadata.json` | Package metadata | **bincode** (see note) | ✅ Yes |
-| `runtime_config.json` | *OCI Runtime spec* | JSON | ✅ Yes |
+| `runtime_config.json` | *OCI Runtime config* | JSON | ✅ Yes |
 | `seccomp.json` | Seccomp policy | JSON | ✅ Yes |
 | `signature.sig` | RSA signature | raw signature bytes | — (is the signature) |
 | `filesystem.img` | Package filesystem image | EROFS/ext4 image + dm-verity hash tree | ❌ No (bound via dm-verity — see [Integrity](#signature-and-integrity)) |
@@ -144,23 +144,23 @@ configured in `ssamd` (`public_key_file_path` in `ssamd.toml`).
 
 ### How the filesystem image is protected
 
-`filesystem.img` is deliberately excluded from the RSA digest (it can be large).
+`filesystem.img` is deliberately excluded from the *RSA* digest (it can be large).
 Its integrity is instead bound **transitively**:
 
-1. The filesystem is *dm-verity*-formatted; its Merkle-tree **root hash** is part
+1. The filesystem is *dm-verity*-formatted; its *Merkle*-tree **root hash** is part
    of `pkgfs_verity_info.table_params`.
-2. `table_params` lives inside `metadata`, which **is** covered by the RSA
+2. `table_params` lives inside `metadata`, which **is** covered by the *RSA*
    signature.
-3. At runtime `ssamd` builds the dm-verity target from the signed
+3. At runtime `ssamd` builds the *dm-verity* target from the signed
    `table_params`, so any tampering with `filesystem.img` fails verification on
    read — continuously, not just at load time.
 
 Thus the *RSA* signature protects the configs directly and the filesystem image
-indirectly through the signed dm-verity root hash.
+indirectly through the signed *dm-verity* table.
 
 ### Signed dm-verity table (`table_params`)
 
-The signed table is the kernel dm-verity table **minus the two runtime device
+The signed table is the kernel *dm-verity* table **minus the two runtime device
 slots** (`data_dev` / `hash_dev`), which `ssamd` inserts at load time:
 
 ```
@@ -184,7 +184,7 @@ A reader parses back-to-front:
 4. **payloads_info:** seek to `file_size − 32 − 8 − payloads_size`, bincode-decode
    the payload index.
 5. **Verify:** read `signature.sig`; read `metadata` + `runtime_config` +
-   `seccomp` via their indexed offsets; SHA-256 the concatenation; RSA-verify
+   `seccomp` via their indexed offsets; SHA-256 the concatenation; *RSA*-verify
    against the public key. Reject on mismatch.
 6. **Parse:** deserialize the now-verified `metadata` (bincode),
    `runtime_config` (JSON), and `seccomp` (JSON) for use.
@@ -219,6 +219,6 @@ A reader parses back-to-front:
 
 ---
 
-For how these bytes are produced and consumed in practice, see the
-[Wrapping a SSAM guide](../guides/wrapping-a-ssam.md) and the
-[`ssam-wrap` command reference](../reference/ssam-wrap.md).
+> 📖 For how these bytes are produced and consumed in practice, see the
+> [Wrapping a SSAM guide](../guides/wrapping-a-ssam.md) and the
+> [`ssam-wrap` command reference](../reference/ssam-wrap.md).

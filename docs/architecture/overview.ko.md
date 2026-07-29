@@ -39,7 +39,7 @@ SSAM은 이러한 특수 목적용 임베디드 시스템을 위해, 정적 conf
 | --- | --- | --- |
 | **`ssam-wrap`** | 서명·무결성 보호되는 `SSAM` 패키지 생성 도구. | Build |
 | **`ssamd`** | 패키지를 설치·검증·구성해 컨테이너로 실행하는, root 권한으로 동작하는 데몬; 제어 RPC를 노출. | Runtime |
-| **`ssam`** | RPC로 `ssamd` 를 조작하는 CLI 클라이언트 (list / install / start / stop / remove). | Control |
+| **`ssam`** | RPC로 `ssamd`를 조작하는 CLI 클라이언트 (list / install / start / stop / remove). | Control |
 
 ---
 
@@ -58,7 +58,7 @@ flowchart LR
   end
   subgraph R["런타임 — 디바이스, root"]
     direction TB
-    C["gRPC client"] -->|"제어 요청 (Remocon gRPC)"| D["ssamd"]
+    C["Remocon client"] -->|"제어 요청 (Remocon gRPC)"| D["ssamd"]
     D -->|"시작"| S["systemd + crun"]
     S -->|"생성"| CT(["컨테이너"])
   end
@@ -68,8 +68,10 @@ flowchart LR
 
   classDef actor fill:#dbeafe,stroke:#2563eb,color:#1e3a5f;
   classDef data fill:#eef1f5,stroke:#94a3b8,color:#334155;
+  classDef ext fill:#fef3c7,stroke:#d97706,color:#78350f;
   classDef result fill:#dcfce7,stroke:#16a34a,color:#14532d;
-  class W,D,C,S actor;
+  class W,D,C actor;
+  class S ext;
   class A,P,KP,K data;
   class CT result;
   style B stroke:#94a3b8
@@ -85,17 +87,16 @@ flowchart LR
 
 패키지 작성에서 컨테이너 실행까지:
 
-1. **작성** — 패키지를 구성하는 `파일시스템` 과 *OCI Runtime config* 를 포함하여 실행 환경에 필요한 각종 `설정` 을 준비.
+1. **작성** — 패키지를 구성하는 `파일시스템`과 *OCI Runtime config* 를 포함하여 실행 환경에 필요한 각종 `설정`을 준비.
    → [SSAM 만들기](../guides/wrapping-a-ssam.ko.md)
-2. **생성** — 패키지 생성도구 `ssam-wrap` 을 사용하여 준비된 구성 요소를 기반으로 서명된 `SSAM 패키지` 생성.
+2. **생성** — 패키지 생성도구 `ssam-wrap`을 사용하여 준비된 구성 요소를 기반으로 서명된 `SSAM 패키지` 생성.
    → [패키지 포맷](package-format.ko.md)
-3. **배포** — `SSAM 패키지` 를 데몬의 패키지 디렉터리에 위치.
-   → [패키지 포맷](package-format.ko.md)
-4. **로드 & 검증** — `ssamd` 가 패키지를 읽고 설정된 공개 키로 서명을 검증.
+3. **배포** — SSAM 패키지를 데몬의 패키지 디렉터리에 위치.
+4. **로드 & 검증** — `ssamd`가 패키지를 읽고 설정된 공개 키로 서명을 검증.
 5. **실행환경 구성** — 패키지에 포함된 파일시스템과 *OCI Runtime config* 등의 설정을 기반으로 컨테이너의 실행 환경 구성 및 *OCI Runtime bundle* 을 준비
 6. **실행** — 구성된 실행 환경 위에서 *OCI Runtime* 으로 *OCI Runtime bundle* 을 실행하여 컨테이너를 생성.
    → [SSAM 실행하기](../guides/serving-ssam.ko.md)
-7. **관리** — `ssam` 등의 gRPC 클라이언트로 패키지 관리 - 설치·업그레이드·시작·중지·제거.
+7. **관리** — `ssam` 등의 Remocon 클라이언트로 패키지 관리 - 설치·업그레이드·시작·중지·제거.
    → [Remocon 클라이언트 작성](../guides/writing-a-remocon-client.ko.md)
 
 ---
@@ -106,10 +107,10 @@ flowchart LR
 - **bundled**: 디바이스 이미지에 사전 탑재 (읽기 전용)
 - **downloaded**: 런타임에 제어 API로 설치
 
-`ssamd` 는 요청에 따라 이들을 설치·업데이트·제거하며, 같은 이름이면 downloaded가 bundled를 덮어쓰고,
+`ssamd`는 요청에 따라 이들을 설치·업데이트·제거하며, 같은 이름이면 downloaded가 bundled를 덮어쓰고,
 그 override를 제거하면 아래의 bundled 패키지가 복원됩니다.
 
-> 상세: [Package Management](package-management.ko.md)
+> 📖 상세는 [Package Management](package-management.ko.md)를 참고하세요.
 
 ---
 
@@ -122,7 +123,7 @@ SSAM은 패키지 실행에 필요한 설정 정보를 실행 시점에 동적�
 - **파일시스템** — 컨테이너 파일시스템은 단일 사전빌드 이미지 그대로 마운트되는 형태로, 런타임에
   overlay로 합성되는 레이어 스택이 아닙니다. 이는 **빠른 기동** 을 달성하는 핵심 요소입니다.
 - **설정** — *OCI Runtime config* 를 포함하여, 실행 환경을 구성하는 정보는 빌드 시점에 작성하길
-  요구하며, 실행 시점에 `ssamd` 가 패키지를 로드할 때 포함된 config로부터 디바이스에 따라 달라지는
+  요구하며, 실행 시점에 `ssamd`가 패키지를 로드할 때 포함된 config로부터 디바이스에 따라 달라지는
   고유 설정사항 (e.g. 마운트 소스, cgroup 배치)만 채워서 최종 config를 생성합니다.
   실행 설정 대부분이 빌드 단계에서 고정되므로 **서명·검증** 할 수 있습니다.
 
@@ -130,17 +131,17 @@ SSAM은 패키지 실행에 필요한 설정 정보를 실행 시점에 동적�
 
 ## Runtime architecture
 
-런타임에 `ssamd` 의 주된 역할은 *OCI Runtime* 이 컨테이너를 실행할 수 있도록 실행
-환경을 구성하는 것입니다. `ssamd` 는 각 패키지를 추적·검증한 뒤, 검증된 패키지로부터
+런타임에 `ssamd`의 주된 역할은 *OCI Runtime* 이 컨테이너를 실행할 수 있도록 실행
+환경을 구성하는 것입니다. `ssamd`는 각 패키지를 추적·검증한 뒤, 검증된 패키지로부터
 컨테이너의 *OCI Runtime config* 를 생성하고, 파일시스템·자원·네트워크 등의 실행 환경을
 구성하여 **OCI Runtime spec과 호환** 되는 *OCI Runtime bundle* 을 만듭니다.
 그러므로 어떤 *OCI Runtime* 으로도 실행할 수 있습니다.
 
-`ssamd` 는 이 번들로 컨테이너를 실행하기 위해 *crun* 을 사용하며, *systemd transient service unit*
-형태로 구성하여 컨테이너를 실제로 실행합니다. 이후 `ssamd` 는 실행된 컨테이너의 상태를 모니터링하며
+`ssamd`는 이 번들로 컨테이너를 실행하기 위해 *crun* 을 사용하며, *systemd transient service unit*
+형태로 구성하여 컨테이너를 실제로 실행합니다. 이후 `ssamd`는 실행된 컨테이너의 상태를 모니터링하며
 패키지 상태를 관리합니다.
 
-> 상세: [SSAM 실행 아키텍처](execution.ko.md)
+> 📖 상세는 [SSAM 실행 아키텍처](execution.ko.md)를 참고하세요.
 
 ---
 
@@ -149,13 +150,13 @@ SSAM은 패키지 실행에 필요한 설정 정보를 실행 시점에 동적�
 SSAM은 주요 기능으로서 **패키지 무결성** 을 보장합니다 — 신뢰할 수 있고 변조되지 않은
 패키지라면 자유로운 업데이트를 허용하면서도 지속적으로 검증하며 실행합니다:
 
-1. **RSA 서명.** 각 패키지는 **설정 데이터** 에 서명되며, `ssamd` 는
+1. **RSA 서명.** 각 패키지는 **설정 데이터** 에 서명되며, `ssamd`는
    신뢰된 키로 서명되지 않은 것을 거부합니다.
-2. **지속적 무결성.** `ssamd` 는 dm-verity로 커널이 읽기마다 모든 블록을 검증하게
-   하여, 변조를 로드 시점뿐 아니라 런타임에도 감지합니다. dm-verity 파라미터가 RSA로
+2. **지속적 무결성.** `ssamd`는 *dm-verity* 로 커널이 읽기마다 모든 블록을 검증하게
+   하여, 변조를 로드 시점뿐 아니라 런타임에도 감지합니다. *dm-verity* 파라미터가 *RSA* 로
    서명되는 설정 데이터에 포함되므로 이 검증 자체의 신뢰성도 보장됩니다.
 
-> 상세: [Package Integrity](package-integrity.ko.md)
+> 📖 상세는 [Package Integrity](package-integrity.ko.md)를 참고하세요.
 
 ---
 
@@ -164,4 +165,4 @@ SSAM은 주요 기능으로서 **패키지 무결성** 을 보장합니다 — �
 컨테이너 격리(seccomp, MAC (AppArmor), cgroup, 네트워크)는 커널과 *OCI Runtime* 이
 제공합니다. SSAM은 패키지가 이 격리를 지정하는 수단을 제공합니다.
 
-> 상세: [Container Isolation](container-isolation.ko.md)
+> 📖 상세는 [Container Isolation](container-isolation.ko.md)를 참고하세요.

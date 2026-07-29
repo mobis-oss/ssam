@@ -11,6 +11,8 @@ SSAM 패키지로 배포된 소프트웨어는 **자유로운 업데이트와 �
 이를 세 요소 — 신뢰 앵커(trust anchor, 디바이스에 탑재되는 공개 키), *RSA* 서명,
 *dm-verity* — 로 이루어진 **무결성 모델** 로 달성합니다.
 
+> 📖 서명·*dm-verity*·읽기 전용 파일시스템의 **설정 방법** 은 [Package Integrity 가이드](../guides/package-integrity.ko.md)를 참고하세요.
+
 ---
 
 ## Table of Contents
@@ -29,9 +31,9 @@ SSAM 패키지로 배포된 소프트웨어는 **자유로운 업데이트와 �
 
 신뢰의 근간은 **RSA 키 쌍** 입니다:
 
-- **개인 키** 는 디바이스 밖, 패키지를 빌드하는 주체에게 있습니다. `ssam-wrap` 이
+- **개인 키** 는 디바이스 밖, 패키지를 빌드하는 주체에게 있습니다. `ssam-wrap`이
   패키지를 생성할 때 이 키로 각 패키지를 서명합니다.
-- **공개 키** 는 디바이스에 설치되며, `ssamd` 가 신뢰하는 유일한 대상입니다. 이 키로
+- **공개 키** 는 디바이스에 설치되며, `ssamd`가 신뢰하는 유일한 대상입니다. 이 키로
   검증할 수 없는 패키지는 거부됩니다.
 
 따라서 두 가지를 보호해야 합니다:
@@ -79,10 +81,10 @@ flowchart LR
   style DEV stroke:#94a3b8
 ```
 
-- **서명 (빌드).** `ssam-wrap` 이 **설정 데이터** 만 RSA 서명합니다 — 패키지
+- **서명 (빌드).** `ssam-wrap`이 **설정 데이터** 만 *RSA* 서명합니다 — 패키지
   파일시스템 이미지는 서명하지 않습니다.
-- **검증 (로드).** `ssamd` 가 로드 시 서명을 공개 키로 확인합니다.
-- **지속 검증 (런타임).** 커널의 dm-verity가 **읽기마다** 파일시스템 블록을
+- **검증 (로드).** `ssamd`가 로드 시 서명을 공개 키로 확인합니다.
+- **지속 검증 (런타임).** 커널의 *dm-verity* 가 **읽기마다** 파일시스템 블록을
   검증합니다.
 
 서명 대상은 수 킬로바이트뿐이지만, 거기에 담긴 루트 해시로 **전체 파일시스템을
@@ -90,7 +92,7 @@ flowchart LR
 
 이 분리는 **성능을 위한 의도적 선택** 입니다. 패키지 파일시스템 전체를 서명하면 로드
 시점에 그 전체를 다시 검증해야 해 기동이 느려집니다. 그 대신 SSAM은 수 킬로바이트
-크기의 설정 데이터에만 서명하고, 전체 파일시스템은 dm-verity에 맡겨 런타임에 필요할
+크기의 설정 데이터에만 서명하고, 전체 파일시스템은 *dm-verity* 에 맡겨 런타임에 필요할
 때 검증합니다. 그래서 로드 시점 서명 검증이 가벼워, 빠른 컨테이너 기동을 지키면서도
 실행 중 무결성까지 보장합니다.
 
@@ -104,7 +106,29 @@ flowchart LR
 서술하는 수 킬로바이트 분량)의 SHA-256 다이제스트에 대한 **RSA PKCS#1 v1.5
 서명** 을 담습니다.
 
-- 서명은 개인 키로 하고, `ssamd` 는 **payload를 파싱하기 전에** 공개 키로 검증하여
+```mermaid
+flowchart LR
+  subgraph PKG["SSAM 패키지"]
+    direction TB
+    subgraph CFG["설정 데이터 — 서명 대상 (수 KB)"]
+      direction TB
+      MD[/"metadata<br/>(루트 해시 등 dm-verity 파라미터)"/]
+      RC[/"runtime_config"/]
+      SC[/"seccomp"/]
+    end
+    IMG[/"패키지 파일시스템 이미지<br/>(대용량 · 서명 대상 아님)"/]
+    SIG[/"RSA 서명"/]
+  end
+
+  CFG ==>|"SHA-256 → RSA 서명 (개인 키)"| SIG
+
+  classDef data fill:#eef1f5,stroke:#94a3b8,color:#334155;
+  class MD,RC,SC,IMG,SIG data;
+  style CFG fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+  style PKG stroke:#94a3b8
+```
+
+- 서명은 개인 키로 하고, `ssamd`는 **payload를 파싱하기 전에** 공개 키로 검증하여
   패키지를 신뢰할지 판단합니다.
 - 다른 키로 서명된 패키지 — 또는 서명 대상 payload가 하나라도 변경된 경우 —
   검증에 실패하고 거부됩니다.
@@ -116,24 +140,49 @@ flowchart LR
 
 ## Filesystem integrity — dm-verity
 
-패키지 파일시스템 이미지는 *dm-verity* 로 보호됩니다:
+패키지 파일시스템 이미지는 *dm-verity* 로 보호됩니다.
 
-- dm-verity는 기본적으로 활성화되며 `[integrity].disable_runtime_integrity` 설정으로
+```mermaid
+flowchart LR
+  PK[/"공개 키"/]
+  subgraph PKG["SSAM 패키지 (디바이스)"]
+    direction TB
+    MD[/"metadata<br/>(루트 해시 등 dm-verity 파라미터)"/]
+    IMG[/"패키지 파일시스템 이미지<br/>데이터 블록 + dm-verity hash tree"/]
+  end
+  DV["dm-verity 타깃<br/>(ssamd)"]
+  READ(["검증된 읽기"])
+
+  PK ==>|"RSA 검증"| MD
+  MD ==>|"서명된 파라미터"| DV
+  IMG ==>|"hash tree"| DV
+  DV ==>|"읽기마다 블록 검증"| READ
+
+  classDef data fill:#eef1f5,stroke:#94a3b8,color:#334155;
+  classDef actor fill:#dbeafe,stroke:#2563eb,color:#1e3a5f;
+  classDef result fill:#dcfce7,stroke:#16a34a,color:#14532d;
+  class PK,IMG data;
+  class DV actor;
+  class READ result;
+  style MD fill:#eef1f5,stroke:#2563eb,stroke-width:3px,color:#334155
+```
+
+- *dm-verity* 는 기본적으로 활성화되며 `[integrity].disable_runtime_integrity` 설정으로
   비활성화할 수 있습니다. 비활성화하면 블록 수준의 런타임 검증은 제거되지만 패키지
   서명 검증은 계속 적용됩니다.
-- 서명된 `metadata` 에는 dm-verity **파라미터 전체**(루트 해시 포함)가 담깁니다.
-- 로드 시점에 `ssamd` 는 그 서명된 파라미터로 dm-verity 타깃을 구성합니다.
-  dm-verity의 특성상 **읽기마다 모든 블록이 검증** 되어, 변조는 로드 시점뿐
+- 서명된 `metadata` 에는 *dm-verity* **파라미터 전체**(루트 해시 포함)가 담깁니다.
+- 로드 시점에 `ssamd`는 그 서명된 파라미터로 *dm-verity* 타깃을 구성합니다.
+  *dm-verity* 의 특성상 **읽기마다 모든 블록이 검증** 되어, 변조는 로드 시점뿐
   아니라 **런타임 내내** 감지됩니다.
 
 ---
 
 ## Hardening the package parser
 
-`ssamd` 는 서명을 검증하기 전까지 패키지 파일의 내용을 신뢰할 수 없습니다. 따라서 검증이
+`ssamd`는 서명을 검증하기 전까지 패키지 파일의 내용을 신뢰할 수 없습니다. 따라서 검증이
 끝나기 **전에** 악의적 파일이 파서를 악용하지 못하도록 다음을 강제합니다:
 
-- **검증 후 파싱 순서.** RSA 서명을 먼저 확인하고, 설정 payload는 검증이 성공한
+- **검증 후 파싱 순서.** *RSA* 서명을 먼저 확인하고, 설정 payload는 검증이 성공한
   **후에만**, 즉 신뢰할 수 있을 때에만 로드됩니다.
 - **인증 전 할당 제한.** payload 인덱스를 디코딩할 때와 검증 중 각 서명 payload를 읽을
   때 모두 크기에 고정 상한을 두어, 조작된 크기 필드로 인한 무제한 할당을
@@ -147,19 +196,15 @@ flowchart LR
 
 ## Control interface security (RPC)
 
-- `ssamd` 는 고정된 Linux abstract Unix domain socket `@ssamd`에서
-  [Remocon gRPC 제어 API](../reference/remocon-rpc.ko.md)를 노출합니다. 원격 TCP
-  접근은 제공하지 않습니다.
-- `ssamd` 는 RPC를 dispatch하기 전에 `SO_PEERCRED`를 검사합니다. peer의 effective
-  GID가 데몬의 effective GID와 일치하거나 `[rpc].allowed_gids` 항목에 포함되는
-  경우 허용하며, UID는 확인하지 않습니다. 데몬 자신의 effective GID는 항상
-  허용되고 추가 목록의 기본값은 빈 목록입니다. abstract socket은 파일시스템
-  권한을 제공하지 않으므로 같은 network namespace에서 socket name을 아는 process는
-  연결을 시도할 수 있으며, peer credential이 authorization 경계가 됩니다.
-- **허용된 설치 RPC에도 호출자 권한 검증과 별도로 패키지 진위 검증이 적용됩니다:**
-  모든 설치 요청은 패키지 서명·무결성 검증을 통과해야 하며, 검증에 실패한 패키지는
-  설치 단계에서 거부되어 설정·실행되지 않습니다. 따라서 서명되지 않거나 변조된
-  코드는 실제로 실행될 수 없습니다.
+- `ssamd`는 고정된 Linux abstract Unix domain socket `@ssamd`를 통해
+  [Remocon gRPC 제어 API](../reference/remocon-rpc.ko.md)를 노출하므로 동일 호스트의 동일
+  network namespace에서 실행되는 process만 접근할 수 있습니다.
+- abstract socket은 파일시스템 권한을 통한 접근 제한이 불가능하므로, 이름을 아는 동일 network
+  namespace 내 어떤 process라도 연결을 시도할 수 있습니다.
+- 반면, `ssamd`는 peer의 effective GID가 데몬의 effective GID와 일치하거나
+  [설정된 허용 GID 목록](../reference/daemon-config.ko.md#allowed_gids)에 포함되는 경우에만 연결을 허용합니다.
+- **허용된 클라이언트로부터의 설치 RPC라 할지라도 호출자 권한 검증과 별도로 패키지 진위 검증이 적용됩니다:**
+  모든 설치 요청은 패키지 서명·무결성 검증을 통과해야 하며, 검증에 실패한 패키지는 거부되어 설정·실행되지 않습니다.
 
 ---
 
@@ -173,13 +218,13 @@ flowchart LR
 | --- | --- |
 | 위조 / 비신뢰 패키지 | 디바이스 내 공개 키로 RSA 서명 검증 |
 | 변조된 설정 데이터 | 서명된 다이제스트에 포함 |
-| 변조된 패키지 파일시스템 이미지 | 서명된 metadata 안의 dm-verity 루트 해시; 지속적 블록 검증 |
+| 변조된 패키지 파일시스템 이미지 | 서명된 metadata 안의 dm-verity 파라미터(루트 해시 포함); 지속적 블록 검증 |
 | 런타임 변조 / 패키지 파일시스템 손상 | dm-verity가 블록 장치 레벨에서 읽기마다 검증; 읽기 전용 마운트 |
 | 악의적 패키지 파일(파서 DoS) | 검증 후 파싱, 디코드/크기 제한, 경계 검사 |
 
 ---
 
-컨테이너 수준 구속(*seccomp*, *AppArmor*, 자원 제한, 네트워킹)은
-[Container Isolation](container-isolation.ko.md)을, 서명과 검증의 바이트 수준
-세부는 [패키지 포맷 레퍼런스](package-format.ko.md#signature-and-integrity)를
-참고하세요.
+> 📖 컨테이너 수준 구속(*seccomp*, *AppArmor*, 자원 제한, 네트워킹)은
+> [Container Isolation](container-isolation.ko.md)을, 서명과 검증의 바이트 수준
+> 세부는 [패키지 포맷 레퍼런스](package-format.ko.md#signature-and-integrity)를
+> 참고하세요.

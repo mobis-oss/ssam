@@ -8,9 +8,8 @@
 the package's identity (name, version), its data/quota and network settings,
 its security posture, and the service model `ssamd` uses to run its container.
 
-> For a step-by-step walkthrough of filling in `config.toml`, see the
+> 📖 For a step-by-step walkthrough of filling in `config.toml`, see the
 > **[Wrapping a SSAM — Package Creation Guide](../guides/wrapping-a-ssam.md)**.
-> This document is the configuration **reference**.
 
 `ssam-wrap` generates a template `config.toml` in [prepare mode](ssam-wrap.md#command-line-reference)
 (`--prepare <NAME>`).
@@ -81,7 +80,7 @@ Package identity and lifecycle.
 
 - **Type:** string · **Required**
 - The package name. Used as the identity under which `ssamd` installs, lists,
-  and runs the package (it becomes the systemd unit name), so it should be
+  and runs the package (it becomes the *systemd* unit name), so it should be
   unique and filesystem-friendly.
 - In prepare mode, `ssam-wrap` pre-fills this with the `<NAME>` you passed to
   `--prepare`.
@@ -89,8 +88,8 @@ Package identity and lifecycle.
 ### `description`
 
 - **Type:** string · **Required**
-- A human-readable description. Surfaces in package-query gRPC responses or as
-  the systemd service description on the target.
+- A human-readable description. Surfaces in package-query *gRPC* responses or as
+  the *systemd* service description on the target.
 
 ### `version`
 
@@ -106,7 +105,7 @@ Package identity and lifecycle.
 - **Type:** boolean · **Optional** · **Default:** `true`
 - Whether `ssamd` starts the package automatically when it is loaded (e.g. at
   boot). Set to `false` for packages whose start you manage separately through a
-  gRPC client.
+  Remocon client.
 
 ---
 
@@ -159,11 +158,11 @@ Security hardening toggles.
 
 - **Type:** boolean · **Required** · **Recommended:** `true`
 - Enables Mandatory Access Control (MAC) confinement for the container. MAC is
-  provided via *AppArmor*, and an AppArmor profile under a **predefined name**
+  provided via *AppArmor*, and an *AppArmor* profile under a **predefined name**
   must be loaded on the target.
 - For the profile naming convention and how to author/load it, see
   [Container Isolation](../architecture/container-isolation.md) and the
-  [Securing Containers guide](../guides/securing-containers.md).
+  [Container Hardening guide](../guides/container-hardening.md).
 
 ---
 
@@ -191,7 +190,7 @@ default (`host`) networking.
 A value that is neither an absolute path nor one of `host`/`none`/`bridge` is
 rejected.
 
-> **Bridge needs the daemon bridge:** if a package requests `bridge` but the
+> ⚠️ **Bridge needs the daemon bridge:** if a package requests `bridge` but the
 > daemon's bridge network is disabled, `ssamd` **rejects** the package.
 
 ---
@@ -217,12 +216,12 @@ Only meaningful with `mode = "bridge"`. Both keys are optional.
 
 ## `[service]`
 
-How `ssamd` runs the container as a systemd-managed service.
+How `ssamd` runs the container as a *systemd*-managed service.
 
 ### `service_type`
 
 - **Type:** string · **Required**
-- The systemd service model. Maps directly to the unit's `Type=`. One of:
+- The *systemd* service model. Maps directly to the unit's `Type=`. One of:
 
 | Value | systemd `Type=` | Notes |
 | --- | --- | --- |
@@ -230,13 +229,13 @@ How `ssamd` runs the container as a systemd-managed service.
 | `exec` | `exec` | Like `simple`, but started only after the binary has been executed. |
 | `forking` | `forking` | The process forks and the parent exits. |
 | `oneshot` | `oneshot` | Runs to completion once; often paired with `remain_after_exit`. |
-| `dbus` | `dbus` | Ready once it acquires `bus_name` on the D-Bus system bus. Should be paired with `bus_name` (not currently enforced). |
+| `dbus` | `dbus` | Ready once it acquires `bus_name` on the D-Bus system bus. Should be paired with `bus_name` (not enforced). |
 | `notify` | `notify` | Ready once it sends `sd_notify`. `ssamd` sets `NotifyAccess=all`; also requires a `/run` mount in `runtime.json`. |
 | `idle` | `idle` | Like `simple`, but execution is delayed until other jobs are dispatched. |
 
-> For each systemd service type in detail, see the *systemd.service(5)* man page.
+> 📖 For each *systemd* service type in detail, see the *systemd.service(5)* man page.
 
-> **`notify` services need `/run`.** When `service_type = "notify"`,
+> ⚠️ **`notify` services need `/run`.** When `service_type = "notify"`,
 > the `runtime.json` must declare a `/run` mount; `ssam-wrap` aborts the wrap
 > with an error if it is missing. See the
 > [runtime config notes](../guides/wrapping-a-ssam.md#step-4--configure-the-runtime-runtimejson).
@@ -245,7 +244,7 @@ How `ssamd` runs the container as a systemd-managed service.
 
 - **Type:** string · **Optional**
 - The *D-Bus* name the service acquires. Used to populate the unit's `BusName=`.
-  Should be set when `service_type = "dbus"` — nothing currently validates
+  Should be set when `service_type = "dbus"` — nothing validates
   this, so a missing `bus_name` silently produces a `dbus`-type unit with no
   `BusName=` set, rather than being rejected. Ignored for other service types.
 
@@ -256,7 +255,7 @@ bus_name = "com.example.MyService"
 ### `remain_after_exit`
 
 - **Type:** boolean · **Optional** · **Default:** `false`
-- Maps to systemd `RemainAfterExit=`. When `true`, the service is considered
+- Maps to *systemd* `RemainAfterExit=`. When `true`, the service is considered
   active even after its main process exits — commonly used with
   `service_type = "oneshot"`.
 
@@ -354,5 +353,5 @@ bus_name = "com.example.MyService"
 
 ---
 
-For the full packaging workflow, see the
-[ssam-wrap Command Reference](ssam-wrap.md).
+> 📖 For the full packaging workflow, see the
+> [ssam-wrap Command Reference](ssam-wrap.md).

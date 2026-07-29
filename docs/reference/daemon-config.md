@@ -8,9 +8,8 @@
 configures where packages live, where their data is mounted and stored, and which
 public key verifies package signatures, among others.
 
-> For a step-by-step walkthrough of installing and configuring `ssamd`, see the
-> **[Serving SSAM guide](../guides/serving-ssam.md)**. This document is the
-> configuration **reference**.
+> 📖 For a step-by-step walkthrough of installing and configuring `ssamd`, see the
+> **[Serving SSAM guide](../guides/serving-ssam.md)**.
 
 `ssamd` loads `ssamd.toml` from **the same directory as the `ssamd` binary**, and
 provides no way to override this through command-line arguments or environment
@@ -66,8 +65,7 @@ allowed_gids = []                                      # default
 disable_runtime_integrity = false                     # default
 ```
 
-Every key in `[common]` **must be present** or the daemon fails to start. The
-`[rpc]`, `[network]`, and `[integrity]` sections are **optional**.
+Every key in `[common]` **must be present** (except `bundled_packages_dir`) or the daemon fails to start. The `[rpc]`, `[network]`, and `[integrity]` sections are **optional**.
 
 ---
 
@@ -77,9 +75,9 @@ Core daemon paths and settings. All keys are strings.
 
 ### `bundled_packages_dir`
 
-- **Required.** Directory holding **bundled** (read-only, pre-installed)
-  SSAM packages. Must already exist — `ssamd` aborts at startup if it
-  doesn't.
+- **Optional.** Directory holding **bundled** (read-only, pre-installed)
+  SSAM packages. Omit it or leave it empty for no bundled packages. If set,
+  it must already exist — `ssamd` aborts at startup if it doesn't.
 
 ### `downloaded_packages_dir`
 
@@ -121,7 +119,7 @@ Core daemon paths and settings. All keys are strings.
 ### `packages_cgroup`
 
 - **Required to be present**, but **may be an empty string** (`""`).
-- Name of the cgroup (e.g. a systemd slice like `ssamd.slice`) the package
+- Name of the cgroup (e.g. a *systemd* slice like `ssamd.slice`) the package
   containers are placed under.
 - `ssamd` does not create the cgroup, so if you set a value it **must already
   exist** before the daemon starts, or the daemon aborts.
@@ -132,34 +130,32 @@ Core daemon paths and settings. All keys are strings.
 - **Required.** Package file extension, without a leading dot (e.g. `ssam`).
   Files with this extension are recognized as SSAM packages.
 
-### RPC endpoint
-
-The daemon's RPC control server listens on the Linux abstract Unix domain socket
-`@ssamd`. The endpoint is fixed and is not configurable. The abstract socket is
-not a filesystem path, so it does not create a socket file or require a runtime
-directory. RPC clients must run in the same system environment and pass the
-peer-credential check: the peer's effective GID must match the daemon's
-effective GID or be included in `[rpc].allowed_gids`. UID is not considered.
+---
 
 ## `[rpc]`
 
-RPC peer authorization configuration. The whole section is **optional** — omit
-it, or leave `allowed_gids` empty, to allow only peers with the daemon's
-effective GID.
+The daemon's Remocon RPC control server listens on the Linux abstract Unix domain socket `@ssamd`.
+- The endpoint is fixed and cannot be configured.
+- The endpoint is an abstract socket, so it does not create a socket file or require a runtime directory.
+- Remocon clients must run in the same system environment and pass the GID-based peer-credential check.
 
 ### `allowed_gids`
 
-- **Unsigned integer array, optional (default `[]`).** Additional peer
-  effective GIDs allowed to access the RPC server, for example:
+- **Unsigned integer array, optional (default `[]`).** Additional peer effective
+  GIDs allowed to access the RPC server. For example:
 
   ```toml
   [rpc]
   allowed_gids = [1000, 1001]
   ```
 
-- The daemon's own effective GID is always allowed, independently of this
-  list. UID is not used for authorization. A peer whose effective GID matches
-  neither the daemon's effective GID nor an entry in this list is rejected.
+- The daemon's own effective GID is always allowed, independently of this list.
+  Omitting the whole section or leaving `allowed_gids` empty allows only peers
+  with the daemon's effective GID.
+- A peer whose effective GID matches neither the daemon's effective GID nor an
+  entry in this list is rejected.
+
+> ⚠️ UID is not used for authentication — access is decided by effective GID alone.
 
 ---
 
@@ -192,9 +188,9 @@ it to accept the defaults.
 - **`size`** — **integer, optional.** Per-bridge subnet prefix length; must be
   `/30` or larger (numerically ≤ 30). Default: `29`.
 
-> Bridge networking requires the bridge / veth / network-namespace kernel
-> features on the host. See the
-> [Operations Guide](../guides/serving-ssam.md#networking-bridge-mode).
+> 📖 Bridge networking requires the `bridge` / `veth` kernel features on the host.
+> See the
+> [Operations Guide](../guides/serving-ssam.md#networking).
 
 ---
 
@@ -220,8 +216,8 @@ At startup `ssamd`:
 
 - **requires** `ssamd.toml` in the same location as the binary, with all mandatory
   `[common]` keys present — otherwise it fails to start with a configuration error.
-- **requires** the directory set in `bundled_packages_dir` to already exist
-  (aborting if not).
+- **requires**, when `bundled_packages_dir` is set, that directory to already
+  exist (aborting if not).
 - **requires** the file set in `public_key_file_path` to exist, aborting with
   *"Public key file not found"* otherwise.
 - **creates** the `downloaded_packages_dir`, `packages_data_root`, and
@@ -229,7 +225,7 @@ At startup `ssamd`:
 - **checks** that `packages_cgroup` exists (when non-empty), aborting if not.
 - **binds** the RPC server to the fixed abstract Unix socket `@ssamd`.
 - calls `sd_notify` after the listener is bound; if `ssamd` is configured as a
-  systemd `notify`-type service unit, this **signals readiness**.
+  *systemd* `notify`-type service unit, this **signals readiness**.
 
 ---
 

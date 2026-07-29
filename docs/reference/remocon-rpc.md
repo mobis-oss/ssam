@@ -7,21 +7,21 @@
 This document describes the Remocon API `ssamd` provides over *gRPC* to
 control packages.
 
-> For a step-by-step walkthrough of writing a gRPC client, see the
+> 📖 For a step-by-step walkthrough of writing a Remocon client, see the
 > **[Writing a Remocon Client](../guides/writing-a-remocon-client.md)** guide.
-> This document is the API **reference**.
 
 ---
 
 ## Table of Contents
 
 1. [Connection](#connection)
-2. [API at a Glance](#api-at-a-glance)
-3. [Methods](#methods)
-4. [Request messages](#request-messages)
-5. [Response messages](#response-messages)
-6. [Response data types](#response-data-types)
-7. [Examples](#examples)
+2. [Request metadata](#request-metadata)
+3. [API at a Glance](#api-at-a-glance)
+4. [Methods](#methods)
+5. [Request messages](#request-messages)
+6. [Response messages](#response-messages)
+7. [Response data types](#response-data-types)
+8. [Examples](#examples)
 
 ---
 
@@ -41,32 +41,41 @@ empty. UID is not used for authorization.
 
 ---
 
-### API version metadata
+## Request metadata
 
-Every Remocon RPC request must include the `x-ssam-api-version` metadata. Its
-value must match the `CURRENT` value defined in the `ApiVersion` enum in the
-proto file; `ApiVersion.UNSPECIFIED` is not an accepted request version. Use the
-code-generated value for this enum rather than hardcoding its numeric value.
+*gRPC* metadata are key-value pairs carried alongside a request — the equivalent of
+request headers.
 
-Requests with missing or invalid `x-ssam-api-version` metadata are rejected
-with gRPC `FAILED_PRECONDITION` before the RPC handler runs.
+### `x-ssam-api-version`
 
-Headers rejected earlier while the client constructs metadata or by the
-HTTP/2 transport itself, such as values containing a newline or NUL byte, do
-not guarantee a `FAILED_PRECONDITION` status.
+**Required.** The API version the client uses. Its value must match `CURRENT` in
+the `ApiVersion` enum; if it is missing or not `CURRENT`, the request is rejected
+with *gRPC* `FAILED_PRECONDITION` before the RPC handler runs. Use the
+code-generated enum value rather than hardcoding its numeric value.
+
+| Value | Meaning |
+| --- | --- |
+| `UNSPECIFIED` | Unspecified — not a valid request version |
+| `CURRENT` | The current API version — use this in requests |
+
+> ⚠️ Headers rejected earlier while the client constructs metadata or by the
+> HTTP/2 transport itself — such as values containing a newline or NUL byte — do
+> not guarantee a `FAILED_PRECONDITION` status.
+
+---
 
 ## API at a Glance
 
 | Method | Request | Response | Response data type |
 | --- | --- | --- | --- |
-| [`InstallPackage`](#installpackage) | [`InstallPackageRequest`](#installpackagerequest) | [`InstallPackageResponse`](#installpackageresponse) | [`PackageData`](#packagedata) |
+| [`InstallPackage`](#installpackage) | [`InstallPackageRequest`](#installpackagerequest) | [`InstallPackageResponse`](#response-messages) | [`PackageData`](#packagedata) |
 | [`RemovePackage`](#removepackage) | [`RemovePackageRequest`](#removepackagerequest) | `google.protobuf.Empty` | *(none)* |
-| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#startpackageresponse) | array of [`PackageActionResult`](#packageactionresult) |
-| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#stoppackageresponse) | array of [`PackageActionResult`](#packageactionresult) |
-| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#wipepackagedataresponse) | array of [`PackageActionResult`](#packageactionresult) |
-| [`ListPackages`](#listpackages) | `google.protobuf.Empty` | [`ListPackagesResponse`](#listpackagesresponse) | array of [`PackageStatusEntry`](#packagestatusentry) |
-| [`ListPackageInfo`](#listpackageinfo) | [`ListPackageInfoRequest`](#listpackageinforequest) | [`ListPackageInfoResponse`](#listpackageinforesponse) | array of [`PackageInfo`](#packageinfo) |
-| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest) | [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse) | array of [`InspectLocalPackageResult`](#inspectlocalpackageresult) |
+| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#response-messages) | array of [`PackageActionResult`](#packageactionresult) |
+| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#response-messages) | array of [`PackageActionResult`](#packageactionresult) |
+| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#response-messages) | array of [`PackageActionResult`](#packageactionresult) |
+| [`ListPackages`](#listpackages) | `google.protobuf.Empty` | [`ListPackagesResponse`](#response-messages) | array of [`PackageStatusEntry`](#packagestatusentry) |
+| [`ListPackageInfo`](#listpackageinfo) | [`ListPackageInfoRequest`](#listpackageinforequest) | [`ListPackageInfoResponse`](#response-messages) | array of [`PackageInfo`](#packageinfo) |
+| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest) | [`ListPackageInfoFromFilesResponse`](#response-messages) | array of [`InspectLocalPackageResult`](#inspectlocalpackageresult) |
 | [`GetTimelineInfo`](#gettimelineinfo) | `google.protobuf.Empty` | [`TimelineData`](#timelinedata) | [`TimelineData`](#timelinedata) |
 
 ---
@@ -78,7 +87,7 @@ not guarantee a `FAILED_PRECONDITION` status.
 Install a package from a local path.
 
 - **Request:** [`InstallPackageRequest`](#installpackagerequest)
-- **Response:** [`InstallPackageResponse`](#installpackageresponse)
+- **Response:** [`InstallPackageResponse`](#response-messages)
 - **Response data type:** [`PackageData`](#packagedata)
 
 Every accepted installation RPC runs full signature and integrity checks (see
@@ -103,7 +112,7 @@ Remove an installed package.
 - **Response:** `google.protobuf.Empty`
 - **Response data type:** *(none)*
 
-A missing package returns gRPC `NotFound`; other removal failures return
+A missing package returns *gRPC* `NotFound`; other removal failures return
 `Internal`.
 
 ### `StartPackage`
@@ -111,7 +120,7 @@ A missing package returns gRPC `NotFound`; other removal failures return
 Start one or more packages.
 
 - **Request:** [`StartPackageRequest`](#startpackagerequest--stoppackagerequest)
-- **Response:** [`StartPackageResponse`](#startpackageresponse)
+- **Response:** [`StartPackageResponse`](#response-messages)
 - **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `StopPackage`
@@ -119,7 +128,7 @@ Start one or more packages.
 Stop one or more packages.
 
 - **Request:** [`StopPackageRequest`](#startpackagerequest--stoppackagerequest)
-- **Response:** [`StopPackageResponse`](#stoppackageresponse)
+- **Response:** [`StopPackageResponse`](#response-messages)
 - **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `WipePackageData`
@@ -127,7 +136,7 @@ Stop one or more packages.
 Clear stored data for one or more packages.
 
 - **Request:** [`WipePackageDataRequest`](#wipepackagedatarequest)
-- **Response:** [`WipePackageDataResponse`](#wipepackagedataresponse)
+- **Response:** [`WipePackageDataResponse`](#response-messages)
 - **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `ListPackages`
@@ -135,7 +144,7 @@ Clear stored data for one or more packages.
 List installed packages and their status, including `Broken` entries.
 
 - **Request:** `google.protobuf.Empty`
-- **Response:** [`ListPackagesResponse`](#listpackagesresponse)
+- **Response:** [`ListPackagesResponse`](#response-messages)
 - **Response data type:** array of [`PackageStatusEntry`](#packagestatusentry)
 
 ### `ListPackageInfo`
@@ -144,7 +153,7 @@ Details for one or more installed packages. An empty `package_names` list
 returns all installed packages; whitespace-only names are ignored.
 
 - **Request:** [`ListPackageInfoRequest`](#listpackageinforequest)
-- **Response:** [`ListPackageInfoResponse`](#listpackageinforesponse)
+- **Response:** [`ListPackageInfoResponse`](#response-messages)
 - **Response data type:** array of [`PackageInfo`](#packageinfo)
 
 ### `ListPackageInfoFromFiles`
@@ -155,7 +164,7 @@ order; a relative path or an inspection failure is represented by a result
 with `success=false`.
 
 - **Request:** [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest)
-- **Response:** [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse)
+- **Response:** [`ListPackageInfoFromFilesResponse`](#response-messages)
 - **Response data type:** array of [`InspectLocalPackageResult`](#inspectlocalpackageresult)
 
 ### `GetTimelineInfo`
@@ -220,15 +229,15 @@ Each RPC's response payload is its declared protobuf message.
 
 | RPC | Response | Fields |
 | --- | --- | --- |
-| `InstallPackage` | `InstallPackageResponse` | `package_data` |
-| `RemovePackage` | `google.protobuf.Empty` | *(none)* |
-| `StartPackage` | `StartPackageResponse` | `results` |
-| `StopPackage` | `StopPackageResponse` | `results` |
-| `WipePackageData` | `WipePackageDataResponse` | `results` |
-| `ListPackages` | `ListPackagesResponse` | `entries` |
-| `ListPackageInfo` | `ListPackageInfoResponse` | `packages`: `repeated PackageInfo` |
-| `ListPackageInfoFromFiles` | `ListPackageInfoFromFilesResponse` | `packages`: `repeated InspectLocalPackageResult` |
-| `GetTimelineInfo` | `TimelineData` | `events`, `ssamd_uptime` |
+| [`InstallPackage`](#installpackage) | `InstallPackageResponse` | `package_data`: [`PackageData`](#packagedata) |
+| [`RemovePackage`](#removepackage) | `google.protobuf.Empty` | *(none)* |
+| [`StartPackage`](#startpackage) | `StartPackageResponse` | `results`: repeated [`PackageActionResult`](#packageactionresult) |
+| [`StopPackage`](#stoppackage) | `StopPackageResponse` | `results`: repeated [`PackageActionResult`](#packageactionresult) |
+| [`WipePackageData`](#wipepackagedata) | `WipePackageDataResponse` | `results`: repeated [`PackageActionResult`](#packageactionresult) |
+| [`ListPackages`](#listpackages) | `ListPackagesResponse` | `entries`: repeated [`PackageStatusEntry`](#packagestatusentry) |
+| [`ListPackageInfo`](#listpackageinfo) | `ListPackageInfoResponse` | `packages`: repeated [`PackageInfo`](#packageinfo) |
+| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | `ListPackageInfoFromFilesResponse` | `packages`: repeated [`InspectLocalPackageResult`](#inspectlocalpackageresult) |
+| [`GetTimelineInfo`](#gettimelineinfo) | `TimelineData` | `events`: repeated [`TimelineEvent`](#timelineevent), `ssamd_uptime`: [`google.protobuf.Duration`](#googleprotobufduration) |
 
 ---
 
@@ -288,12 +297,6 @@ Per-package outcome for the bulk operations (`StartPackage`, `StopPackage`,
 | `success` | `bool` | always | Whether the operation succeeded for this package |
 | `message` | `string` | optional | Detail, typically on failure |
 
-### `InstallPackageResponse`
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `package_data` | `PackageData` | Package data for the newly installed package |
-
 ### `InspectLocalPackageResult`
 
 | Field | Type | Meaning |
@@ -339,7 +342,7 @@ Per-package outcome for the bulk operations (`StartPackage`, `StopPackage`,
 
 ## Examples
 
-The following is protobuf text-format pseudo-output, not the on-wire format.
+The examples below are shown in protobuf **text format**, not the binary wire format actually sent over *gRPC*.
 
 `ListPackageInfo` — success:
 

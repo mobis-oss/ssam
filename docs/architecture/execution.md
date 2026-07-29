@@ -70,14 +70,14 @@ flowchart TB
   directories, verifies signatures, and drives each package's state machine (`TransitionManager`).
 - **Acquiring the data volume.** `PackageVolumeManagerActor` creates the package's data directory when
   the package is loaded and registered, and — when configured — limits data usage. This limit is
-  currently supported only when the data partition's filesystem is *ext4*, applied through *Project Quota*.
+  supported only when the data partition's filesystem is *ext4*, applied through project quota.
 - **Building the runtime environment.** `PackageTransitioner` builds the container's
   runtime environment from a verified package — `PackageFileSystem` enables *dm-verity* on the
   filesystem for runtime integrity and mounts it read-only, `ContainerCommand` generates the
   *OCI Runtime config*, and `NetworkManager` attaches the network namespace.
 - **Running the container.** `TransientUnitExecutor` registers and starts the assembled
-  *OCI Runtime bundle* as a systemd service unit, and *crun* creates and runs the container.
-- **Tracking container state.** `ActiveStateConverterActor` then monitors the systemd
+  *OCI Runtime bundle* as a *systemd* service unit, and *crun* creates and runs the container.
+- **Tracking container state.** `ActiveStateConverterActor` then monitors the *systemd*
   unit's state and updates the package status (Running / Ready) in `TransitionManager`.
 
 ---
@@ -94,7 +94,7 @@ flowchart LR
   V --> VOL["acquire data volume<br/>data dir · quota"]
   VOL --> SU
 
-  subgraph SU["build runtime env (concurrent · fail-closed)"]
+  subgraph SU["build runtime env (concurrent · all must succeed)"]
     direction TB
     M["establish dm-verity &amp; mount"]
     C["generate OCI Runtime config"]
@@ -117,10 +117,10 @@ Once verified, it first **acquires the package's data volume** — it creates a
 per-package directory under [`packages_data_root`](../reference/daemon-config.md#packages_data_root), creates each path the package
 declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and,
 if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps
-usage with *ext4 Project Quota*.
+usage with *ext4* project quota.
 
 It then **builds the runtime environment**. These build steps run **concurrently
-wherever possible, and all must succeed (fail-closed)**:
+wherever possible, and all must succeed**:
 
 - **Establish dm-verity & mount read-only** — from the **signed dm-verity
   table**, set up a device-mapper verity target over the package filesystem
@@ -137,26 +137,26 @@ wherever possible, and all must succeed (fail-closed)**:
   namespace to an internal bridge.
 
 Finally, the *OCI Runtime config* built with the rootfs location — the *OCI Runtime bundle* —
-is handed to a systemd service unit that runs the container (next section).
+is handed to a *systemd* service unit that runs the container (next section).
 
 ---
 
 ## Running the container
 
-`ssamd` runs the container as a systemd `transient` service unit:
+`ssamd` runs the container as a *systemd* `transient` service unit:
 
 - **systemd.** `ssamd` registers a **service unit** whose `Type=` comes from the
   package's [`service_type`](../reference/package-config.md#service_type)
-  (`simple`, `notify`, `oneshot`, …). systemd owns the unit's lifecycle,
+  (`simple`, `notify`, `oneshot`, …). *systemd* owns the unit's lifecycle,
   restarts, and ordering.
-- **`crun`.** systemd's `ExecStart` runs *crun* on the *OCI Runtime bundle*,
+- **`crun`.** *systemd*'s `ExecStart` runs *crun* on the *OCI Runtime bundle*,
   which creates the container.
-- **Tracking & logs.** The container runs as a systemd service, and `ssamd` registers to
+- **Tracking & logs.** The container runs as a *systemd* service, and `ssamd` registers to
   monitor it. State changes of the service (i.e. the container) are reported back to `ssamd`, and
-  logs from systemd and the container go to the systemd journal, viewable with `journalctl`.
+  logs from *systemd* and the container go to the *systemd* journal, viewable with `journalctl`.
 
-Rather than embedding a container engine, `ssamd` uses the target's existing service
-manager (systemd) and the *OCI Runtime* (crun) to run the container.
+`ssamd` does not embed a container engine; it uses the target's existing service
+manager (*systemd*) and the *OCI Runtime* (*crun*) to run the container.
 
 ---
 
@@ -171,7 +171,7 @@ The current state per package can be queried via the [`ListPackages`](../referen
 | `SettingUp` | dm-verity / mount / provisioning in progress. |
 | `Ready` | Set up and installed; not currently running. |
 | `StartRequested` | [`StartPackage`](../reference/remocon-rpc.md#startpackage) accepted; container coming up. |
-| `Running` | Container active (carries the underlying systemd service state). |
+| `Running` | Container active (carries the underlying *systemd* service state). |
 | `StopRequested` | [`StopPackage`](../reference/remocon-rpc.md#stoppackage) accepted; container coming down. |
 | `CleaningUp` / `Cleaned` | Teardown of mounts / resources in progress / done. |
 | `Upgrading` | Package is being replaced by a newer version. |

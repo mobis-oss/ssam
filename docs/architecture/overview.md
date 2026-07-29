@@ -48,7 +48,7 @@ This document describes the architecture SSAM's implementation applies toward th
 
 SSAM separates the **build side** (producing packages off-device) from the
 **runtime side** (verifying and running them on-device), joined by the signed
-`.ssam` artifact:
+SSAM package artifact:
 
 ```mermaid
 flowchart LR
@@ -59,7 +59,7 @@ flowchart LR
   end
   subgraph R["Runtime — on-device, root"]
     direction TB
-    C["gRPC client"] -->|"control request (Remocon gRPC)"| D["ssamd"]
+    C["Remocon client"] -->|"control request (Remocon gRPC)"| D["ssamd"]
     D -->|"start"| S["systemd + crun"]
     S -->|"create"| CT(["container"])
   end
@@ -69,8 +69,10 @@ flowchart LR
 
   classDef actor fill:#dbeafe,stroke:#2563eb,color:#1e3a5f;
   classDef data fill:#eef1f5,stroke:#94a3b8,color:#334155;
+  classDef ext fill:#fef3c7,stroke:#d97706,color:#78350f;
   classDef result fill:#dcfce7,stroke:#16a34a,color:#14532d;
-  class W,D,C,S actor;
+  class W,D,C actor;
+  class S ext;
   class A,P,KP,K data;
   class CT result;
   style B stroke:#94a3b8
@@ -101,7 +103,7 @@ From authoring to a running container:
    on the built environment.
    → [Serving SSAM](../guides/serving-ssam.md)
 7. **Manage** — install / upgrade / start / stop / remove packages via a
-   *gRPC* client such as `ssam`.
+   Remocon client such as `ssam`.
    → [Writing a Remocon Client](../guides/writing-a-remocon-client.md)
 
 ---
@@ -116,7 +118,7 @@ A device carries packages from two sources:
 overrides a bundled one of the same name, and removing that override restores the
 bundled package underneath.
 
-> Details: [Package Management](package-management.md)
+> 📖 See [Package Management](package-management.md) for details.
 
 ---
 
@@ -148,7 +150,7 @@ the container. From a verified package, `ssamd` tracks and verifies it, generate
 *systemd transient service unit* to actually run it. `ssamd` then monitors the running
 container's state and manages the package status.
 
-> Details: [Execution Architecture](execution.md)
+> 📖 See [Execution Architecture](execution.md) for details.
 
 ---
 
@@ -159,12 +161,12 @@ may be updated freely, yet is still verified and run continuously:
 
 1. **RSA signature.** Each package is signed over its **configuration data**;
    `ssamd` rejects anything not signed by the trusted key.
-2. **Continuous integrity.** `ssamd` uses dm-verity to have the kernel verify
+2. **Continuous integrity.** `ssamd` uses *dm-verity* to have the kernel verify
    every block on read, so tampering is caught at runtime, not just at load. The
-   dm-verity parameters are included in the configuration data signed with RSA, so
+   *dm-verity* parameters are included in the configuration data signed with *RSA*, so
    the integrity check itself is trustworthy.
 
-> Details: [Package Integrity](package-integrity.md)
+> 📖 See [Package Integrity](package-integrity.md) for details.
 
 ---
 
@@ -174,4 +176,4 @@ The isolation that confines a running container (seccomp, MAC (AppArmor), cgroup
 and network) is provided by the kernel and the *OCI Runtime*. SSAM provides the means for a
 package to **specify** this isolation.
 
-> Details: [Container Isolation](container-isolation.md)
+> 📖 See [Container Isolation](container-isolation.md) for details.
