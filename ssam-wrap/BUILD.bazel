@@ -26,6 +26,7 @@ rust_binary(
         "@crates//:strum",
         "@crates//:oci-spec",
         "@crates//:serde_json",
+        "@crates//:toml",
         "@crates//:fs_extra",
         "@crates//:linux-raw-sys",
     ],
