@@ -182,6 +182,18 @@ impl Daemon {
                 format!("Failed to create package mount root directory '{packages_mnt_root}'")
             })?;
 
+        let bundle_root = configuration::runtime_bundle_root();
+        fs::DirBuilder::new()
+            .mode(0o755)
+            .recursive(true)
+            .create(&bundle_root)
+            .with_context(|| {
+                format!(
+                    "Failed to create runtime bundle root '{}'",
+                    bundle_root.display()
+                )
+            })?;
+
         Ok(())
     }
 }

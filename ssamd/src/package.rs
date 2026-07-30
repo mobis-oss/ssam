@@ -423,7 +423,7 @@ pub struct Package {
     context: PackageContext,
     transition_mgr: TransitionManager,
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
-    _receiver_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+    receiver_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
 impl Package {
@@ -532,7 +532,7 @@ impl Package {
             context,
             transition_mgr,
             volume_manager_ref,
-            _receiver_handle: receiver_handle,
+            receiver_handle,
         };
 
         pkg.initialize();
@@ -622,7 +622,10 @@ impl Package {
     /// Returns an error if stopping the container or unmounting the package
     /// filesystem fails during the upgrade transition.
     pub async fn prepare_upgrade(&self) -> anyhow::Result<()> {
-        self.transition_mgr.prepare_upgrade().await
+        self.transition_mgr.prepare_upgrade().await?;
+        // Release the superseded actor so its bundle dir drops.
+        self.receiver_handle.abort();
+        Ok(())
     }
 
     /// # Errors
@@ -630,15 +633,18 @@ impl Package {
     /// Returns an error if stopping the container or unmounting the package
     /// filesystem fails.
     pub async fn teardown(&self) -> anyhow::Result<()> {
+        // Abort first: a failing teardown below must not skip the release.
+        self.receiver_handle.abort();
+
         let status = self.get_status().await?;
         // Nothing to tear down — these states have no mounted filesystem.
-        if matches!(
+        if !matches!(
             status,
             PackageStatus::Verified | PackageStatus::Cleaned | PackageStatus::Upgrading
         ) {
-            return Ok(());
+            self.transition_mgr.teardown().await?;
         }
-        self.transition_mgr.teardown().await
+        Ok(())
     }
 
     #[must_use]

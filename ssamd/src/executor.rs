@@ -65,9 +65,11 @@ impl std::fmt::Display for ExecutionStatus {
 }
 
 pub(crate) mod oci {
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    use crate::configuration;
     use anyhow::Context;
     use libssam::container::NetworkMode;
     use libssam::ssam_package::PackageSeccompPolicy;
@@ -77,6 +79,48 @@ pub(crate) mod oci {
         Mount, MountBuilder, RootBuilder,
     };
     use tempfile::TempDir;
+
+    // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
+    #[allow(clippy::unnecessary_debug_formatting)]
+    fn create_bundle_dir(dir_name: &str) -> anyhow::Result<TempDir> {
+        anyhow::ensure!(
+            crate::utils::is_safe_path_segment(dir_name),
+            "Unsafe bundle directory name rejected: {dir_name:?}"
+        );
+        let root = configuration::runtime_bundle_root();
+        remove_existing_bundle(&root.join(dir_name))?;
+
+        // rand_bytes(0) keeps the fixed <pkg>-<version> name.
+        tempfile::Builder::new()
+            .prefix(dir_name)
+            .rand_bytes(0)
+            .permissions(fs::Permissions::from_mode(0o755))
+            .tempdir_in(&root)
+            .with_context(|| format!("Failed to create bundle directory in {root:?}"))
+    }
+
+    // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
+    #[allow(clippy::unnecessary_debug_formatting)]
+    fn remove_existing_bundle(path: &Path) -> anyhow::Result<()> {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(());
+                }
+                return Err(e).with_context(|| format!("Failed to stat bundle directory {path:?}"));
+            }
+        };
+
+        if meta.file_type().is_dir() {
+            fs::remove_dir_all(path)
+                .with_context(|| format!("Failed to remove bundle directory {path:?}"))
+        } else {
+            // Stale non-dir leftover at the fixed path: unlink so it self-heals.
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove stale bundle path {path:?}"))
+        }
+    }
 
     /// Represents the host architecture mapped to seccomp architecture constants.
     /// Maps `std::env::consts::ARCH` values to corresponding `SCMP_ARCH_*` values.
@@ -120,7 +164,7 @@ pub(crate) mod oci {
 
     #[derive(Debug)]
     pub(crate) struct TransientRuntimeConfig {
-        path: TempDir,
+        bundle_path: TempDir,
     }
 
     impl TransientRuntimeConfig {
@@ -143,18 +187,13 @@ pub(crate) mod oci {
                 network_mode,
                 cgroups_path,
                 package_name,
+                version,
                 mount_point,
                 data_mounts,
                 bridge_netns_path,
             } = spec;
 
-            // Create bundle dir as 0700 atomically. /tmp is world-writable and the
-            // default umask would leave it 0755, exposing config.json (mount paths,
-            // env, args) and rootfs references to other local users.
-            let path = tempfile::Builder::new()
-                .permissions(std::fs::Permissions::from_mode(0o700))
-                .tempdir()
-                .context("Failed to create temporary directory")?;
+            let bundle_path = create_bundle_dir(&format!("{package_name}_{version}"))?;
 
             // just absolutize the rootfs path. the rootfs might not be mounted yet.
             let rootfs_path = std::path::absolute(&mount_point).with_context(|| {
@@ -216,7 +255,7 @@ pub(crate) mod oci {
                 }
             }
 
-            let new_conf_path = path.path().join("config.json");
+            let new_conf_path = bundle_path.path().join("config.json");
 
             oci_runtime_conf
                 .save_pretty(new_conf_path.as_path())
@@ -225,7 +264,7 @@ pub(crate) mod oci {
                     new_conf_path.display()
                 ))?;
 
-            Ok(Self { path })
+            Ok(Self { bundle_path })
         }
 
         // TODO: ssam-wrap will validate that runtime.json does not contain a
@@ -433,7 +472,7 @@ pub(crate) mod oci {
         }
 
         pub(crate) fn dir_path(&self) -> &Path {
-            self.path.path()
+            self.bundle_path.path()
         }
     }
 
@@ -525,6 +564,7 @@ pub(crate) mod oci {
         pub(crate) network_mode: NetworkMode,
         pub(crate) cgroups_path: String,
         pub(crate) package_name: String,
+        pub(crate) version: String,
         pub(crate) mount_point: PathBuf,
         pub(crate) data_mounts: Option<DataMountPaths>,
         pub(crate) bridge_netns_path: Option<std::path::PathBuf>,
@@ -577,12 +617,11 @@ pub(crate) trait ExecuteCommand: Send + Sync + std::fmt::Debug {
 }
 
 pub(crate) mod container {
+    use crate::network::netns;
+    use crate::package_volume::PackageVolume;
     use anyhow::Context as _;
     use libssam::container;
     use libssam::ssam_package::PackageFile;
-
-    use crate::network::netns;
-    use crate::package_volume::PackageVolume;
 
     use super::{ContainerRuntime, ExecuteCommand, oci};
 
@@ -643,6 +682,7 @@ pub(crate) mod container {
                 network_mode,
                 cgroups_path,
                 package_name: name.clone(),
+                version: metadata.version().to_string(),
                 mount_point: pkg_volume.get_mount_point().to_path_buf(),
                 data_mounts,
                 bridge_netns_path,
@@ -720,6 +760,21 @@ mod tests {
         PackageSeccompPolicy::default_policy()
     }
 
+    // Daemon::setup_runtime_environ creates the bundle root at startup; tests
+    // construct configs directly and bypass startup, so create it here once.
+    fn ensure_test_bundle_root() {
+        use crate::configuration;
+        use std::os::unix::fs::DirBuilderExt;
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            fs::DirBuilder::new()
+                .mode(0o755)
+                .recursive(true)
+                .create(configuration::runtime_bundle_root())
+                .expect("Failed to create test runtime bundle root");
+        });
+    }
+
     // Helper to create a real PackageVolume for testing using the package_volume test infrastructure
     fn create_test_package_volume_real(mount_point: &Path) -> anyhow::Result<PackageVolume> {
         use crate::package_volume::tests::mocks::{MockLoopDeviceControl, MockMountBackend};
@@ -781,6 +836,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
 
         // Create a real PackageVolume using the same infrastructure as package_volume tests
         let package_volume = create_test_package_volume_real(&mount_point)
@@ -793,7 +849,8 @@ mod tests {
             mac_enabled: true,
             network_mode: libssam::container::NetworkMode::None,
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package".to_owned(),
+            package_name: "test-package-basic".to_owned(),
+            version: "1.0.0".to_owned(),
             mount_point: package_volume.get_mount_point().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
@@ -824,17 +881,17 @@ mod tests {
 
         // Verify it contains expected elements
         assert!(
-            content.contains("test-package"),
+            content.contains("test-package-basic"),
             "Should contain package name as hostname"
         );
         assert!(
-            content.contains("/sys/fs/cgroup/system.slice/test-package.service/container"),
+            content.contains("/sys/fs/cgroup/system.slice/test-package-basic.service/container"),
             "Should contain correct cgroups path"
         );
     }
 
     #[test]
-    fn test_transient_runtime_config_bundle_dir_is_0700() {
+    fn test_transient_runtime_config_bundle_dir_is_0755() {
         use std::os::unix::fs::PermissionsExt;
 
         let oci_spec = create_test_oci_spec();
@@ -842,6 +899,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
 
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
@@ -852,7 +910,8 @@ mod tests {
             mac_enabled: true,
             network_mode: libssam::container::NetworkMode::None,
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package".to_owned(),
+            package_name: "test-package-mode".to_owned(),
+            version: "1.0.0".to_owned(),
             mount_point: package_volume.get_mount_point().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
@@ -862,9 +921,179 @@ mod tests {
         let meta = fs::symlink_metadata(config.dir_path()).expect("Failed to stat bundle dir");
         assert_eq!(
             meta.permissions().mode() & 0o777,
-            0o700,
-            "Bundle directory must be restricted to 0700"
+            0o755,
+            "Bundle directory must be 0755 so a separate-uid runtime consumer can read it"
         );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_uses_fixed_package_dir() {
+        let oci_spec = create_test_oci_spec();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: None,
+            mac_enabled: false,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: "test-package-fixed-dir".to_owned(),
+            version: "1.0.0".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        })
+        .expect("TransientRuntimeConfig::new should succeed");
+
+        assert_eq!(
+            config.dir_path(),
+            std::env::temp_dir()
+                .join(".ssamd")
+                .join("test-package-fixed-dir_1.0.0")
+        );
+        assert!(
+            config.dir_path().join("config.json").exists(),
+            "config.json should be created in the fixed package directory"
+        );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_removes_existing_bundle_dir() {
+        let package_name = "test-package-stale-dir";
+        let bundle_path = std::env::temp_dir()
+            .join(".ssamd")
+            .join(format!("{package_name}_1.0.0"));
+        fs::create_dir_all(&bundle_path).expect("Failed to create stale bundle dir");
+        let stale_file = bundle_path.join("stale");
+        fs::write(&stale_file, "stale").expect("Failed to write stale file");
+
+        let oci_spec = create_test_oci_spec();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: None,
+            mac_enabled: false,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: package_name.to_owned(),
+            version: "1.0.0".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        })
+        .expect("TransientRuntimeConfig::new should succeed");
+
+        assert_eq!(config.dir_path(), bundle_path);
+        assert!(
+            !stale_file.exists(),
+            "existing bundle dir should be removed before recreation"
+        );
+        assert!(
+            config.dir_path().join("config.json").exists(),
+            "config.json should be created after recreating bundle dir"
+        );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_drop_removes_package_dir() {
+        let package_name = "test-package-drop-cleanup";
+        let oci_spec = create_test_oci_spec();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: None,
+            mac_enabled: false,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: package_name.to_owned(),
+            version: "1.0.0".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        })
+        .expect("TransientRuntimeConfig::new should succeed");
+
+        let root = std::env::temp_dir().join(".ssamd");
+        let bundle_path = config.dir_path().to_path_buf();
+        assert!(bundle_path.exists(), "bundle dir should exist before drop");
+
+        drop(config);
+
+        assert!(
+            !bundle_path.exists(),
+            "bundle dir should be removed on drop"
+        );
+        assert!(root.exists(), "runtime bundle root should be preserved");
+    }
+
+    #[test]
+    fn test_transient_runtime_config_distinct_versions_isolated() {
+        let package_name = "test-package-recreated";
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let old_config = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: create_test_oci_spec(),
+            seccomp_policy: None,
+            mac_enabled: false,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: package_name.to_owned(),
+            version: "1.0.0".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        })
+        .expect("old runtime config should be created");
+        let old_path = old_config.dir_path().to_path_buf();
+
+        let new_config = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: create_test_oci_spec(),
+            seccomp_policy: None,
+            mac_enabled: false,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: package_name.to_owned(),
+            version: "2.0.0".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        })
+        .expect("new runtime config should be created");
+        let new_path = new_config.dir_path().to_path_buf();
+
+        // The version keeps an upgrade's two live configs on distinct paths, so
+        // dropping the superseded one cannot touch the incoming bundle.
+        assert_ne!(old_path, new_path);
+
+        drop(old_config);
+
+        assert!(
+            new_path.join("config.json").exists(),
+            "dropping the old version must not remove the new version's bundle"
+        );
+        assert!(!old_path.exists(), "the old version's bundle is cleaned up");
     }
 
     #[test]
@@ -876,6 +1105,7 @@ mod tests {
         let mount_point = temp_dir.path().join("mount");
         let data_root = temp_dir.path().join("data");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
         fs::create_dir_all(&data_root).expect("Failed to create data root");
 
         // Create a real PackageVolume with data directory
@@ -895,7 +1125,8 @@ mod tests {
             mac_enabled: true,
             network_mode: libssam::container::NetworkMode::None,
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package".to_owned(),
+            package_name: "test-package-data".to_owned(),
+            version: "1.0.0".to_owned(),
             mount_point: package_volume.get_mount_point().to_path_buf(),
             data_mounts,
             bridge_netns_path: None,
@@ -931,6 +1162,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
 
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
@@ -943,6 +1175,7 @@ mod tests {
             network_mode: libssam::container::NetworkMode::None,
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-no-seccomp".to_owned(),
+            version: "1.0.0".to_owned(),
             mount_point: package_volume.get_mount_point().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
@@ -978,6 +1211,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        ensure_test_bundle_root();
 
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
@@ -990,6 +1224,7 @@ mod tests {
             network_mode: libssam::container::NetworkMode::None,
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-with-seccomp".to_owned(),
+            version: "1.0.0".to_owned(),
             mount_point: package_volume.get_mount_point().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
@@ -1054,13 +1289,14 @@ mod tests {
         use crate::executor::container::ContainerCommand;
         use crate::executor::{ContainerRuntime, ExecuteCommand};
 
-        fn create_test_container_command() -> ContainerCommand {
+        fn create_test_container_command(package_name: &str) -> ContainerCommand {
             use crate::executor::oci::ContainerBundleSpec;
             let oci_spec = create_test_oci_spec();
             let seccomp_policy = create_test_seccomp_policy();
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+            ensure_test_bundle_root();
 
             let spec = ContainerBundleSpec {
                 oci_template: oci_spec,
@@ -1068,28 +1304,29 @@ mod tests {
                 mac_enabled: true,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-                package_name: "test-container".to_owned(),
+                package_name: package_name.to_owned(),
+                version: "1.0.0".to_owned(),
                 mount_point,
                 data_mounts: None,
                 bridge_netns_path: None,
             };
             // temp_dir drops here but mount_point PathBuf is copied into spec.
             // std::path::absolute() does not require path to exist on disk.
-            ContainerCommand::new("test-container".to_string(), ContainerRuntime::CRun, spec)
+            ContainerCommand::new(package_name.to_owned(), ContainerRuntime::CRun, spec)
         }
 
         #[test]
         fn test_container_command_new() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-new");
 
             // Test that the ContainerExecutor was created successfully
-            assert!(format!("{executor:?}").contains("test-container"));
+            assert!(format!("{executor:?}").contains("test-container-new"));
             assert!(format!("{executor:?}").contains("CRun"));
         }
 
         #[tokio::test]
         async fn test_container_command_get_start_args() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-start-args");
 
             executor
                 .prepare()
@@ -1102,7 +1339,7 @@ mod tests {
             assert_eq!(start_args[0], "/usr/bin/crun");
             assert_eq!(start_args[1], "run");
             assert_eq!(start_args[2], "--bundle");
-            assert_eq!(start_args[4], "test-container");
+            assert_eq!(start_args[4], "test-container-start-args");
 
             let bundle_path = Path::new(&start_args[3]);
             assert!(
@@ -1113,7 +1350,7 @@ mod tests {
 
         #[test]
         fn test_container_command_get_stop_args() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-stop-args");
 
             let stop_args = executor.get_stop_cmd().expect("Should get stop command");
 
@@ -1122,12 +1359,12 @@ mod tests {
             assert_eq!(stop_args[0], "/usr/bin/crun");
             assert_eq!(stop_args[1], "delete");
             assert_eq!(stop_args[2], "--force");
-            assert_eq!(stop_args[3], "test-container");
+            assert_eq!(stop_args[3], "test-container-stop-args");
         }
 
         #[tokio::test]
         async fn test_container_command_get_start_args_bundle_not_exists() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-missing-bundle");
 
             executor
                 .prepare()
@@ -1158,7 +1395,7 @@ mod tests {
 
         #[test]
         fn test_container_command_unprepared_get_start_args_error() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-unprepared");
 
             let result = executor.get_start_cmd();
 
@@ -1172,7 +1409,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_container_command_prepare_idempotent() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-idempotent");
 
             executor
                 .prepare()
@@ -1201,7 +1438,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_container_command_prepared_get_start_args_valid() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-prepared");
 
             executor
                 .prepare()
@@ -1213,7 +1450,7 @@ mod tests {
             assert_eq!(start_args[1], "run");
             assert_eq!(start_args[2], "--bundle");
             assert!(Path::new(&start_args[3]).exists());
-            assert_eq!(start_args[4], "test-container");
+            assert_eq!(start_args[4], "test-container-prepared");
         }
 
         #[test]
@@ -1224,12 +1461,12 @@ mod tests {
 
         #[test]
         fn test_container_command_debug_format() {
-            let executor = create_test_container_command();
+            let executor = create_test_container_command("test-container-debug");
             let debug_str = format!("{executor:?}");
 
             // Verify debug format contains expected information
             assert!(debug_str.contains("ContainerCommand"));
-            assert!(debug_str.contains("test-container"));
+            assert!(debug_str.contains("test-container-debug"));
             assert!(debug_str.contains("CRun"));
             assert!(debug_str.contains("ContainerBundleSpec"));
         }
@@ -1538,6 +1775,7 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -1549,6 +1787,7 @@ mod tests {
                 network_mode: NetworkMode::Host,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-host-net".to_owned(),
+                version: "1.0.0".to_owned(),
                 mount_point: package_volume.get_mount_point().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,
@@ -1591,6 +1830,7 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -1602,6 +1842,7 @@ mod tests {
                 network_mode: NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-none-net".to_owned(),
+                version: "1.0.0".to_owned(),
                 mount_point: package_volume.get_mount_point().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,
@@ -1637,6 +1878,7 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -1648,6 +1890,7 @@ mod tests {
                 network_mode: NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-none-dup".to_owned(),
+                version: "1.0.0".to_owned(),
                 mount_point: package_volume.get_mount_point().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,
@@ -1686,6 +1929,7 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -1698,6 +1942,7 @@ mod tests {
                 network_mode: NetworkMode::Bridge,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-bridge-path".to_owned(),
+                version: "1.0.0".to_owned(),
                 mount_point: package_volume.get_mount_point().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: Some(netns_path.to_path_buf()),
@@ -1746,6 +1991,7 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -1757,6 +2003,7 @@ mod tests {
                 network_mode: NetworkMode::Bridge,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-bridge-no-path".to_owned(),
+                version: "1.0.0".to_owned(),
                 mount_point: package_volume.get_mount_point().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,

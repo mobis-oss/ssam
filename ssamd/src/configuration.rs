@@ -29,6 +29,10 @@ pub(crate) fn default_config_path() -> PathBuf {
     manifest_dir.join("testdata/testconfig/ssamd.toml")
 }
 
+pub(crate) fn runtime_bundle_root() -> PathBuf {
+    std::env::temp_dir().join(".ssamd")
+}
+
 /// Common runtime configuration structure that matches build-time config values
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Common {
