@@ -126,10 +126,7 @@ pub fn extract_rootfs(
             let arch = arch.trim_matches(|c: char| c == '\'' || c.is_whitespace());
             if arch != architecture.to_string() {
                 return Err(anyhow::anyhow!(
-                    "Docker image {} is not for {} architecture, found: {}",
-                    docker_uri,
-                    architecture,
-                    arch,
+                    "Docker image {docker_uri} is not for {architecture} architecture, found: {arch}",
                 ));
             }
         } else {

@@ -262,7 +262,7 @@ fn parse_cli() -> anyhow::Result<Cli> {
     )?)
 }
 
-fn run(args: Cli, runner: Box<dyn CommandRunner>) -> anyhow::Result<()> {
+fn run(args: &Cli, runner: Box<dyn CommandRunner>) -> anyhow::Result<()> {
     let workspace = Workspace::new(&args.workspace, runner);
 
     // TODO
@@ -330,7 +330,7 @@ fn run(args: Cli, runner: Box<dyn CommandRunner>) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let args = parse_cli()?;
-    run(args, Box::new(command::SystemCommandRunner))
+    run(&args, Box::new(command::SystemCommandRunner))
 }
 
 #[cfg(test)]
