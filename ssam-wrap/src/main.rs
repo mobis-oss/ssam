@@ -509,7 +509,7 @@ mod tests {
         let mock = MockCommandRunner::new();
         let handle = mock.clone();
 
-        run(cli, Box::new(mock)).unwrap();
+        run(&cli, Box::new(mock)).unwrap();
 
         assert!(ws.join(PACKAGE_CONFIG_FILENAME).exists());
         assert!(ws.join(RUNTIME_CONFIG_FILENAME).exists());
@@ -526,7 +526,7 @@ mod tests {
         // Wrap mode (no --prepare) without --private-key.
         let cli = Cli::try_parse_from(["ssam-wrap", ws.to_str().unwrap()]).unwrap();
 
-        let err = run(cli, Box::new(MockCommandRunner::new())).unwrap_err();
+        let err = run(&cli, Box::new(MockCommandRunner::new())).unwrap_err();
         assert!(err.to_string().contains("Private key"));
     }
 }
