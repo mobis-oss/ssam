@@ -77,7 +77,9 @@ use ssam_pkg_payload::{Payload, PayloadType, SSAM_PAYLOAD_CONFIGURATION};
 use ssam_pkg_runtime_config::PackageRuntimeConfig;
 pub use ssam_pkg_seccomp::PackageSeccompPolicy;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::{fs::File, path::Path};
 use strum::IntoEnumIterator;
 use zip::{ZipArchive, ZipWriter};
@@ -352,10 +354,33 @@ impl PackageFile {
         public_key: impl AsRef<std::path::Path>,
     ) -> Result<PackageFile, PackageParseError> {
         let package_file = package_file.as_ref();
-        let mut pkg_fp = File::open(package_file).map_err(|e| PackageParseError::FileOpen {
-            path: package_file.to_path_buf(),
-            source: e,
-        })?;
+        let mut pkg_fp = OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (linux_raw_sys::general::O_NONBLOCK | linux_raw_sys::general::O_NOCTTY)
+                    .cast_signed(),
+            )
+            .open(package_file)
+            .map_err(|e| PackageParseError::FileOpen {
+                path: package_file.to_path_buf(),
+                source: e,
+            })?;
+
+        let file_type = pkg_fp
+            .metadata()
+            .map_err(|e| PackageParseError::FileOpen {
+                path: package_file.to_path_buf(),
+                source: e,
+            })?
+            .file_type();
+        if !file_type.is_file() {
+            // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
+            #[allow(clippy::unnecessary_debug_formatting)]
+            return Err(PackageParseError::Io {
+                message: format!("Package path is not a regular file: {package_file:?}"),
+                source: anyhow!("not a regular file"),
+            });
+        }
 
         let (ssam_payloads, verified) = Self::load_payloads_info(&mut pkg_fp, &public_key)?;
 
@@ -1292,6 +1317,50 @@ pub(crate) mod tests {
         assert_eq!(package_file.metadata().package.name, "test_package");
         assert_eq!(package_file.runtime_config().version(), "1.0.0");
         assert!(package_file.seccomp_policy().as_str().is_ok());
+    }
+
+    #[test]
+    fn test_from_file_verified_rejects_fifo() {
+        let temp_dir = tempdir().unwrap();
+        let fifo_path = temp_dir.path().join("test.fifo");
+        let public_key_path = temp_dir.path().join("pub.pem");
+        let private_key_path = temp_dir.path().join("priv.pem");
+        create_test_keys(&private_key_path, &public_key_path);
+
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo_path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+
+        let result = PackageFile::from_file_verified(&fifo_path, &public_key_path);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PackageParseError::Io { .. })
+                && err.to_string().contains("not a regular file"),
+            "Expected 'not a regular file' Io error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_from_file_verified_rejects_special_file() {
+        let temp_dir = tempdir().unwrap();
+        let public_key_path = temp_dir.path().join("pub.pem");
+        let private_key_path = temp_dir.path().join("priv.pem");
+        create_test_keys(&private_key_path, &public_key_path);
+
+        let result = PackageFile::from_file_verified(Path::new("/dev/null"), &public_key_path);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PackageParseError::Io { .. })
+                && err.to_string().contains("not a regular file"),
+            "Expected 'not a regular file' Io error, got: {err:?}"
+        );
     }
 
     #[test]

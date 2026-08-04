@@ -313,6 +313,18 @@ impl Remocon for RemoconImpl {
             return Ok(Response::new(InspectLocalPackageProtoResponse { result }));
         }
 
+        // Accept regular files with the expected package extension only — a
+        // mismatched extension can never install, so reject it here too.
+        let has_package_ext = crate::package_manager::parser::has_package_extension(&package_path);
+        if let Ok(meta) = tokio::fs::metadata(&package_path).await
+            && (!meta.is_file() || !has_package_ext)
+        {
+            let result = JsonResult::<InspectLocalPackageResponse>::failure(format!(
+                "Package path is not a valid package file: {package_path:?}"
+            ));
+            return Ok(Response::new(InspectLocalPackageProtoResponse { result }));
+        }
+
         let pkg_path = package_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::package_manager::parser::parse_package_file(pkg_path)
@@ -1153,7 +1165,10 @@ pub(crate) mod tests {
         crate::configuration::ensure_test_init();
         let (remocon, _mock_manager) = create_test_remocon();
 
-        let tmp = tempfile::NamedTempFile::new().expect("temp file creation should succeed");
+        let tmp = tempfile::Builder::new()
+            .suffix(".ssam")
+            .tempfile()
+            .expect("temp file creation should succeed");
         std::fs::write(tmp.path(), b"not a valid ssam package")
             .expect("temp file write should succeed");
 
@@ -1168,6 +1183,79 @@ pub(crate) mod tests {
         assert!(!check_json_success(json_result));
         let reason = get_json_reason(json_result);
         assert!(reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_inspect_local_package_rejects_wrong_extension() {
+        crate::configuration::ensure_test_init();
+        let (remocon, _mock_manager) = create_test_remocon();
+
+        let tmp = tempfile::Builder::new()
+            .suffix(".bin")
+            .tempfile()
+            .expect("temp file creation should succeed");
+        std::fs::write(tmp.path(), b"not a valid ssam package")
+            .expect("temp file write should succeed");
+
+        let request = Request::new(InspectLocalPackageRequest {
+            package_path: tmp.path().to_str().unwrap().to_string(),
+        });
+
+        let response = remocon
+            .inspect_local_package(request)
+            .await
+            .expect("response should be Ok");
+
+        let json_result = &response.into_inner().result;
+        assert!(!check_json_success(json_result));
+        let reason = get_json_reason(json_result);
+        assert!(
+            reason
+                .as_ref()
+                .unwrap()
+                .contains("is not a valid package file"),
+            "expected 'is not a valid package file' in reason, got: {}",
+            reason.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inspect_local_package_rejects_fifo() {
+        crate::configuration::ensure_test_init();
+        let (remocon, _mock_manager) = create_test_remocon();
+
+        let temp_dir = tempfile::tempdir().expect("temp dir creation should succeed");
+        let fifo_path = temp_dir.path().join("test.fifo");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo_path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .expect("mkfifo should succeed");
+
+        let request = Request::new(InspectLocalPackageRequest {
+            package_path: fifo_path.to_str().unwrap().to_string(),
+        });
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            remocon.inspect_local_package(request),
+        )
+        .await
+        .expect("inspect_local_package should return immediately, not block")
+        .expect("response should be Ok");
+
+        let json_result = &response.into_inner().result;
+        assert!(!check_json_success(json_result));
+        let reason = get_json_reason(json_result);
+        assert!(
+            reason
+                .as_ref()
+                .unwrap()
+                .contains("is not a valid package file"),
+            "expected 'is not a valid package file' in reason, got: {}",
+            reason.unwrap()
+        );
     }
 
     #[tokio::test]

@@ -44,6 +44,7 @@ rust_library(
         "@crates//:bytemuck",
         "@crates//:derive_more",
         "@crates//:jiff",
+        "@crates//:linux-raw-sys",
         "@crates//:log",
         "@crates//:oci-spec",
         "@crates//:prost",
@@ -70,6 +71,7 @@ rust_test(
     name = "libssam_test",
     crate = ":libssam",
     deps = [
+        "@crates//:rustix",
         "@crates//:tempfile",
     ],
     visibility = ["//visibility:public"],

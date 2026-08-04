@@ -28,9 +28,11 @@ oci-spec.workspace = true
 jiff = "0.2.15"
 semver.workspace = true
 tonic-prost = "0.14"
+linux-raw-sys = { workspace = true, features = ["general"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 
 [build-dependencies]
 anyhow.workspace = true

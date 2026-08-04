@@ -12,13 +12,15 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio_stream::wrappers::ReadDirStream;
 
+pub(crate) fn has_package_extension(path: &Path) -> bool {
+    let packages_ext = configuration::packages_ext();
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(packages_ext))
+}
+
 pub(crate) fn is_package_file(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
-    let packages_ext = configuration::packages_ext();
-    path.is_file()
-        && path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case(packages_ext))
+    path.is_file() && has_package_extension(path)
 }
 
 async fn dir_stream(dir: &Path) -> Option<ReadDirStream> {
