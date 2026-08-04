@@ -203,7 +203,12 @@ pub(crate) mod oci {
 
             let linux = oci_runtime_conf.linux_mut().get_or_insert(Linux::default());
 
-            let seccomp = Self::build_seccomp_config(seccomp_policy.as_ref());
+            let seccomp =
+                Self::build_seccomp_config(seccomp_policy.as_ref()).with_context(|| {
+                    format!(
+                        "{package_name}: refusing to start container with unmappable seccomp policy"
+                    )
+                })?;
             if seccomp.is_none() {
                 log::info!("{package_name}: seccomp is disabled by configuration");
             }
@@ -366,19 +371,24 @@ pub(crate) mod oci {
 
         /// Builds a `LinuxSeccomp` configuration from the given seccomp policy.
         ///
-        /// Parses the JSON policy, extracts architecture mappings, and constructs
-        /// the final `LinuxSeccomp` with appropriate architectures set.
+        /// `Ok(None)` means no policy is present and seccomp is intentionally disabled.
+        /// A present-but-unmappable policy is an error: the container must not run
+        /// without the filter it was configured to have (fail-closed).
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if a policy is present but cannot be mapped to the OCI
+        /// `LinuxSeccomp` schema.
         fn build_seccomp_config(
             seccomp_policy: Option<&PackageSeccompPolicy>,
-        ) -> Option<LinuxSeccomp> {
-            // Parse seccomp policy JSON
-            let seccomp_json = seccomp_policy.and_then(|policy| {
-                serde_json::from_slice::<serde_json::Value>(policy.as_bytes())
-                    .inspect_err(|e| log::debug!("Failed to parse seccomp profile JSON: {e}"))
-                    .ok()
-            })?;
+        ) -> anyhow::Result<Option<LinuxSeccomp>> {
+            let Some(policy) = seccomp_policy else {
+                return Ok(None);
+            };
 
-            // Extract architectures from archMap
+            let seccomp_json: serde_json::Value = serde_json::from_slice(policy.as_bytes())
+                .context("Failed to parse seccomp profile JSON")?;
+
             let architectures = seccomp_json
                 .get("archMap")
                 .and_then(|v| {
@@ -391,14 +401,10 @@ pub(crate) mod oci {
                     Self::convert_arch_map_to_architectures(arch_map, HostArch::from_env())
                 });
 
-            // Build LinuxSeccomp and set architectures
-            serde_json::from_value::<LinuxSeccomp>(seccomp_json)
-                .inspect_err(|e| log::debug!("Failed to parse seccomp configuration: {e}"))
-                .ok()
-                .map(|mut seccomp| {
-                    seccomp.set_architectures(architectures);
-                    seccomp
-                })
+            let mut seccomp: LinuxSeccomp = serde_json::from_value(seccomp_json)
+                .context("Failed to map seccomp policy to OCI LinuxSeccomp schema")?;
+            seccomp.set_architectures(architectures);
+            Ok(Some(seccomp))
         }
 
         fn make_bind_mounts(
@@ -479,6 +485,41 @@ pub(crate) mod oci {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn build_seccomp_config_none_is_disabled() {
+            let seccomp = TransientRuntimeConfig::build_seccomp_config(None).unwrap();
+            assert!(seccomp.is_none(), "no policy => intentionally disabled");
+        }
+
+        #[test]
+        fn build_seccomp_config_valid_policy_is_applied() {
+            let policy = PackageSeccompPolicy::from_bytes(
+                br#"{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[]}"#.to_vec(),
+            )
+            .unwrap();
+            let seccomp = TransientRuntimeConfig::build_seccomp_config(Some(&policy))
+                .expect("valid policy must map")
+                .expect("must produce a filter");
+            assert!(
+                seccomp.default_action() == oci_spec::runtime::LinuxSeccompAction::ScmpActErrno
+            );
+        }
+
+        #[test]
+        fn build_seccomp_config_bad_oci_schema_fails_closed() {
+            // Valid JSON, invalid OCI enum => must error, never silently disable.
+            let policy =
+                PackageSeccompPolicy::from_bytes(br#"{"defaultAction":"SCMP_ACT_BOGUS"}"#.to_vec())
+                    .unwrap();
+            assert!(TransientRuntimeConfig::build_seccomp_config(Some(&policy)).is_err());
+        }
+
+        #[test]
+        fn build_seccomp_config_missing_default_action_fails_closed() {
+            let policy = PackageSeccompPolicy::from_bytes(br#"{"syscalls":[]}"#.to_vec()).unwrap();
+            assert!(TransientRuntimeConfig::build_seccomp_config(Some(&policy)).is_err());
+        }
 
         #[test]
         fn test_make_bind_mounts_rejects_traversal_data_dir() {
@@ -1256,6 +1297,37 @@ mod tests {
         assert!(
             seccomp.get("defaultAction").is_some(),
             "seccomp should have defaultAction"
+        );
+    }
+
+    #[test]
+    fn test_transient_runtime_config_seccomp_mapping_failure_fails_closed() {
+        let oci_spec = create_test_oci_spec();
+        let bad_policy =
+            PackageSeccompPolicy::from_bytes(br#"{"defaultAction":"SCMP_ACT_BOGUS"}"#.to_vec())
+                .expect("valid JSON, invalid OCI schema");
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mount_point = temp_dir.path().join("mount");
+        fs::create_dir_all(&mount_point).expect("Failed to create mount point");
+        let package_volume = create_test_package_volume_real(&mount_point)
+            .expect("Failed to create test PackageVolume");
+
+        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            oci_template: oci_spec,
+            seccomp_policy: Some(bad_policy),
+            mac_enabled: true,
+            network_mode: libssam::container::NetworkMode::None,
+            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+            package_name: "test-package-bad-seccomp".to_owned(),
+            version: "1.0.0".to_owned(),
+            mount_point: package_volume.get_mount_point().to_path_buf(),
+            data_mounts: None,
+            bridge_netns_path: None,
+        });
+
+        assert!(
+            result.is_err(),
+            "unmappable seccomp policy must refuse to build bundle"
         );
     }
 
