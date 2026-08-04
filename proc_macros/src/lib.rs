@@ -286,6 +286,7 @@ fn generate_struct(
     if let Some(getters) = proxy_getters {
         quote! {
             #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
+            #[serde(deny_unknown_fields)]
             #[cfg_attr(test, derive(Default))]
             pub struct #struct_name {
                 #fields
@@ -298,6 +299,7 @@ fn generate_struct(
     } else {
         quote! {
             #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
+            #[serde(deny_unknown_fields)]
             #[cfg_attr(test, derive(Default))]
             pub struct #struct_name {
                 #fields
@@ -670,6 +672,7 @@ mod tests {
         assert!(result_str.contains("pub struct Test"));
         assert!(result_str.contains("impl Test"));
         assert!(result_str.contains("pub fn get_field"));
+        assert!(result_str.contains(&quote! { #[serde(deny_unknown_fields)] }.to_string()));
     }
 
     #[test]
@@ -681,6 +684,7 @@ mod tests {
 
         assert!(result_str.contains("pub struct Test"));
         assert!(!result_str.contains("impl Test"));
+        assert!(result_str.contains(&quote! { #[serde(deny_unknown_fields)] }.to_string()));
     }
 
     #[test]

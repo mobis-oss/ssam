@@ -200,4 +200,41 @@ mod tests {
             toml::from_str(create_test_package_conf(true));
         assert!(package_config.is_err());
     }
+
+    fn create_legacy_package_conf_with_port_mappings() -> &'static str {
+        r#"
+            [package]
+            name = "test_package"
+            version = "0.0.1"
+            description = "A test package"
+
+            [container]
+            storage_limit = 2000
+            data_dirs = "/app/data:/app/logs"
+
+            [container.security]
+            seccomp = true
+            mac = true
+
+            [container.network]
+            mode = "bridge"
+
+            [container.network.bridge]
+            network_name = "shared-net-a"
+            interface_name = "eth0"
+            port_mappings = ["8080:80", "8443:443/tcp", "5353:53/udp"]
+
+            [service]
+            service_type = "notify"
+            bus_name = "com.test.service"
+            remain_after_exit = false
+        "#
+    }
+
+    #[test]
+    fn test_parse_package_config_rejects_legacy_port_mappings() {
+        let package_config: Result<config::PackageConfigSpec, toml::de::Error> =
+            toml::from_str(create_legacy_package_conf_with_port_mappings());
+        assert!(package_config.is_err());
+    }
 }
