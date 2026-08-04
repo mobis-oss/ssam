@@ -192,9 +192,6 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
-    /// Write an OCI runtime spec fixture with terminal=true, uid/gid mappings,
-    /// and both a User and a Pid namespace — i.e. everything copy_runtime_config
-    /// is supposed to normalize away (except the Pid namespace, which stays).
     fn write_spec_fixture(path: &Path) {
         let process = ProcessBuilder::default().terminal(true).build().unwrap();
         let root = RootBuilder::default().path("/").build().unwrap();

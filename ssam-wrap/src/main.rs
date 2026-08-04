@@ -356,10 +356,7 @@ mod tests {
         assert_eq!(ws.seccomp_policy, root.join(SECCOMP_POLICY_FILENAME));
         assert_eq!(ws.pkgfs, root.join(PACKAGE_FILESYSTEM_PATH));
         assert_eq!(ws.intermediate_dir, root.join(PACKAGE_INTERMEDIATE_PATH));
-        // new() creates the workspace root.
         assert!(root.is_dir());
-        // Relative-path / AppImage-OWD resolution is CWD/env-dependent and not
-        // exercised here to keep the test hermetic.
     }
 
     #[test]

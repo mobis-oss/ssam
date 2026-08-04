@@ -286,7 +286,6 @@ mod rootfs {
             let mandatory = [Path::new("/dev"), Path::new("/dev/pts")];
             ensure_mandatory_dirs(dir.path(), &mandatory).unwrap();
             assert!(dir.path().join("dev").is_dir());
-            // /dev/pts is a devpts mount, not a directory to create.
             assert!(!dir.path().join("dev/pts").exists());
         }
 
@@ -330,9 +329,6 @@ mod rootfs {
     }
 }
 
-/// Size in MiB for an ext4 image holding a source directory of `dir_size`
-/// bytes: add 10% overhead, round up to a whole MiB, and enforce a 3 MiB floor
-/// (anything lower makes mkfs.ext4 fall back to ext2).
 fn ext4_image_size_mb(dir_size: u64) -> u64 {
     let total_size = dir_size + dir_size.div_ceil(10);
     total_size.div_ceil(1024 * 1024).max(3)
@@ -483,21 +479,17 @@ mod tests {
     fn enforces_3mib_floor() {
         assert_eq!(ext4_image_size_mb(0), 3);
         assert_eq!(ext4_image_size_mb(1), 3);
-        // 2 MiB + 10% still rounds under the floor
         assert_eq!(ext4_image_size_mb(2 * MIB), 3);
     }
 
     #[test]
     fn adds_10_percent_overhead_and_rounds_up() {
-        // 10 MiB + 10% = 11 MiB exactly
         assert_eq!(ext4_image_size_mb(10 * MIB), 11);
-        // 100 MiB + 10% = 110 MiB
         assert_eq!(ext4_image_size_mb(100 * MIB), 110);
     }
 
     #[test]
     fn rounds_partial_mib_up() {
-        // Just over 3 MiB after overhead -> rounds up to next whole MiB
         assert_eq!(ext4_image_size_mb(3 * MIB + 1), 4);
     }
 
@@ -544,9 +536,7 @@ mod tests {
         let handle = mock.clone();
         let ws = crate::Workspace::new(dir.path(), Box::new(mock));
 
-        // pkgfs source is a directory.
         std::fs::create_dir(&ws.pkgfs).unwrap();
-        // Runtime spec declaring all mandatory + optional mounts.
         let mut spec = Spec::default();
         spec.set_mounts(Some(
             ["/dev", "/dev/pts", "/proc", "/sys", "/tmp"]
@@ -559,7 +549,6 @@ mod tests {
 
         let out = build_image(&ws, Some(ImageType::ErofsLz4hc)).unwrap();
 
-        // Dispatched to the erofs mkfs through fakeroot.
         let calls = handle.calls();
         assert!(
             calls
@@ -571,9 +560,6 @@ mod tests {
 
     #[test]
     fn build_pkgfs_image_dispatches_ext4() {
-        // Directly exercises the build_pkgfs_image wrapper's ext4 branch (the
-        // build_image happy-path test only covers erofs). No rootfs::prepare
-        // here, so no runtime/package config fixture is needed.
         let dir = tempdir().unwrap();
         let mock = MockCommandRunner::new();
         let handle = mock.clone();

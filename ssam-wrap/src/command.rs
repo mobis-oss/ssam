@@ -106,7 +106,6 @@ pub(crate) mod testing {
     use std::process::{ExitStatus, Output};
     use std::rc::Rc;
 
-    /// One recorded invocation of [`CommandRunner::run`].
     #[derive(Debug, Clone)]
     pub struct RecordedCall {
         pub cmd: String,
@@ -124,7 +123,6 @@ pub(crate) mod testing {
         }
     }
 
-    /// A programmed response for a single `run` invocation.
     #[derive(Debug)]
     pub struct MockResponse {
         pub code: i32,
@@ -240,8 +238,6 @@ pub(crate) mod testing {
             MockResponse::stdout("hello"),
             MockResponse::failure(2, "boom"),
         ]);
-        // A clone shares the same recording state, mimicking how a test keeps a
-        // handle after the runner is moved into a Workspace.
         let handle = runner.clone();
 
         let out = runner
@@ -283,7 +279,6 @@ pub(crate) mod testing {
             .unwrap();
         assert!(out.status.success());
 
-        // Inspecting through the shared clone sees every call.
         let calls = handle.calls();
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0].cmd, "echo");
