@@ -528,16 +528,12 @@ impl Package {
             transition_mgr_ref,
         ));
 
-        let pkg = Self {
+        Ok(Self {
             context,
             transition_mgr,
             volume_manager_ref,
             receiver_handle,
-        };
-
-        pkg.initialize();
-
-        Ok(pkg)
+        })
     }
 
     /// Drives a package's status from `ActiveState` monitor events until the
@@ -575,7 +571,8 @@ impl Package {
         result
     }
 
-    fn initialize(&self) {
+    /// Kicks off setup (and start, when autostart is enabled) in a background task.
+    pub fn initialize(&self) {
         let transition_mgr = self.transition_mgr.clone();
         let autostart = self.is_autostart();
         let pkg_name = self.context.get_name().to_owned();

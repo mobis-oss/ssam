@@ -330,7 +330,7 @@ impl PackageManagerActor {
             Ok(package) => {
                 if self
                     .package_store
-                    .insert(package_name.clone(), package)
+                    .insert(package_name.clone(), package.clone())
                     .await
                     .is_some()
                 {
@@ -338,6 +338,7 @@ impl PackageManagerActor {
                         "Package '{package_name}' already exists, replaced with reloaded version",
                     );
                 }
+                package.initialize();
             }
             Err(e) => {
                 log::error!("Failed to load package {package_name}: {e:#}");
@@ -471,8 +472,9 @@ impl PackageManagerActor {
         match self.recover_package(package_path).await {
             Ok(restored) => {
                 self.package_store
-                    .insert(package_name.to_owned(), restored)
+                    .insert(package_name.to_owned(), restored.clone())
                     .await;
+                restored.initialize();
                 log::info!("Restored package '{package_name}' from {package_path:?}");
             }
             Err(e) => {
@@ -734,7 +736,9 @@ impl PackageManagerActor {
             match self.do_install(prepared, remove_data, mode).await {
                 Ok(built) => {
                     let metadata = built.get_metadata().clone();
-                    self.store_package(built.get_name().to_owned(), built).await;
+                    self.store_package(built.get_name().to_owned(), built.clone())
+                        .await;
+                    built.initialize();
                     Ok(metadata)
                 }
                 Err(source) => {
@@ -748,7 +752,9 @@ impl PackageManagerActor {
                 .await
                 .with_context(|| format!("Failed to install package from file: {path:?}"))?;
             let metadata = built.get_metadata().clone();
-            self.store_package(built.get_name().to_owned(), built).await;
+            self.store_package(built.get_name().to_owned(), built.clone())
+                .await;
+            built.initialize();
             Ok(metadata)
         }
     }
