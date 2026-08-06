@@ -239,17 +239,17 @@ generate_apparmor_profile() {
 
     # Grant permissions per package directory: bundled=read-only, downloaded=read-write
     local formatted_pkg_dir=""
-    # Bundled directory: read-only access (system-provided packages)
+    # Bundled directory: read-only access (system-provided, immutable packages)
     if [[ -n "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}" ]]; then
         local bdir="${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}"
         formatted_pkg_dir="${formatted_pkg_dir}  ${bdir}/ r,\n"
-        formatted_pkg_dir="${formatted_pkg_dir}  ${bdir}/*.${SSAMD_CONFIG[CONF_PACKAGES_EXT]} r,\n"
+        formatted_pkg_dir="${formatted_pkg_dir}  ${bdir}/* r,\n"
     fi
     # Downloaded directory: read-write access (user-installed packages)
     local ddir="${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}"
     if [[ -n "$ddir" ]]; then
         formatted_pkg_dir="${formatted_pkg_dir}  ${ddir}/ rw,\n"
-        formatted_pkg_dir="${formatted_pkg_dir}  ${ddir}/*.${SSAMD_CONFIG[CONF_PACKAGES_EXT]} rw,\n"
+        formatted_pkg_dir="${formatted_pkg_dir}  ${ddir}/* rw,\n"
     fi
     # Remove trailing newline
     formatted_pkg_dir="${formatted_pkg_dir%\\n}"

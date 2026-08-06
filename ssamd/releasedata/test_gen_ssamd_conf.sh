@@ -24,6 +24,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEN_CONFIG_SCRIPT="${SCRIPT_DIR}/gen_ssamd_conf.sh"
 TEST_OUTPUT_DIR="${SCRIPT_DIR}/tmp/test_output"
 
+# Detect the AppArmor userspace once. AppArmor syntax checks run only when
+# apparmor_parser is present; otherwise they are not executed at all.
+if command -v apparmor_parser >/dev/null 2>&1; then
+    APPARMOR_PARSER_AVAILABLE=1
+else
+    APPARMOR_PARSER_AVAILABLE=0
+fi
+
 # Function to print test header
 print_test_header() {
     echo ""
@@ -113,6 +121,35 @@ verify_no_placeholders() {
     fi
 }
 
+# Function to validate AppArmor profile syntax with apparmor_parser.
+# Runs only when apparmor_parser is available; otherwise it is a silent no-op
+# (no test is counted).
+verify_apparmor_syntax() {
+    local file="$1"
+    local description="$2"
+
+    [[ "$APPARMOR_PARSER_AVAILABLE" == "1" ]] || return 0
+
+    if [[ ! -f "$file" ]]; then
+        print_result "$description - File exists" "FAIL"
+        echo "  Error: File not found: $file"
+        return 1
+    fi
+
+    # -Q parses and compiles the profile without loading it into the kernel, so
+    # it works unprivileged and validates syntax only.
+    local parser_output
+    if parser_output=$(apparmor_parser -Q "$file" 2>&1); then
+        print_result "$description - Valid AppArmor syntax" "PASS"
+        return 0
+    else
+        print_result "$description - Valid AppArmor syntax" "FAIL"
+        echo "  Error: apparmor_parser rejected the profile:"
+        echo "$parser_output"
+        return 1
+    fi
+}
+
 # Cleanup function
 cleanup() {
     echo ""
@@ -126,6 +163,9 @@ setup() {
     rm -rf "$TEST_OUTPUT_DIR"
     mkdir -p "$TEST_OUTPUT_DIR"
     echo "Test output directory: $TEST_OUTPUT_DIR"
+    if [[ "$APPARMOR_PARSER_AVAILABLE" != "1" ]]; then
+        echo "Note: apparmor_parser not found; AppArmor syntax checks are skipped."
+    fi
 }
 
 # Test 1: Generate AppArmor profile with ssamd config
@@ -151,10 +191,15 @@ test_apparmor_profile_only() {
     verify_file_content "$apparmor_output" "/usr/bin/ssamd" "AppArmor profile - executable path"
     verify_file_content "$apparmor_output" "/var/{lib/,lib/mcontainer/,lib/mcontainer/mnt/} w," "AppArmor profile - mount root hierarchy"
     verify_file_content "$apparmor_output" "/var/lib/mcontainer/mnt/\*/ w," "AppArmor profile - mount root children"
-    verify_file_content "$apparmor_output" "/var/lib/mcontainer/packages/\*.pkg rw," "AppArmor profile - downloaded packages dir"
-    verify_file_content "$apparmor_output" "/opt/mcontainer/pkgs/\*.pkg r," "AppArmor profile - bundled packages dir"
+    verify_file_content "$apparmor_output" "/var/lib/mcontainer/packages/ rw," "AppArmor profile - downloaded packages dir"
+    verify_file_content "$apparmor_output" "/var/lib/mcontainer/packages/\* rw," "AppArmor profile - downloaded packages files (any extension)"
+    verify_file_content_not "$apparmor_output" "/var/lib/mcontainer/packages/\*/ w," "AppArmor profile - downloaded has no subdir-creation rule"
+    verify_file_content "$apparmor_output" "/opt/mcontainer/pkgs/ r," "AppArmor profile - bundled packages dir"
+    verify_file_content "$apparmor_output" "/opt/mcontainer/pkgs/\* r," "AppArmor profile - bundled packages files (any extension)"
+    verify_file_content_not "$apparmor_output" "/opt/mcontainer/pkgs/\*.pkg r," "AppArmor profile - bundled no longer extension-restricted"
     verify_file_content "$apparmor_output" "/usr/share/ssamd/prod.pub.key r" "AppArmor profile - public key"
     verify_no_placeholders "$apparmor_output" "AppArmor profile"
+    verify_apparmor_syntax "$apparmor_output" "AppArmor profile"
 }
 
 # Test 2: Generate runtime config only
@@ -220,9 +265,10 @@ test_both_simultaneously() {
     verify_file_content "$apparmor_output" "/opt/ssamd/bin/ssamd" "AppArmor profile (simultaneous) - executable path"
     verify_file_content "$apparmor_output" "/var/{lib/,lib/mcontainer/,lib/mcontainer/mnt/} w," "AppArmor profile (simultaneous) - mount root hierarchy"
     verify_file_content "$apparmor_output" "/var/lib/mcontainer/mnt/\*/ w," "AppArmor profile (simultaneous) - mount root children"
-    verify_file_content "$apparmor_output" "/var/lib/mcontainer/packages/\*.pkg rw," "AppArmor profile (simultaneous) - downloaded packages dir"
-    verify_file_content "$apparmor_output" "/opt/mcontainer/pkgs/\*.pkg r," "AppArmor profile (simultaneous) - bundled packages dir"
+    verify_file_content "$apparmor_output" "/var/lib/mcontainer/packages/\* rw," "AppArmor profile (simultaneous) - downloaded packages dir"
+    verify_file_content "$apparmor_output" "/opt/mcontainer/pkgs/\* r," "AppArmor profile (simultaneous) - bundled packages dir"
     verify_no_placeholders "$apparmor_output" "AppArmor profile (simultaneous)"
+    verify_apparmor_syntax "$apparmor_output" "AppArmor profile (simultaneous)"
 
     # Verify runtime config
     verify_file_content "$runtime_output" "\[common\]" "Runtime config (simultaneous)"
@@ -434,6 +480,7 @@ test_all_configs_simultaneously() {
     verify_file_content "$apparmor_output" "/var/{lib/,lib/mcontainer/,lib/mcontainer/mnt/} w," "All configs - AppArmor mount root hierarchy"
     verify_file_content "$apparmor_output" "/var/lib/mcontainer/mnt/\*/ w," "All configs - AppArmor mount root children"
     verify_no_placeholders "$apparmor_output" "All configs - AppArmor profile"
+    verify_apparmor_syntax "$apparmor_output" "All configs - AppArmor profile"
 
     # Verify service unit
     verify_file_content "$service_output" "\[Unit\]" "All configs - Service unit"
@@ -614,6 +661,7 @@ test_apparmor_var_run_special_case() {
 
     verify_file_content "$apparmor_output" "@{run}{ssamd/,ssamd/mnt/} w," "AppArmor profile - /var/run special case hierarchy"
     verify_file_content "$apparmor_output" "@{run}ssamd/mnt/\*/ w," "AppArmor profile - /var/run special case wildcard"
+    verify_apparmor_syntax "$apparmor_output" "AppArmor profile - /var/run special case"
 }
 
 # Test 16: AppArmor profile with /run special case
@@ -635,6 +683,7 @@ test_apparmor_run_special_case() {
 
     verify_file_content "$apparmor_output" "@{run}{ssamd/,ssamd/mnt/} w," "AppArmor profile - /run special case hierarchy"
     verify_file_content "$apparmor_output" "@{run}ssamd/mnt/\*/ w," "AppArmor profile - /run special case wildcard"
+    verify_apparmor_syntax "$apparmor_output" "AppArmor profile - /run special case"
 }
 
 # Test 17: AppArmor profile with /var/run prefix collision (e.g. /var/runner)
@@ -658,6 +707,7 @@ test_apparmor_var_run_prefix_collision() {
     # Should start with /var
     verify_file_content "$apparmor_output" "/var/{runner/,runner/ssamd/,runner/ssamd/mnt/} w," "AppArmor profile - prefix collision hierarchy"
     verify_file_content "$apparmor_output" "/var/runner/ssamd/mnt/\*/ w," "AppArmor profile - prefix collision wildcard"
+    verify_apparmor_syntax "$apparmor_output" "AppArmor profile - prefix collision"
 }
 
 # Test 18: AppArmor profile for --pkgs-mnt-root
@@ -701,6 +751,7 @@ test_apparmor_pkgs_mnt_root() {
     verify_file_content_not "$apparmor_output" "/ssamd/ w," "$title /ssamd"
     verify_file_content_not "$apparmor_output" "/ssamd w," "$title /ssamd"
     verify_file_content "$apparmor_output" "/ssamd/\*/ w," "$title /ssamd"
+    verify_apparmor_syntax "$apparmor_output" "$title /ssamd"
 }
 
 # Main test execution
