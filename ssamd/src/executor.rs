@@ -501,8 +501,9 @@ pub(crate) mod oci {
             let seccomp = TransientRuntimeConfig::build_seccomp_config(Some(&policy))
                 .expect("valid policy must map")
                 .expect("must produce a filter");
-            assert!(
-                seccomp.default_action() == oci_spec::runtime::LinuxSeccompAction::ScmpActErrno
+            assert_eq!(
+                seccomp.default_action(),
+                oci_spec::runtime::LinuxSeccompAction::ScmpActErrno
             );
         }
 

@@ -1165,7 +1165,7 @@ mod tests {
         let path = Path::new("/dev/loop999");
         let res = quota::get_fmt(QuotaType::User, path);
         assert!(res.is_ok());
-        assert!(res.unwrap() == QuotaFmt::VfsV1); // Check if the format is VfsV1
+        assert_eq!(res.unwrap(), QuotaFmt::VfsV1); // Check if the format is VfsV1
         clear_mock();
     }
 }
