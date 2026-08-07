@@ -154,7 +154,7 @@ impl Remocon for RemoconImpl {
             request.get_ref().package_path
         );
         let package_path = &request.get_ref().package_path;
-        let force = request.get_ref().force;
+        let downgrade = request.get_ref().downgrade;
         let remove_data = request.get_ref().remove_data;
 
         let path = PathBuf::from(package_path);
@@ -167,7 +167,7 @@ impl Remocon for RemoconImpl {
 
         let result_inner = self
             .package_manager
-            .install_package(path, force, remove_data)
+            .install_package(path, downgrade, remove_data)
             .await;
 
         let result = into_json_result(
@@ -537,10 +537,10 @@ pub(crate) mod tests {
         async fn install_package(
             &self,
             path: PathBuf,
-            force: bool,
+            downgrade: bool,
             remove_data: bool,
         ) -> anyhow::Result<PackageMetadata> {
-            *self.last_install_args.lock().unwrap() = Some((path.clone(), force, remove_data));
+            *self.last_install_args.lock().unwrap() = Some((path.clone(), downgrade, remove_data));
             let package_name = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -928,16 +928,16 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_install_package_force_mode() {
+    async fn test_install_package_downgrade_mode() {
         let (remocon, mock_manager) = create_test_remocon();
 
-        // Setup: configure install to succeed in force mode
+        // Setup: configure install to succeed in downgrade mode
         mock_manager.set_install_result(
-            "force-package".to_string(),
+            "downgrade-package".to_string(),
             Ok(PackageMetadata::new(
                 libssam::config::PackageConfigSpec {
                     package: libssam::config::Package {
-                        name: "force-package".to_string(),
+                        name: "downgrade-package".to_string(),
                         version: "1.2.3".to_string(),
                         description: "A test package".to_string(),
                         autostart: Some(true),
@@ -972,8 +972,8 @@ pub(crate) mod tests {
         );
 
         let request = Request::new(InstallPackageRequest {
-            package_path: "/tmp/force-package.ssam".to_string(),
-            force: true,
+            package_path: "/tmp/downgrade-package.ssam".to_string(),
+            downgrade: true,
             remove_data: false,
         });
 
@@ -982,7 +982,7 @@ pub(crate) mod tests {
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
         let install_response: InstallResponse = parse_json_result(json_result).unwrap();
-        assert_eq!(install_response.metadata.package_name, "force-package");
+        assert_eq!(install_response.metadata.package_name, "downgrade-package");
         assert_eq!(install_response.metadata.version, "1.2.3");
 
         let args = mock_manager
@@ -991,7 +991,7 @@ pub(crate) mod tests {
             .unwrap()
             .clone()
             .unwrap();
-        assert!(args.1, "force should be true");
+        assert!(args.1, "downgrade should be true");
         assert!(!args.2, "remove_data should be false");
     }
 
@@ -1041,7 +1041,7 @@ pub(crate) mod tests {
 
         let request = Request::new(InstallPackageRequest {
             package_path: "/tmp/remove-data-package.ssam".to_string(),
-            force: false,
+            downgrade: false,
             remove_data: true,
         });
 
@@ -1062,21 +1062,21 @@ pub(crate) mod tests {
             .unwrap()
             .clone()
             .unwrap();
-        assert!(!args.1, "force should be false");
+        assert!(!args.1, "downgrade should be false");
         assert!(args.2, "remove_data should be true");
     }
 
     #[tokio::test]
-    async fn test_install_package_force_and_remove_data() {
+    async fn test_install_package_downgrade_and_remove_data() {
         let (remocon, mock_manager) = create_test_remocon();
 
-        // Setup: configure install to succeed with both force and remove_data options
+        // Setup: configure install to succeed with both downgrade and remove_data options
         mock_manager.set_install_result(
-            "force-remove-package".to_string(),
+            "downgrade-remove-package".to_string(),
             Ok(PackageMetadata::new(
                 libssam::config::PackageConfigSpec {
                     package: libssam::config::Package {
-                        name: "force-remove-package".to_string(),
+                        name: "downgrade-remove-package".to_string(),
                         version: "3.1.4".to_string(),
                         description: "A test package".to_string(),
                         autostart: Some(true),
@@ -1111,8 +1111,8 @@ pub(crate) mod tests {
         );
 
         let request = Request::new(InstallPackageRequest {
-            package_path: "/tmp/force-remove-package.ssam".to_string(),
-            force: true,
+            package_path: "/tmp/downgrade-remove-package.ssam".to_string(),
+            downgrade: true,
             remove_data: true,
         });
 
@@ -1123,7 +1123,7 @@ pub(crate) mod tests {
         let install_response: InstallResponse = parse_json_result(json_result).unwrap();
         assert_eq!(
             install_response.metadata.package_name,
-            "force-remove-package"
+            "downgrade-remove-package"
         );
         assert_eq!(install_response.metadata.version, "3.1.4");
 
@@ -1133,7 +1133,7 @@ pub(crate) mod tests {
             .unwrap()
             .clone()
             .unwrap();
-        assert!(args.1, "force should be true");
+        assert!(args.1, "downgrade should be true");
         assert!(args.2, "remove_data should be true");
     }
 
@@ -1436,7 +1436,7 @@ pub(crate) mod tests {
 
         let request = Request::new(InstallPackageRequest {
             package_path: "/tmp/failed-package.ssam".to_string(),
-            force: false,
+            downgrade: false,
             remove_data: false,
         });
 
@@ -1456,7 +1456,7 @@ pub(crate) mod tests {
 
         let request = Request::new(InstallPackageRequest {
             package_path: "relative/path/package.ssam".to_string(),
-            force: false,
+            downgrade: false,
             remove_data: false,
         });
 

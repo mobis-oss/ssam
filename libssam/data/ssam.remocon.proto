@@ -21,7 +21,7 @@ message StopPackageRequest {
 
 message InstallPackageRequest {
     string package_path = 1;
-    bool force = 2;
+    bool downgrade = 2;
     bool remove_data = 3;
 }
 

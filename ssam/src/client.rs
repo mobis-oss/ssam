@@ -24,7 +24,7 @@ pub trait Client: Send {
     async fn install_package(
         &mut self,
         path: &str,
-        force: bool,
+        downgrade: bool,
         remove_data: bool,
     ) -> Result<String>;
     async fn remove_package(&mut self, name: &str) -> Result<String>;
@@ -94,12 +94,12 @@ impl Client for GrpcClient {
     async fn install_package(
         &mut self,
         path: &str,
-        force: bool,
+        downgrade: bool,
         remove_data: bool,
     ) -> Result<String> {
         let request = Request::new(InstallPackageRequest {
             package_path: path.to_owned(),
-            force,
+            downgrade,
             remove_data,
         });
         let response = self
@@ -183,6 +183,7 @@ pub struct MockClient {
     pub inspect_local_package_result: Option<anyhow::Result<String>>,
     pub get_all_package_info_result: Option<anyhow::Result<String>>,
     pub is_local: bool,
+    pub captured_downgrade: Option<bool>,
     pub captured_start_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     pub captured_stop_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
@@ -257,6 +258,7 @@ impl MockClient {
             inspect_local_package_result: Some(Ok(inspect_local_json)),
             get_all_package_info_result: Some(Ok(all_package_info_json)),
             is_local: true,
+            captured_downgrade: None,
             captured_start_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             captured_stop_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -421,9 +423,10 @@ impl Client for MockClient {
     async fn install_package(
         &mut self,
         _path: &str,
-        _force: bool,
+        downgrade: bool,
         _remove_data: bool,
     ) -> anyhow::Result<String> {
+        self.captured_downgrade = Some(downgrade);
         self.install_package_result
             .take()
             .expect("install_package_result not set")

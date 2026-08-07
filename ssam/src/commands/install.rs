@@ -20,7 +20,7 @@ pub struct Install;
 impl Install {
     const NAME: &'static str = "install";
     const PACKAGE_PATH: &'static str = "package_path";
-    const INSTALL_FORCE: &'static str = "force";
+    const INSTALL_DOWNGRADE: &'static str = "downgrade";
     const REMOVE_DATA: &'static str = "remove_data";
 
     fn canonicalize_relative(package_path: &str) -> Result<String> {
@@ -50,12 +50,10 @@ impl CommandHandler for Install {
                     .index(1),
             )
             .arg(
-                Arg::new(Self::INSTALL_FORCE)
-                    .short('f')
-                    .long(Self::INSTALL_FORCE)
-                    .help(
-                        "Force install the package, even if it is lower version than the installed one",
-                    )
+                Arg::new(Self::INSTALL_DOWNGRADE)
+                    .short('d')
+                    .long(Self::INSTALL_DOWNGRADE)
+                    .help("Allow installing a strictly lower version than the one installed")
                     .action(clap::ArgAction::SetTrue),
             )
             .arg(
@@ -76,7 +74,7 @@ impl CommandHandler for Install {
         let package_path = matches
             .get_one::<String>(Self::PACKAGE_PATH)
             .ok_or_else(|| anyhow::anyhow!("Package path is required"))?;
-        let force = matches.get_flag(Self::INSTALL_FORCE);
+        let downgrade = matches.get_flag(Self::INSTALL_DOWNGRADE);
         let remove_data = matches.get_flag(Self::REMOVE_DATA);
 
         let is_local_mode = client.is_local_mode();
@@ -100,7 +98,7 @@ impl CommandHandler for Install {
 
         writeln!(stdout, "Installing package: {processed_path}")?;
         let json_result = client
-            .install_package(&processed_path, force, remove_data)
+            .install_package(&processed_path, downgrade, remove_data)
             .await?;
         let InstallResponse { metadata } =
             JsonResult::<InstallResponse>::parse_response(&json_result)?;
@@ -282,6 +280,24 @@ mod tests {
 
         let result = String::from_utf8(stdout).unwrap();
         assert!(result.contains(&expected));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_install_passes_downgrade_flag() {
+        for (args, expected) in [
+            (vec!["install", "/abs/pkg.ssam", "-d"], true),
+            (vec!["install", "/abs/pkg.ssam"], false),
+        ] {
+            let mut client = MockClient::new_success();
+            let handler = Install;
+            let matches = handler.command().get_matches_from(args);
+            let mut stdout = Vec::new();
+            handler
+                .handle(&matches, &mut client, &mut stdout)
+                .await
+                .unwrap();
+            assert_eq!(client.captured_downgrade, Some(expected));
+        }
     }
 
     #[test]

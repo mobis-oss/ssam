@@ -16,6 +16,7 @@ use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{BrokenPackageInfo, BrokenReason, PackageInfoResult};
 use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
 use rsactor::{Actor, ActorRef, message_handlers};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +34,7 @@ pub(crate) trait PackageManagerService: Send + Sync {
     async fn install_package(
         &self,
         path: PathBuf,
-        force: bool,
+        downgrade: bool,
         remove_data: bool,
     ) -> anyhow::Result<PackageMetadata>;
     async fn remove_package(&self, package_name: &str, purge_volume: bool) -> anyhow::Result<()>;
@@ -73,13 +74,13 @@ impl PackageManagerService for PackageManager {
     async fn install_package(
         &self,
         path: PathBuf,
-        force: bool,
+        downgrade: bool,
         remove_data: bool,
     ) -> anyhow::Result<PackageMetadata> {
         self.actor_ref
             .ask(InstallPackage {
                 path,
-                force,
+                downgrade,
                 remove_data,
             })
             .await
@@ -162,6 +163,51 @@ struct InstallInfo {
     path: PathBuf,
     dest: PathBuf,
     volume_meta: PackageVolumeMetadata,
+}
+
+/// Install version gate: reject same-version reinstall, reject an upgrade
+/// mistakenly passed with `--downgrade`, and gate a strictly-lower version
+/// behind it. Upgrades without the flag pass.
+fn check_install_version(
+    package_name: &str,
+    new: &semver::Version,
+    installed: &semver::Version,
+    downgrade: bool,
+) -> anyhow::Result<()> {
+    match new.cmp(installed) {
+        Ordering::Greater if downgrade => anyhow::bail!(
+            "Package '{package_name}' new version {new} is an upgrade over \
+             the installed {installed}; --downgrade is for installing an older \
+             version, omit it"
+        ),
+        Ordering::Equal => {
+            anyhow::bail!("Package '{package_name}' version {new} is already installed")
+        }
+        Ordering::Less if !downgrade => anyhow::bail!(
+            "A newer version of package '{package_name}' is already installed \
+             (installed: {installed}, new: {new}); pass --downgrade to install anyway"
+        ),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod version_gate_tests {
+    use super::check_install_version;
+
+    #[test]
+    fn test_check_install_version_matrix() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        // Upgrade: allowed without the flag, rejected when --downgrade is misused.
+        assert!(check_install_version("p", &v("2.0.0"), &v("1.0.0"), false).is_ok());
+        assert!(check_install_version("p", &v("2.0.0"), &v("1.0.0"), true).is_err());
+        // Same version: always rejected.
+        assert!(check_install_version("p", &v("1.0.0"), &v("1.0.0"), false).is_err());
+        assert!(check_install_version("p", &v("1.0.0"), &v("1.0.0"), true).is_err());
+        // Strictly lower: gated behind --downgrade.
+        assert!(check_install_version("p", &v("1.0.0"), &v("2.0.0"), false).is_err());
+        assert!(check_install_version("p", &v("1.0.0"), &v("2.0.0"), true).is_ok());
+    }
 }
 
 impl PackageManagerActor {
@@ -402,7 +448,7 @@ impl PackageManagerActor {
         &self,
         parsed_package: PackageParseResult,
         orig_pkg: Option<&Arc<Package>>,
-        force: bool,
+        downgrade: bool,
     ) -> anyhow::Result<InstallInfo> {
         let PackageParseResult {
             package_name,
@@ -418,13 +464,7 @@ impl PackageManagerActor {
         let version = metadata.version();
 
         if let Some(orig) = &orig_pkg {
-            let orig_ver = orig.get_version();
-            if version <= orig_ver && !force {
-                return Err(anyhow::anyhow!(
-                    "A same or newer version of package '{package_name}' is already installed \
-                     (installed: {orig_ver}, new: {version})",
-                ));
-            }
+            check_install_version(&package_name, &version, &orig.get_version(), downgrade)?;
         }
 
         anyhow::ensure!(
@@ -691,7 +731,7 @@ impl PackageManagerActor {
     ) -> anyhow::Result<PackageMetadata> {
         log::trace!("PackageManagerActor::install_package");
         let path = msg.path;
-        let force = msg.force;
+        let downgrade = msg.downgrade;
         let remove_data = msg.remove_data;
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {path:?}"))
@@ -710,7 +750,8 @@ impl PackageManagerActor {
             .with_context(|| format!("Failed to parse package from file {path:?}"))?;
 
         let orig_pkg = self.package_store.get(&parsed_package.package_name).await;
-        let prepared = self.prepare_install_package(parsed_package, orig_pkg.as_ref(), force)?;
+        let prepared =
+            self.prepare_install_package(parsed_package, orig_pkg.as_ref(), downgrade)?;
         let package_name = prepared.package_name.clone();
 
         if let Some(dest_name) = prepared.dest.file_name().and_then(|f| f.to_str()) {
@@ -863,7 +904,7 @@ pub mod message {
 
     pub struct InstallPackage {
         pub path: PathBuf,
-        pub force: bool,
+        pub downgrade: bool,
         pub remove_data: bool,
     }
 
