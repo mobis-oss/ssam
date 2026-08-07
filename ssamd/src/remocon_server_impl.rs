@@ -11,8 +11,8 @@ use crate::package::PackageStatus as InternalPackageStatus;
 use crate::utils::ellipsis;
 use anyhow::Context as _;
 use libssam::{
-    InspectLocalPackageResponse, InstallResponse, JsonResult, PackageInfoResponse,
-    PackageStatusEntry, StartStopResult, TimelineResponse,
+    InspectLocalPackageResponse, InstallResponse, JsonResult, PackageInfoResponse, PackageOpResult,
+    PackageStatusEntry, TimelineResponse,
     json_result::serialize_metadata,
     remocon::{
         AllPackageInformationResponse, InspectLocalPackageRequest,
@@ -20,7 +20,8 @@ use libssam::{
         InstallPackageResponse, ListPackagesStatusResponse, PackageInformationRequest,
         PackageInformationResponse, RemovePackageRequest, RemovePackageResponse,
         StartPackageRequest, StartPackageResponse, StopPackageRequest, StopPackageResponse,
-        TimeLineInformationResponse, remocon_server::Remocon,
+        TimeLineInformationResponse, WipePackageDataRequest, WipePackageDataResponse,
+        remocon_server::Remocon,
     },
 };
 
@@ -76,14 +77,14 @@ impl RemoconImpl {
     }
 }
 
-fn into_start_stop_result(name: String, outcome: anyhow::Result<()>) -> StartStopResult {
+fn into_package_op_result(name: String, outcome: anyhow::Result<()>) -> PackageOpResult {
     match outcome {
-        Ok(()) => StartStopResult {
+        Ok(()) => PackageOpResult {
             package_name: name,
             success: true,
             message: None,
         },
-        Err(e) => StartStopResult {
+        Err(e) => PackageOpResult {
             package_name: name,
             success: false,
             message: Some(format!("{e}")),
@@ -108,7 +109,7 @@ impl Remocon for RemoconImpl {
                     .start_package(&name)
                     .await
                     .inspect_err(|e| log::error!("Failed to start package {name}: {e:#}"));
-                results.push(into_start_stop_result(name, outcome));
+                results.push(into_package_op_result(name, outcome));
                 results
             })
             .await;
@@ -133,7 +134,7 @@ impl Remocon for RemoconImpl {
                     .stop_package(&name)
                     .await
                     .inspect_err(|e| log::error!("Failed to stop package {name}: {e:#}"));
-                results.push(into_start_stop_result(name, outcome));
+                results.push(into_package_op_result(name, outcome));
                 results
             })
             .await;
@@ -204,6 +205,31 @@ impl Remocon for RemoconImpl {
         );
 
         Ok(Response::new(RemovePackageResponse { result }))
+    }
+
+    async fn wipe_package_data(
+        &self,
+        request: Request<WipePackageDataRequest>,
+    ) -> Result<Response<WipePackageDataResponse>, Status> {
+        let package_names = request.into_inner().package_names;
+        log::debug!("Received request to wipe package data: {package_names:?}");
+
+        let names = self.resolve_package_names(package_names).await;
+        let results = futures_util::stream::iter(names)
+            .fold(Vec::new(), |mut results, name| async {
+                let outcome = self
+                    .package_manager
+                    .wipe_package_data(&name)
+                    .await
+                    .inspect_err(|e| log::error!("Failed to wipe data for package {name}: {e:#}"));
+                results.push(into_package_op_result(name, outcome));
+                results
+            })
+            .await;
+
+        Ok(Response::new(WipePackageDataResponse {
+            result: JsonResult::success(results),
+        }))
     }
 
     async fn list_packages_status(
@@ -406,6 +432,7 @@ pub(crate) mod tests {
         pub package_infos: Arc<Mutex<HashMap<String, PackageInfo>>>,
         pub install_results: InstallResultMap,
         pub remove_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
+        pub wipe_data_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
         pub start_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
         pub stop_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
         pub all_package_info_error: Arc<Mutex<Option<String>>>,
@@ -419,6 +446,7 @@ pub(crate) mod tests {
                 package_infos: Arc::new(Mutex::new(HashMap::new())),
                 install_results: Arc::new(Mutex::new(HashMap::new())),
                 remove_results: Arc::new(Mutex::new(HashMap::new())),
+                wipe_data_results: Arc::new(Mutex::new(HashMap::new())),
                 start_results: Arc::new(Mutex::new(HashMap::new())),
                 stop_results: Arc::new(Mutex::new(HashMap::new())),
                 all_package_info_error: Arc::new(Mutex::new(None)),
@@ -449,6 +477,17 @@ pub(crate) mod tests {
 
         pub fn set_remove_result(&self, package_name: String, result: Result<(), anyhow::Error>) {
             self.remove_results
+                .lock()
+                .unwrap()
+                .insert(package_name, result);
+        }
+
+        pub fn set_wipe_data_result(
+            &self,
+            package_name: String,
+            result: Result<(), anyhow::Error>,
+        ) {
+            self.wipe_data_results
                 .lock()
                 .unwrap()
                 .insert(package_name, result);
@@ -592,6 +631,22 @@ pub(crate) mod tests {
                     Ok(())
                 }
                 Some(Err(msg)) => Err(anyhow::anyhow!("{msg}")),
+            }
+        }
+
+        async fn wipe_package_data(&self, package_name: &str) -> anyhow::Result<()> {
+            let outcome = {
+                let guard = self.wipe_data_results.lock().unwrap();
+                guard
+                    .get(package_name)
+                    .map(|r| r.as_ref().copied().map_err(ToString::to_string))
+            };
+
+            match outcome {
+                Some(Ok(())) => Ok(()),
+                Some(Err(msg)) => Err(anyhow::anyhow!("{msg}")),
+                None if self.packages.lock().unwrap().contains_key(package_name) => Ok(()),
+                None => Err(anyhow::anyhow!("Package not found: {package_name}")),
             }
         }
 
@@ -794,7 +849,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<StartStopResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(ops[0].success);
         assert_eq!(ops[0].package_name, "test-package");
@@ -817,7 +872,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<StartStopResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(!ops[0].success);
         assert_eq!(ops[0].package_name, "test-package");
@@ -841,7 +896,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<StartStopResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 2);
         assert!(ops.iter().all(|op| op.success));
         let names: Vec<&str> = ops.iter().map(|op| op.package_name.as_str()).collect();
@@ -872,7 +927,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<StartStopResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 2);
         assert!(ops.iter().all(|op| op.success));
         let names: Vec<&str> = ops.iter().map(|op| op.package_name.as_str()).collect();
@@ -899,7 +954,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<StartStopResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].package_name, "pkg-a");
         assert!(ops[0].success);
@@ -925,6 +980,113 @@ pub(crate) mod tests {
         let reason = get_json_reason(json_result);
         assert!(reason.is_some());
         assert!(reason.unwrap().contains("Failed to remove package"));
+    }
+
+    #[tokio::test]
+    async fn test_wipe_package_data_not_found() {
+        let (remocon, _mock_manager) = create_test_remocon();
+
+        let request = Request::new(WipePackageDataRequest {
+            package_names: vec!["non-existent".to_string()],
+        });
+
+        let response = remocon.wipe_package_data(request).await;
+        assert!(response.is_ok());
+        let result = &response.unwrap().into_inner().result;
+        assert!(check_json_success(result));
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert!(!ops[0].success);
+        assert!(
+            ops[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("Package not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wipe_package_data_rejected_when_running() {
+        let (remocon, mock_manager) = create_test_remocon();
+        mock_manager.add_package(
+            "test-pkg".to_string(),
+            PackageStatusEnum::Running("test-pkg".to_string()),
+        );
+        mock_manager.set_wipe_data_result(
+            "test-pkg".to_string(),
+            Err(anyhow::anyhow!(
+                "Package 'test-pkg' is not in a wipeable state; stop it before wiping data"
+            )),
+        );
+
+        let request = Request::new(WipePackageDataRequest {
+            package_names: vec!["test-pkg".to_string()],
+        });
+
+        let response = remocon.wipe_package_data(request).await;
+        assert!(response.is_ok());
+        let result = &response.unwrap().into_inner().result;
+        assert!(check_json_success(result));
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert!(!ops[0].success);
+        assert!(
+            ops[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("stop it before wiping data"),
+            "per-package failure must surface the underlying reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wipe_package_data_success_keeps_package() {
+        let (remocon, mock_manager) = create_test_remocon();
+        mock_manager.add_package("test-pkg".to_string(), PackageStatusEnum::Ready);
+
+        let request = Request::new(WipePackageDataRequest {
+            package_names: vec!["test-pkg".to_string()],
+        });
+
+        let response = remocon.wipe_package_data(request).await;
+        assert!(response.is_ok());
+        let result = &response.unwrap().into_inner().result;
+        assert!(check_json_success(result));
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert!(ops[0].success);
+        assert!(
+            mock_manager
+                .packages
+                .lock()
+                .unwrap()
+                .contains_key("test-pkg"),
+            "package registration should remain after wipe-data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wipe_all_packages_empty_names() {
+        let (remocon, mock_manager) = create_test_remocon();
+        mock_manager.add_package("pkg-a".to_string(), PackageStatusEnum::Ready);
+        mock_manager.add_package("pkg-b".to_string(), PackageStatusEnum::Ready);
+
+        let request = Request::new(WipePackageDataRequest {
+            package_names: vec![],
+        });
+
+        let response = remocon.wipe_package_data(request).await;
+        assert!(response.is_ok());
+        let result = &response.unwrap().into_inner().result;
+        assert!(check_json_success(result));
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(ops.iter().all(|op| op.success));
+        let names: Vec<&str> = ops.iter().map(|op| op.package_name.as_str()).collect();
+        assert!(names.contains(&"pkg-a"));
+        assert!(names.contains(&"pkg-b"));
     }
 
     #[tokio::test]
@@ -1629,7 +1791,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<StartStopResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(!ops[0].success);
     }

@@ -192,7 +192,7 @@ mod tests {
     async fn test_install_missing_metadata_error() {
         let mut client = MockClient::new_success();
         client.install_package_result = Some(Ok(
-            r#"{"schema_version":"1","success":true,"data":{}}"#.to_string(),
+            r#"{"schema_version":"2","success":true,"data":{}}"#.to_string(),
         ));
 
         let handler = Install;

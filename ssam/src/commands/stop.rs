@@ -10,9 +10,9 @@ use tonic::async_trait;
 use crate::client::Client;
 use crate::commands::{
     ALL_ARG, CommandHandler, PACKAGE_NAMES_ARG, dedup_names, multi_package_command,
-    write_start_stop_results,
+    write_package_op_results,
 };
-use libssam::{JsonResult, StartStopResult};
+use libssam::{JsonResult, PackageOpResult};
 
 pub static COMMAND: Stop = Stop;
 
@@ -52,13 +52,13 @@ impl CommandHandler for Stop {
             writeln!(stdout, "Stopping package(s): {}", names.join(", "))?;
         }
         let json_result = client.stop_package(names).await?;
-        let results: Vec<StartStopResult> =
-            JsonResult::<Vec<StartStopResult>>::parse_response(&json_result)?;
+        let results: Vec<PackageOpResult> =
+            JsonResult::<Vec<PackageOpResult>>::parse_response(&json_result)?;
         if results.is_empty() {
             writeln!(stdout, "  No packages to stop")?;
             return Ok(());
         }
-        if !write_start_stop_results(&results, stdout)? {
+        if !write_package_op_results(&results, stdout)? {
             anyhow::bail!("One or more packages failed to stop");
         }
         Ok(())
@@ -142,15 +142,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_stop_multiple_packages() {
-        use libssam::StartStopResult;
+        use libssam::PackageOpResult;
 
         let results = vec![
-            StartStopResult {
+            PackageOpResult {
                 package_name: "pkg-a".to_owned(),
                 success: true,
                 message: None,
             },
-            StartStopResult {
+            PackageOpResult {
                 package_name: "pkg-b".to_owned(),
                 success: true,
                 message: None,
@@ -179,15 +179,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_stop_partial_failure() {
-        use libssam::StartStopResult;
+        use libssam::PackageOpResult;
 
         let results = vec![
-            StartStopResult {
+            PackageOpResult {
                 package_name: "ok-pkg".to_owned(),
                 success: true,
                 message: None,
             },
-            StartStopResult {
+            PackageOpResult {
                 package_name: "bad-pkg".to_owned(),
                 success: false,
                 message: Some("Package not found: bad-pkg".to_owned()),

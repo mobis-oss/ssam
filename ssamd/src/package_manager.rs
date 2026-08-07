@@ -6,6 +6,7 @@ use crate::package::{Package, PackageStatus};
 use crate::package_manager::message::{
     GetAllPackageInfo, GetPackage, GetPackageInfo, GetPackageNames, GetPackagesStatus,
     InstallPackage, RemovePackage, StartPackage, StopPackage, TeardownPackageManager,
+    WipePackageData,
 };
 use crate::package_manager::parser::PackageParseResult;
 use crate::package_manager::store::{PackageStore, PackageStoreBackend};
@@ -38,6 +39,7 @@ pub(crate) trait PackageManagerService: Send + Sync {
         remove_data: bool,
     ) -> anyhow::Result<PackageMetadata>;
     async fn remove_package(&self, package_name: &str, purge_volume: bool) -> anyhow::Result<()>;
+    async fn wipe_package_data(&self, package_name: &str) -> anyhow::Result<()>;
     async fn start_package(&self, package_name: &str) -> anyhow::Result<()>;
     async fn stop_package(&self, package_name: &str) -> anyhow::Result<()>;
     async fn get_package_info(&self, package_name: &str) -> anyhow::Result<PackageInfoResult>;
@@ -92,6 +94,15 @@ impl PackageManagerService for PackageManager {
             .ask(RemovePackage {
                 package_name: package_name.to_owned(),
                 purge_volume,
+            })
+            .await
+            .expect("PackageManagerActor crashed; daemon cannot function without it")
+    }
+
+    async fn wipe_package_data(&self, package_name: &str) -> anyhow::Result<()> {
+        self.actor_ref
+            .ask(WipePackageData {
+                package_name: package_name.to_owned(),
             })
             .await
             .expect("PackageManagerActor crashed; daemon cannot function without it")
@@ -636,6 +647,35 @@ impl PackageManagerActor {
         Ok(())
     }
 
+    async fn wipe_package_data(&self, package_name: &str) -> anyhow::Result<()> {
+        log::debug!("Wiping data for package: {package_name}");
+        let package = self
+            .package_store
+            .get(package_name)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))?;
+
+        let status = package
+            .get_status()
+            .await
+            .with_context(|| format!("Failed to get status of package {package_name}"))?;
+        anyhow::ensure!(
+            is_wipeable_status(&status),
+            "Package '{package_name}' is not in a wipeable state (current: {status}); \
+             stop it before wiping data"
+        );
+
+        self.transaction_actor
+            .ask(pkg_file::message::WipePackageVolume {
+                name: package_name.to_owned(),
+            })
+            .await
+            .context("Failed to communicate with PackageTransactionActor")??;
+
+        log::debug!("Successfully wiped data for package: {package_name}");
+        Ok(())
+    }
+
     async fn teardown(&self, package: &Package, package_name: &str) -> anyhow::Result<()> {
         package
             .teardown()
@@ -815,6 +855,19 @@ impl PackageManagerActor {
     }
 
     #[handler]
+    async fn handle_wipe_package_data(
+        &mut self,
+        msg: WipePackageData,
+        _actor_ref: &ActorRef<Self>,
+    ) -> anyhow::Result<()> {
+        log::trace!("PackageManagerActor::wipe_package_data");
+        let package_name = msg.package_name;
+        self.wipe_package_data(&package_name)
+            .await
+            .with_context(|| format!("Failed to wipe data for package: {package_name}"))
+    }
+
+    #[handler]
     async fn handle_get_packages_status(
         &mut self,
         _msg: GetPackagesStatus,
@@ -913,6 +966,10 @@ pub mod message {
         pub purge_volume: bool,
     }
 
+    pub struct WipePackageData {
+        pub package_name: String,
+    }
+
     pub struct StartPackage {
         pub package_name: String,
     }
@@ -931,6 +988,17 @@ pub mod message {
     pub struct GetPackageInfo {
         pub package_name: String,
     }
+}
+
+/// States in which wiping a package's data volume is safe: no data bind mount
+/// can be live. Deny-by-default — every other state (running/upgrading, mid
+/// setup/cleanup, or Error/Broken where a failed unmount may have left a mount
+/// live) is rejected so `clear()` never runs over a live bind-mount source.
+fn is_wipeable_status(status: &PackageStatus) -> bool {
+    matches!(
+        status,
+        PackageStatus::Verified | PackageStatus::Ready | PackageStatus::Cleaned
+    )
 }
 
 #[cfg(test)]
@@ -958,6 +1026,28 @@ mod tests {
     use super::*;
     use pkg_file::PackageFileBackend;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_is_wipeable_status_allowlist() {
+        for s in [
+            PackageStatus::Verified,
+            PackageStatus::Ready,
+            PackageStatus::Cleaned,
+        ] {
+            assert!(is_wipeable_status(&s), "{s} should be wipeable");
+        }
+        for s in [
+            PackageStatus::SettingUp,
+            PackageStatus::StartRequested,
+            PackageStatus::Running(String::new()),
+            PackageStatus::StopRequested,
+            PackageStatus::CleaningUp,
+            PackageStatus::Upgrading,
+            PackageStatus::Error(String::new()),
+        ] {
+            assert!(!is_wipeable_status(&s), "{s} must not be wipeable");
+        }
+    }
 
     type CallLog<T> = Arc<Mutex<Vec<T>>>;
 

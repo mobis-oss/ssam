@@ -29,6 +29,16 @@ message RemovePackageRequest {
     string package_name = 1;
 }
 
+message WipePackageDataRequest {
+    // Empty list means "all installed packages".
+    // This semantic is intentional; the CLI enforces --all flag for safety.
+    repeated string package_names = 1;
+}
+
+message WipePackageDataResponse {
+    string result = 1;
+}
+
 message PackageInformationRequest {
     string package_name = 1;
 }
@@ -78,6 +88,7 @@ service Remocon {
     rpc StopPackage(StopPackageRequest) returns (StopPackageResponse);
     rpc InstallPackage(InstallPackageRequest) returns (InstallPackageResponse);
     rpc RemovePackage(RemovePackageRequest) returns (RemovePackageResponse);
+    rpc WipePackageData(WipePackageDataRequest) returns (WipePackageDataResponse);
     rpc ListPackagesStatus(google.protobuf.Empty) returns (ListPackagesStatusResponse);
     rpc GetTimelineInfo(google.protobuf.Empty) returns (TimeLineInformationResponse);
     rpc GetPackageInfo(PackageInformationRequest) returns (PackageInformationResponse);

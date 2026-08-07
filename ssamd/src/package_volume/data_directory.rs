@@ -145,6 +145,36 @@ impl<T: QuotaEntryBackend> DataDirectory<T> {
             .with_context(|| format!("Failed to remove data directory: {}", self.path().display()))
     }
 
+    /// Empties the data directory's contents without removing the root or
+    /// touching quota. The root inode keeps its project id + inherit flag
+    /// from acquire time, so recreated files auto-inherit the same quota.
+    pub(crate) fn clear(&self) -> anyhow::Result<()> {
+        let root = self.path();
+        if !root.exists() {
+            return Ok(());
+        }
+        let cleared = std::fs::read_dir(root)
+            .with_context(|| format!("Failed to read data directory: {}", root.display()))?
+            .try_for_each(|entry| {
+                let entry =
+                    entry.with_context(|| format!("Failed to read entry in {}", root.display()))?;
+                let path = entry.path();
+                let file_type = entry.file_type().with_context(|| {
+                    format!("Failed to determine file type of {}", path.display())
+                })?;
+                if file_type.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                }
+                .with_context(|| format!("Failed to remove {}", path.display()))
+            });
+        // Recreate the configured bind-mount source subdirs even if the wipe
+        // above failed partway, so a half-cleared dir does not leave the next
+        // container start without its bind-mount sources. First error wins.
+        cleared.and(self.ensure_data_dirs())
+    }
+
     /// Set the quota block limit of the data directory.
     ///
     /// When `enabled` is true:
@@ -1416,6 +1446,52 @@ pub(crate) mod tests {
                 result.is_err(),
                 "remove_data_directory should fail for nonexistent directory"
             );
+        }
+
+        #[tokio::test]
+        async fn test_clear_empties_contents_keeps_root() {
+            let quota_impl = Some(mocks::MockExt4QuotaManager { should_fail: false });
+            let temp_dir = TempDir::new().unwrap();
+            let data_root = temp_dir.path();
+            let mut manager = DataDirectoryManager::new(quota_impl, data_root)
+                .await
+                .unwrap();
+
+            let test_path = data_root.join("test_package_clear");
+            let dir_meta = DataDirMetadata {
+                path: test_path.clone(),
+                package_name: "test-package-clear".to_string(),
+                data_dirs: Some("/app/data".to_string()),
+                storage_limit: Some(1024),
+            };
+
+            let data_dir = manager.create_data_directory(dir_meta).unwrap();
+            std::fs::write(test_path.join("file.txt"), b"data").unwrap();
+            std::fs::write(test_path.join("app/data/nested.txt"), b"nested").unwrap();
+
+            let result = data_dir.clear();
+
+            assert!(result.is_ok(), "clear should succeed");
+            assert!(test_path.exists(), "root should remain");
+            assert!(!test_path.join("file.txt").exists());
+            assert!(!test_path.join("app/data/nested.txt").exists());
+            assert!(
+                test_path.join("app/data").exists(),
+                "bind-mount subdir should be recreated"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_clear_never_acquired_is_noop() {
+            let temp_dir = TempDir::new().unwrap();
+            let nonexistent_path = temp_dir.path().join("nonexistent");
+            let data_dir: DataDirectory<mocks::MockQuotaEntryBackend> = DataDirectory {
+                path: nonexistent_path,
+                data_dirs: None,
+                quota_info: None,
+            };
+
+            assert!(data_dir.clear().is_ok());
         }
     }
 }

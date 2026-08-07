@@ -9,7 +9,7 @@ use tonic::transport::Channel;
 use libssam::remocon::remocon_client::RemoconClient;
 use libssam::remocon::{
     InspectLocalPackageRequest, InstallPackageRequest, PackageInformationRequest,
-    RemovePackageRequest, StartPackageRequest, StopPackageRequest,
+    RemovePackageRequest, StartPackageRequest, StopPackageRequest, WipePackageDataRequest,
 };
 
 #[tonic::async_trait]
@@ -28,6 +28,8 @@ pub trait Client: Send {
         remove_data: bool,
     ) -> Result<String>;
     async fn remove_package(&mut self, name: &str) -> Result<String>;
+    /// See [`Self::start_package`] for empty-names semantics.
+    async fn wipe_package_data(&mut self, names: Vec<String>) -> Result<String>;
     async fn get_timeline_info(&mut self) -> Result<String>;
     async fn get_package_info(&mut self, name: &str) -> Result<String>;
     async fn inspect_local_package(&mut self, path: &str) -> Result<String>;
@@ -124,6 +126,19 @@ impl Client for GrpcClient {
         Ok(response.result)
     }
 
+    async fn wipe_package_data(&mut self, names: Vec<String>) -> Result<String> {
+        let request = Request::new(WipePackageDataRequest {
+            package_names: names,
+        });
+        let response = self
+            .inner
+            .wipe_package_data(request)
+            .await
+            .context("Cannot wipe data for requested package(s)")?
+            .into_inner();
+        Ok(response.result)
+    }
+
     async fn get_timeline_info(&mut self) -> Result<String> {
         let response = self
             .inner
@@ -178,6 +193,7 @@ pub struct MockClient {
     pub stop_package_result: Option<anyhow::Result<String>>,
     pub install_package_result: Option<anyhow::Result<String>>,
     pub remove_package_result: Option<anyhow::Result<String>>,
+    pub wipe_package_data_result: Option<anyhow::Result<String>>,
     pub get_timeline_info_result: Option<anyhow::Result<String>>,
     pub get_package_info_result: Option<anyhow::Result<String>>,
     pub inspect_local_package_result: Option<anyhow::Result<String>>,
@@ -186,6 +202,7 @@ pub struct MockClient {
     pub captured_downgrade: Option<bool>,
     pub captured_start_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     pub captured_stop_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    pub captured_wipe_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 #[cfg(test)]
@@ -194,7 +211,7 @@ impl MockClient {
         use libssam::json_result::serialize_metadata;
         use libssam::{
             InspectLocalPackageResponse, InstallResponse, JsonResult, PackageInfoResponse,
-            PackageStatusEntry, StartStopResult,
+            PackageOpResult, PackageStatusEntry,
         };
 
         let package_metadata = Self::make_test_metadata();
@@ -237,12 +254,17 @@ impl MockClient {
             package_path: "/mock/packages/test-pkg.ssam".to_owned(),
             metadata: serialize_metadata(&package_metadata),
         });
-        let start_stop_json = JsonResult::success(vec![StartStopResult {
+        let start_stop_json = JsonResult::success(vec![PackageOpResult {
             package_name: "test-pkg".to_owned(),
             success: true,
             message: None,
         }]);
         let remove_json = JsonResult::<()>::success_empty();
+        let wipe_data_json = JsonResult::success(vec![PackageOpResult {
+            package_name: "test-pkg".to_owned(),
+            success: true,
+            message: None,
+        }]);
         let install_json = JsonResult::success(InstallResponse {
             metadata: serialize_metadata(&package_metadata),
         });
@@ -253,6 +275,7 @@ impl MockClient {
             stop_package_result: Some(Ok(start_stop_json)),
             install_package_result: Some(Ok(install_json)),
             remove_package_result: Some(Ok(remove_json)),
+            wipe_package_data_result: Some(Ok(wipe_data_json)),
             get_timeline_info_result: Some(Ok(timeline_json)),
             get_package_info_result: Some(Ok(package_info_json)),
             inspect_local_package_result: Some(Ok(inspect_local_json)),
@@ -261,6 +284,7 @@ impl MockClient {
             captured_downgrade: None,
             captured_start_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             captured_stop_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            captured_wipe_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -348,6 +372,11 @@ impl MockClient {
         self
     }
 
+    pub fn with_wipe_data_error(mut self) -> Self {
+        self.wipe_package_data_result = Some(Err(anyhow::anyhow!("Wipe data failed")));
+        self
+    }
+
     pub fn with_timeline_error(mut self) -> Self {
         self.get_timeline_info_result = Some(Err(anyhow::anyhow!("Timeline info failed")));
         self
@@ -380,15 +409,21 @@ impl MockClient {
         self
     }
 
-    pub fn with_start_results(mut self, results: Vec<libssam::StartStopResult>) -> Self {
+    pub fn with_start_results(mut self, results: Vec<libssam::PackageOpResult>) -> Self {
         use libssam::JsonResult;
         self.start_package_result = Some(Ok(JsonResult::success(results)));
         self
     }
 
-    pub fn with_stop_results(mut self, results: Vec<libssam::StartStopResult>) -> Self {
+    pub fn with_stop_results(mut self, results: Vec<libssam::PackageOpResult>) -> Self {
         use libssam::JsonResult;
         self.stop_package_result = Some(Ok(JsonResult::success(results)));
+        self
+    }
+
+    pub fn with_wipe_data_results(mut self, results: Vec<libssam::PackageOpResult>) -> Self {
+        use libssam::JsonResult;
+        self.wipe_package_data_result = Some(Ok(JsonResult::success(results)));
         self
     }
 }
@@ -436,6 +471,13 @@ impl Client for MockClient {
         self.remove_package_result
             .take()
             .expect("remove_package_result not set")
+    }
+
+    async fn wipe_package_data(&mut self, names: Vec<String>) -> anyhow::Result<String> {
+        self.captured_wipe_names.lock().unwrap().push(names);
+        self.wipe_package_data_result
+            .take()
+            .expect("wipe_package_data_result not set")
     }
 
     async fn get_timeline_info(&mut self) -> anyhow::Result<String> {
@@ -497,20 +539,20 @@ mod grpc_fake_server {
             &self,
             request: Request<StartPackageRequest>,
         ) -> Result<Response<StartPackageResponse>, Status> {
-            use libssam::{JsonResult, StartStopResult};
+            use libssam::{JsonResult, PackageOpResult};
 
             let names = &request.get_ref().package_names;
-            let ops: Vec<StartStopResult> = names
+            let ops: Vec<PackageOpResult> = names
                 .iter()
                 .map(|name| {
                     if name == "error" {
-                        StartStopResult {
+                        PackageOpResult {
                             package_name: name.clone(),
                             success: false,
                             message: Some("Failed to start package".to_owned()),
                         }
                     } else {
-                        StartStopResult {
+                        PackageOpResult {
                             package_name: name.clone(),
                             success: true,
                             message: None,
@@ -527,12 +569,12 @@ mod grpc_fake_server {
             &self,
             request: Request<StopPackageRequest>,
         ) -> Result<Response<StopPackageResponse>, Status> {
-            use libssam::{JsonResult, StartStopResult};
+            use libssam::{JsonResult, PackageOpResult};
 
             let names = &request.get_ref().package_names;
-            let ops: Vec<StartStopResult> = names
+            let ops: Vec<PackageOpResult> = names
                 .iter()
-                .map(|name| StartStopResult {
+                .map(|name| PackageOpResult {
                     package_name: name.clone(),
                     success: true,
                     message: None,
@@ -613,6 +655,25 @@ mod grpc_fake_server {
 
             let result = JsonResult::<()>::success_empty();
             Ok(Response::new(RemovePackageResponse { result }))
+        }
+
+        async fn wipe_package_data(
+            &self,
+            request: Request<WipePackageDataRequest>,
+        ) -> Result<Response<WipePackageDataResponse>, Status> {
+            use libssam::{JsonResult, PackageOpResult};
+
+            let names = &request.get_ref().package_names;
+            let ops: Vec<PackageOpResult> = names
+                .iter()
+                .map(|name| PackageOpResult {
+                    package_name: name.clone(),
+                    success: true,
+                    message: None,
+                })
+                .collect();
+            let result = JsonResult::success(ops);
+            Ok(Response::new(WipePackageDataResponse { result }))
         }
 
         async fn get_timeline_info(
@@ -852,7 +913,7 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_start_package() {
-        use libssam::{JsonResult, StartStopResult};
+        use libssam::{JsonResult, PackageOpResult};
 
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
@@ -868,7 +929,7 @@ mod grpc_tests {
             .start_package(vec!["test-pkg".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<StartStopResult>> = serde_json::from_str(&json_result).unwrap();
+        let result: JsonResult<Vec<PackageOpResult>> = serde_json::from_str(&json_result).unwrap();
 
         assert!(result.success);
         let ops = result.data.unwrap();
@@ -881,7 +942,7 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_stop_package() {
-        use libssam::{JsonResult, StartStopResult};
+        use libssam::{JsonResult, PackageOpResult};
 
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
@@ -897,7 +958,7 @@ mod grpc_tests {
             .stop_package(vec!["test-pkg".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<StartStopResult>> = serde_json::from_str(&json_result).unwrap();
+        let result: JsonResult<Vec<PackageOpResult>> = serde_json::from_str(&json_result).unwrap();
 
         assert!(result.success);
         let ops = result.data.unwrap();
@@ -955,6 +1016,35 @@ mod grpc_tests {
         let result: JsonResult<()> = serde_json::from_str(&json_result).unwrap();
 
         assert!(result.success);
+
+        shutdown_tx.send(()).ok();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_grpc_wipe_package_data() {
+        use libssam::{JsonResult, PackageOpResult};
+
+        let (addr, shutdown_tx, handle) = spawn_fake_server().await;
+
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+
+        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+
+        let json_result = client
+            .wipe_package_data(vec!["test-pkg".to_owned()])
+            .await
+            .unwrap();
+        let result: JsonResult<Vec<PackageOpResult>> = serde_json::from_str(&json_result).unwrap();
+
+        assert!(result.success);
+        let ops = result.data.unwrap();
+        assert_eq!(ops.len(), 1);
+        assert!(ops[0].success);
 
         shutdown_tx.send(()).ok();
         handle.await.unwrap().unwrap();
@@ -1042,7 +1132,7 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_start_package_error() {
-        use libssam::{JsonResult, StartStopResult};
+        use libssam::{JsonResult, PackageOpResult};
 
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
@@ -1058,7 +1148,7 @@ mod grpc_tests {
             .start_package(vec!["error".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<StartStopResult>> = serde_json::from_str(&json_result).unwrap();
+        let result: JsonResult<Vec<PackageOpResult>> = serde_json::from_str(&json_result).unwrap();
 
         assert!(result.success, "Outer result should always be success=true");
         let ops = result.data.unwrap();

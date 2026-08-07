@@ -143,7 +143,7 @@ pub type InstallResponse = crate::remocon_schema::InstallResponse;
 
 pub type InspectLocalPackageResponse = crate::remocon_schema::InspectLocalPackageResponse;
 
-pub type StartStopResult = crate::remocon_schema::StartStopResult;
+pub type PackageOpResult = crate::remocon_schema::PackageOpResult;
 
 #[must_use]
 pub fn serialize_metadata(metadata: &PackageMetadata) -> crate::remocon_schema::PackageInfo {
@@ -250,32 +250,32 @@ mod tests {
 
     #[test]
     fn test_json_result_rejects_unsupported_schema_version() {
-        let json_str = r#"{"schema_version":"2","success":false,"reason":"test"}"#;
+        let json_str = r#"{"schema_version":"3","success":false,"reason":"test"}"#;
         let result = JsonResult::<()>::parse_response(json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("Unsupported schema version"));
-        assert!(err_msg.contains("expected '1'"));
-        assert!(err_msg.contains("got '2'"));
+        assert!(err_msg.contains("expected '2'"));
+        assert!(err_msg.contains("got '3'"));
     }
 
     #[test]
     fn test_json_result_accepts_valid_schema_version() {
-        let json_str = r#"{"schema_version":"1","success":true,"data":"ok"}"#;
+        let json_str = r#"{"schema_version":"2","success":true,"data":"ok"}"#;
         let result = JsonResult::<String>::parse_response(json_str);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_parse_response_action_success() {
-        let json_str = r#"{"schema_version":"1","success":true}"#;
+        let json_str = r#"{"schema_version":"2","success":true}"#;
         let result = JsonResult::<()>::parse_response(json_str);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_parse_response_action_failure_with_reason() {
-        let json_str = r#"{"schema_version":"1","success":false,"reason":"Package not found"}"#;
+        let json_str = r#"{"schema_version":"2","success":false,"reason":"Package not found"}"#;
         let result = JsonResult::<()>::parse_response(json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_parse_response_action_unsupported_version() {
-        let json_str = r#"{"schema_version":"2","success":true}"#;
+        let json_str = r#"{"schema_version":"3","success":true}"#;
         let result = JsonResult::<()>::parse_response(json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -293,14 +293,14 @@ mod tests {
 
     #[test]
     fn test_parse_response_success() {
-        let json_str = r#"{"schema_version":"1","success":true,"data":"hello"}"#;
+        let json_str = r#"{"schema_version":"2","success":true,"data":"hello"}"#;
         let result = JsonResult::<String>::parse_response(json_str);
         assert_eq!(result.unwrap(), "hello");
     }
 
     #[test]
     fn test_parse_response_failure() {
-        let json_str = r#"{"schema_version":"1","success":false,"reason":"not found"}"#;
+        let json_str = r#"{"schema_version":"2","success":false,"reason":"not found"}"#;
         let result = JsonResult::<String>::parse_response(json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_parse_response_missing_data() {
-        let json_str = r#"{"schema_version":"1","success":true}"#;
+        let json_str = r#"{"schema_version":"2","success":true}"#;
         let result = JsonResult::<String>::parse_response(json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_parse_install_response_missing_metadata() {
-        let json = r#"{"schema_version":"1","success":true,"data":{}}"#;
+        let json = r#"{"schema_version":"2","success":true,"data":{}}"#;
         let result = JsonResult::<InstallResponse>::parse_response(json);
 
         assert!(result.is_err());
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_parse_install_response_failure() {
-        let json = r#"{"schema_version":"1","success":false,"reason":"install failed"}"#;
+        let json = r#"{"schema_version":"2","success":false,"reason":"install failed"}"#;
         let result = JsonResult::<InstallResponse>::parse_response(json);
 
         assert!(result.is_err());

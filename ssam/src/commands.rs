@@ -15,13 +15,14 @@ pub mod remove;
 pub mod start;
 pub mod stop;
 pub mod timeline_info;
+pub mod wipe_data;
 
 use libssam::PackageInfoResponse;
-use libssam::StartStopResult;
+use libssam::PackageOpResult;
 
 use crate::client::Client;
 
-// Shared helpers for multi-package commands (start, stop).
+// Shared helpers for multi-package commands (start, stop, wipe-data).
 // Extracted here to avoid duplication across command modules.
 
 pub(crate) const PACKAGE_NAMES_ARG: &str = "package_names";
@@ -57,8 +58,8 @@ pub(crate) fn multi_package_command(
         )
 }
 
-pub(crate) fn write_start_stop_results(
-    results: &[StartStopResult],
+pub(crate) fn write_package_op_results(
+    results: &[PackageOpResult],
     stdout: &mut dyn Write,
 ) -> io::Result<bool> {
     let mut all_success = true;
@@ -148,6 +149,7 @@ impl Commands {
                     &list::COMMAND,
                     &install::COMMAND,
                     &remove::COMMAND,
+                    &wipe_data::COMMAND,
                     &timeline_info::COMMAND,
                     &pkg_info::COMMAND,
                 ]

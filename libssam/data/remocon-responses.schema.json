@@ -6,7 +6,7 @@
   "$defs": {
     "schemaVersion": {
       "type": "string",
-      "const": "1",
+      "const": "2",
       "description": "Schema version for all RPC responses"
     },
     "duration": {
@@ -204,7 +204,7 @@
       ],
       "additionalProperties": false
     },
-    "startStopResult": {
+    "packageOpResult": {
       "type": "object",
       "required": ["package_name", "success"],
       "properties": {
@@ -389,7 +389,7 @@
                 "data": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/$defs/startStopResult"
+                    "$ref": "#/$defs/packageOpResult"
                   }
                 }
               }
@@ -414,7 +414,7 @@
                 "data": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/$defs/startStopResult"
+                    "$ref": "#/$defs/packageOpResult"
                   }
                 }
               }
@@ -457,6 +457,31 @@
          }
        ]
      },
+    "wipe-data": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/jsonResultSuccess"
+            },
+            {
+              "required": ["data"],
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/packageOpResult"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/jsonResultFailure"
+        }
+      ]
+    },
     "inspectLocalPackageResponse": {
       "type": "object",
       "description": "Inspect local package file response (no status/quota)",
@@ -523,6 +548,9 @@
         },
         "remove": {
           "$ref": "#/$defs/remove"
+        },
+        "wipe-data": {
+          "$ref": "#/$defs/wipe-data"
         },
         "inspect-local-pkg": {
           "$ref": "#/$defs/inspect-local-pkg"

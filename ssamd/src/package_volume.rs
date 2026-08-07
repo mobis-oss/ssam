@@ -94,6 +94,10 @@ pub mod messages {
         pub(crate) name: String,
     }
 
+    pub(crate) struct WipeVolumeData {
+        pub(crate) name: String,
+    }
+
     pub(crate) struct GetQuotaInfo {
         pub(crate) name: String,
     }
@@ -252,6 +256,30 @@ impl PackageVolumeManagerActor {
                     msg.name
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[handler]
+    // rsactor #[handler] requires async fn signature even without await
+    #[allow(clippy::unused_async)]
+    async fn handle_wipe_volume_data(
+        &mut self,
+        msg: messages::WipeVolumeData,
+        _actor_ref: &ActorRef<Self>,
+    ) -> anyhow::Result<()> {
+        if let Some(volume) = self.volumes.get(&msg.name) {
+            if let Some(data_directory) = volume.data_directory() {
+                data_directory.clear().with_context(|| {
+                    format!("Failed to wipe data directory for package: {}", msg.name)
+                })?;
+            }
+            log::debug!("Wiped data for package: {}", msg.name);
+        } else {
+            log::debug!(
+                "WipeVolumeData: no volume found for package: {}, skipping",
+                msg.name
+            );
         }
         Ok(())
     }
@@ -608,6 +636,52 @@ pub(crate) mod tests {
                 .unwrap();
 
             assert!(purge_result.is_ok());
+
+            // Stop the actor
+            actor_ref.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn test_handle_wipe_volume_data_success() {
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+
+            let volume_meta = create_test_volume_metadata("test-package-wipe");
+            let volume = actor_ref
+                .ask(messages::AcquireVolume { volume_meta })
+                .await
+                .unwrap()
+                .unwrap();
+            let data_dir = volume.data_directory().unwrap();
+            let data_path = data_dir.path().to_path_buf();
+            std::fs::write(data_path.join("leftover.txt"), b"data").unwrap();
+
+            let wipe_result = actor_ref
+                .ask(messages::WipeVolumeData {
+                    name: "test-package-wipe".to_string(),
+                })
+                .await
+                .unwrap();
+            assert!(wipe_result.is_ok());
+
+            assert!(data_path.exists(), "data root should remain");
+            assert!(!data_path.join("leftover.txt").exists());
+
+            // Stop the actor
+            actor_ref.stop().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn test_handle_wipe_volume_data_not_found() {
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+
+            let wipe_result = actor_ref
+                .ask(messages::WipeVolumeData {
+                    name: "test-package-no-data-wipe".to_string(),
+                })
+                .await
+                .unwrap();
+
+            assert!(wipe_result.is_ok());
 
             // Stop the actor
             actor_ref.stop().await.unwrap();

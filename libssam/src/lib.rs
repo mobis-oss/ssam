@@ -11,8 +11,8 @@ pub mod remocon {
 }
 
 pub use json_result::{
-    InspectLocalPackageResponse, InstallResponse, JsonResult, PackageInfoResponse,
-    PackageStatusEntry, StartStopResult, TimelineResponse,
+    InspectLocalPackageResponse, InstallResponse, JsonResult, PackageInfoResponse, PackageOpResult,
+    PackageStatusEntry, TimelineResponse,
 };
 pub use ssam_package::PackageParseError;
 
