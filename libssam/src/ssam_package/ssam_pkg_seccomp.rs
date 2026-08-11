@@ -195,4 +195,68 @@ mod tests {
         let policy = PackageSeccompPolicy::from_bytes(data.clone()).unwrap();
         assert_eq!(policy.as_bytes(), data.as_slice());
     }
+
+    // Guard against regressing the userns-escape filter in the default
+    // profile. Cheap parse of the compiled-in policy, no Docker needed.
+    #[test]
+    fn test_default_policy_blocks_userns() {
+        const USERNS_MASK: u64 = 2_114_060_288; // 0x7E020000 = all CLONE_NEW* bits
+
+        let policy = PackageSeccompPolicy::default_policy();
+        let json: serde_json::Value =
+            serde_json::from_slice(policy.as_bytes()).expect("default policy parses");
+        let syscalls = json["syscalls"].as_array().expect("syscalls array");
+
+        let names_of = |entry: &serde_json::Value| -> Vec<String> {
+            entry["names"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|n| n.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // No unconditional-allow (empty args) entry may still permit these.
+        for entry in syscalls {
+            if entry["action"] == "SCMP_ACT_ALLOW"
+                && entry["args"].as_array().is_some_and(Vec::is_empty)
+            {
+                let names = names_of(entry);
+                for banned in ["clone", "clone3", "unshare"] {
+                    assert!(
+                        !names.iter().any(|n| n == banned),
+                        "{banned} must not be unconditionally allowed"
+                    );
+                }
+            }
+        }
+
+        let find = |name: &str, action: &str| -> serde_json::Value {
+            syscalls
+                .iter()
+                .find(|e| names_of(e).iter().any(|n| n == name) && e["action"] == action)
+                .unwrap_or_else(|| panic!("missing {name} entry with action {action}"))
+                .clone()
+        };
+
+        for name in ["clone", "unshare"] {
+            let entry = find(name, "SCMP_ACT_ALLOW");
+            let arg = &entry["args"][0];
+            assert_eq!(arg["op"], "SCMP_CMP_MASKED_EQ", "{name} must mask flags");
+            assert_eq!(
+                arg["value"].as_u64(),
+                Some(USERNS_MASK),
+                "{name} mask must cover CLONE_NEW*"
+            );
+        }
+
+        let clone3 = find("clone3", "SCMP_ACT_ERRNO");
+        assert_eq!(
+            clone3["errnoRet"].as_u64(),
+            Some(38),
+            "clone3 must ENOSYS for glibc clone() fallback"
+        );
+    }
 }
