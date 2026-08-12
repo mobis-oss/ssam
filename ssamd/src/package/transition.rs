@@ -33,6 +33,7 @@ pub(crate) trait PackageTransitioner: Send + Sync + std::fmt::Debug {
     async fn start(&self) -> anyhow::Result<ExecutionResult>;
     async fn stop(&self) -> anyhow::Result<ExecutionResult>;
     async fn teardown(&self) -> anyhow::Result<()>;
+    async fn wipe_data(&self) -> anyhow::Result<()>;
 
     fn get_name(&self) -> &str;
 }

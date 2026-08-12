@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::package::{Package, PackageContext};
-use crate::package_volume::messages::{AcquireVolume, PurgeVolume, WipeVolumeData};
+use crate::package_volume::messages::{AcquireVolume, PurgeVolume};
 use crate::package_volume::{PackageVolume, PackageVolumeManagerActor, PackageVolumeMetadata};
 use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor};
 use anyhow::Context;
@@ -110,15 +110,6 @@ impl PackageTransactionActor {
             .await
             .context("Failed to communicate with PackageVolumeManager Actor")?
     }
-
-    async fn wipe_volume(&self, package_name: &str) -> anyhow::Result<()> {
-        self.volume_manager_ref
-            .ask(WipeVolumeData {
-                name: package_name.to_owned(),
-            })
-            .await
-            .context("Failed to communicate with PackageVolumeManager Actor")?
-    }
 }
 
 impl SupervisedActor for PackageTransactionActor {
@@ -153,10 +144,6 @@ pub(crate) mod message {
     }
 
     pub(crate) struct PurgePackageVolume {
-        pub(crate) name: String,
-    }
-
-    pub(crate) struct WipePackageVolume {
         pub(crate) name: String,
     }
 }
@@ -209,15 +196,6 @@ impl PackageTransactionActor {
         _actor_ref: &ActorRef<Self>,
     ) -> anyhow::Result<()> {
         self.purge_volume(&msg.name).await
-    }
-
-    #[handler]
-    async fn handle_wipe_package_volume(
-        &mut self,
-        msg: message::WipePackageVolume,
-        _actor_ref: &ActorRef<Self>,
-    ) -> anyhow::Result<()> {
-        self.wipe_volume(&msg.name).await
     }
 }
 

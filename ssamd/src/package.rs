@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::executor::container::ContainerCommand;
 use crate::executor::{self, ContainerRuntime, ExecuteCommand, ExecutionResult, ExecutionStatus};
 use crate::network::NetworkManager;
-use crate::package_volume::messages::GetQuotaInfo;
+use crate::package_volume::messages::{GetQuotaInfo, WipeVolumeData};
 use crate::package_volume::{PackageFsBackend, PackageVolume, PackageVolumeManagerActor};
 use crate::utils::{timeline_complete, timeline_start};
 
@@ -44,6 +44,16 @@ pub enum PackageStatus {
     Error(String),
     #[strum(to_string = "Broken({0})")]
     Broken(BrokenReason),
+}
+
+/// States in which wiping a package's data volume is safe: no data bind mount
+/// can be live. Deny-by-default keeps cleanup from running over a live source
+/// when setup or unmount failed and left an Error or Broken package mounted.
+pub(crate) fn is_wipeable_status(status: &PackageStatus) -> bool {
+    matches!(
+        status,
+        PackageStatus::Verified | PackageStatus::Ready | PackageStatus::Cleaned
+    )
 }
 
 #[derive(Debug, strum::Display)]
@@ -188,6 +198,7 @@ struct DefaultPackageTransitioner {
     package_name: String,
     executor: Arc<LazyExecutor>,
     pkgfs_handle: Arc<dyn PackageFsBackend>,
+    volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
     network: Option<NetworkManager>,
     bridge_id: String,
     container_interface: String,
@@ -198,6 +209,7 @@ impl DefaultPackageTransitioner {
         package_name: String,
         executor: Arc<LazyExecutor>,
         pkgfs_handle: Arc<dyn PackageFsBackend>,
+        volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
         network: Option<NetworkManager>,
         bridge_id: String,
         container_interface: String,
@@ -206,6 +218,7 @@ impl DefaultPackageTransitioner {
             package_name,
             executor,
             pkgfs_handle,
+            volume_manager_ref,
             network,
             bridge_id,
             container_interface,
@@ -392,6 +405,15 @@ impl PackageTransitioner for DefaultPackageTransitioner {
             .with_context(|| format!("{}: Failed to unmount package fs", self.package_name))
     }
 
+    async fn wipe_data(&self) -> anyhow::Result<()> {
+        self.volume_manager_ref
+            .ask(WipeVolumeData {
+                name: self.package_name.clone(),
+            })
+            .await
+            .context("Failed to communicate with PackageVolumeManager Actor")?
+    }
+
     fn get_name(&self) -> &str {
         &self.package_name
     }
@@ -515,6 +537,7 @@ impl Package {
             pkg_name.clone(),
             executor,
             pkgfs_handle,
+            volume_manager_ref.clone(),
             effective_network,
             bridge_id,
             container_interface,
@@ -612,6 +635,14 @@ impl Package {
     /// Returns an error if the transition to `StopRequested` state fails.
     pub async fn request_stop(&self) -> anyhow::Result<()> {
         self.transition_mgr.request_stop().await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the package is not stopped or if wiping its data
+    /// volume fails.
+    pub async fn wipe_data(&self) -> anyhow::Result<()> {
+        self.transition_mgr.wipe_data().await
     }
 
     /// # Errors
@@ -843,6 +874,10 @@ mod tests {
             Ok(())
         }
 
+        async fn wipe_data(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn get_name(&self) -> &str {
             &self.pkg_name
         }
@@ -960,6 +995,31 @@ mod tests {
         let result = actor.transition_to(PackageStatus::StopRequested).await;
         assert!(result.is_ok());
         assert_eq!(actor.status, PackageStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_wipe_data_is_serialized_by_package_status() {
+        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
+        let manager = TransitionManager::new(mock_ops);
+
+        manager
+            .request_setup()
+            .await
+            .expect("setup should reach Ready");
+        assert!(manager.wipe_data().await.is_ok());
+
+        manager
+            .request_start()
+            .await
+            .expect("start should reach Running");
+        let result = manager.wipe_data().await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("stop it before wiping data")
+        );
     }
 
     #[tokio::test]

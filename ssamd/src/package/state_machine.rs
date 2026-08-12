@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 
 use super::transition::{PackageTransitioner, TransitionStore};
-use super::{InvalidTransition, PackageStatus};
+use super::{InvalidTransition, PackageStatus, is_wipeable_status};
 use crate::executor::{ExecutionResult, ExecutionStatus};
 
 pub(in crate::package) mod transition_messages {
@@ -18,6 +18,8 @@ pub(in crate::package) mod transition_messages {
 
     #[derive(Debug)]
     pub(in crate::package) struct GetStatus;
+
+    pub(in crate::package) struct WipeData;
 }
 
 #[derive(Debug, rsactor::Actor)]
@@ -56,6 +58,26 @@ impl TransitionManagerActor {
         _actor_ref: &rsactor::ActorRef<TransitionManagerActor>,
     ) -> PackageStatus {
         self.status.clone()
+    }
+
+    #[handler]
+    async fn handle_wipe_data(
+        &mut self,
+        _msg: transition_messages::WipeData,
+        _actor_ref: &rsactor::ActorRef<TransitionManagerActor>,
+    ) -> anyhow::Result<()> {
+        let package_name = self.ops.get_name();
+        anyhow::ensure!(
+            is_wipeable_status(&self.status),
+            "Package '{package_name}' is not in a wipeable state (current: {}); \
+             stop it before wiping data",
+            self.status
+        );
+
+        self.ops
+            .wipe_data()
+            .await
+            .context("Failed to wipe package data")
     }
 }
 
@@ -210,5 +232,12 @@ impl TransitionManager {
             .ask(msg)
             .await
             .context("TransitionManager actor might have been stopped.")
+    }
+
+    pub(super) async fn wipe_data(&self) -> anyhow::Result<()> {
+        self.transition_mgr
+            .ask(transition_messages::WipeData)
+            .await
+            .context("TransitionManager actor might have been stopped.")?
     }
 }

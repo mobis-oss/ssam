@@ -5,7 +5,7 @@ use crate::network::NetworkManager;
 use crate::package::{Package, PackageStatus};
 use crate::package_manager::message::{
     GetAllPackageInfo, GetPackage, GetPackageInfo, GetPackageNames, GetPackagesStatus,
-    InstallPackage, RemovePackage, TeardownPackageManager, WipePackageData,
+    InstallPackage, RemovePackage, TeardownPackageManager,
 };
 use crate::package_manager::parser::PackageParseResult;
 use crate::package_manager::store::{PackageStore, PackageStoreBackend};
@@ -99,12 +99,15 @@ impl PackageManagerService for PackageManager {
     }
 
     async fn wipe_package_data(&self, package_name: &str) -> anyhow::Result<()> {
-        self.actor_ref
-            .ask(WipePackageData {
+        let package = self
+            .actor_ref
+            .ask(GetPackage {
                 package_name: package_name.to_owned(),
             })
             .await
             .expect("PackageManagerActor crashed; daemon cannot function without it")
+            .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))?;
+        package.wipe_data().await
     }
 
     async fn start_package(&self, package_name: &str) -> anyhow::Result<()> {
@@ -652,35 +655,6 @@ impl PackageManagerActor {
         Ok(())
     }
 
-    async fn wipe_package_data(&self, package_name: &str) -> anyhow::Result<()> {
-        log::debug!("Wiping data for package: {package_name}");
-        let package = self
-            .package_store
-            .get(package_name)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))?;
-
-        let status = package
-            .get_status()
-            .await
-            .with_context(|| format!("Failed to get status of package {package_name}"))?;
-        anyhow::ensure!(
-            is_wipeable_status(&status),
-            "Package '{package_name}' is not in a wipeable state (current: {status}); \
-             stop it before wiping data"
-        );
-
-        self.transaction_actor
-            .ask(pkg_file::message::WipePackageVolume {
-                name: package_name.to_owned(),
-            })
-            .await
-            .context("Failed to communicate with PackageTransactionActor")??;
-
-        log::debug!("Successfully wiped data for package: {package_name}");
-        Ok(())
-    }
-
     async fn teardown(&self, package: &Package, package_name: &str) -> anyhow::Result<()> {
         package
             .teardown()
@@ -830,19 +804,6 @@ impl PackageManagerActor {
     }
 
     #[handler]
-    async fn handle_wipe_package_data(
-        &mut self,
-        msg: WipePackageData,
-        _actor_ref: &ActorRef<Self>,
-    ) -> anyhow::Result<()> {
-        log::trace!("PackageManagerActor::wipe_package_data");
-        let package_name = msg.package_name;
-        self.wipe_package_data(&package_name)
-            .await
-            .with_context(|| format!("Failed to wipe data for package: {package_name}"))
-    }
-
-    #[handler]
     async fn handle_get_packages_status(
         &mut self,
         _msg: GetPackagesStatus,
@@ -941,10 +902,6 @@ pub mod message {
         pub purge_volume: bool,
     }
 
-    pub struct WipePackageData {
-        pub package_name: String,
-    }
-
     pub struct GetPackagesStatus;
 
     pub struct GetPackageNames;
@@ -955,17 +912,6 @@ pub mod message {
     pub struct GetPackageInfo {
         pub package_name: String,
     }
-}
-
-/// States in which wiping a package's data volume is safe: no data bind mount
-/// can be live. Deny-by-default — every other state (running/upgrading, mid
-/// setup/cleanup, or Error/Broken where a failed unmount may have left a mount
-/// live) is rejected so `clear()` never runs over a live bind-mount source.
-fn is_wipeable_status(status: &PackageStatus) -> bool {
-    matches!(
-        status,
-        PackageStatus::Verified | PackageStatus::Ready | PackageStatus::Cleaned
-    )
 }
 
 #[cfg(test)]
@@ -991,6 +937,7 @@ impl PackageManagerActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::is_wipeable_status;
     use pkg_file::PackageFileBackend;
     use std::sync::{Arc, Mutex};
 
