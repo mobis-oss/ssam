@@ -5,8 +5,7 @@ use crate::network::NetworkManager;
 use crate::package::{Package, PackageStatus};
 use crate::package_manager::message::{
     GetAllPackageInfo, GetPackage, GetPackageInfo, GetPackageNames, GetPackagesStatus,
-    InstallPackage, RemovePackage, StartPackage, StopPackage, TeardownPackageManager,
-    WipePackageData,
+    InstallPackage, RemovePackage, TeardownPackageManager, WipePackageData,
 };
 use crate::package_manager::parser::PackageParseResult;
 use crate::package_manager::store::{PackageStore, PackageStoreBackend};
@@ -109,21 +108,27 @@ impl PackageManagerService for PackageManager {
     }
 
     async fn start_package(&self, package_name: &str) -> anyhow::Result<()> {
-        self.actor_ref
-            .ask(StartPackage {
+        let package = self
+            .actor_ref
+            .ask(GetPackage {
                 package_name: package_name.to_owned(),
             })
             .await
             .expect("PackageManagerActor crashed; daemon cannot function without it")
+            .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))?;
+        package.request_start().await
     }
 
     async fn stop_package(&self, package_name: &str) -> anyhow::Result<()> {
-        self.actor_ref
-            .ask(StopPackage {
+        let package = self
+            .actor_ref
+            .ask(GetPackage {
                 package_name: package_name.to_owned(),
             })
             .await
             .expect("PackageManagerActor crashed; daemon cannot function without it")
+            .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))?;
+        package.request_stop().await
     }
 
     async fn get_package_info(&self, package_name: &str) -> anyhow::Result<PackageInfoResult> {
@@ -731,36 +736,6 @@ impl PackageManagerActor {
         self.get_package(&msg.package_name).await
     }
 
-    #[handler]
-    async fn handle_start_package(
-        &mut self,
-        msg: StartPackage,
-        _actor_ref: &ActorRef<Self>,
-    ) -> anyhow::Result<()> {
-        log::trace!("PackageManagerActor::start_package");
-        let package_name = msg.package_name;
-        let package = self
-            .get_package(&package_name)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))?;
-        package.request_start().await
-    }
-
-    #[handler]
-    async fn handle_stop_package(
-        &mut self,
-        msg: StopPackage,
-        _actor_ref: &ActorRef<Self>,
-    ) -> anyhow::Result<()> {
-        log::trace!("PackageManagerActor::stop_package");
-        let package_name = msg.package_name;
-        let package = self
-            .get_package(&package_name)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))?;
-        package.request_stop().await
-    }
-
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
     #[allow(clippy::unnecessary_debug_formatting)]
     #[handler]
@@ -967,14 +942,6 @@ pub mod message {
     }
 
     pub struct WipePackageData {
-        pub package_name: String,
-    }
-
-    pub struct StartPackage {
-        pub package_name: String,
-    }
-
-    pub struct StopPackage {
         pub package_name: String,
     }
 

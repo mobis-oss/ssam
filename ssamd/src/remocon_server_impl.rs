@@ -102,17 +102,15 @@ impl Remocon for RemoconImpl {
         log::debug!("Received request to start packages: {package_names:?}");
 
         let names = self.resolve_package_names(package_names).await;
-        let results = futures_util::stream::iter(names)
-            .fold(Vec::new(), |mut results, name| async {
-                let outcome = self
-                    .package_manager
-                    .start_package(&name)
-                    .await
-                    .inspect_err(|e| log::error!("Failed to start package {name}: {e:#}"));
-                results.push(into_package_op_result(name, outcome));
-                results
-            })
-            .await;
+        let package_manager = &self.package_manager;
+        let results = futures_util::future::join_all(names.into_iter().map(|name| async move {
+            let outcome = package_manager
+                .start_package(&name)
+                .await
+                .inspect_err(|e| log::error!("Failed to start package {name}: {e:#}"));
+            into_package_op_result(name, outcome)
+        }))
+        .await;
 
         Ok(Response::new(StartPackageResponse {
             result: JsonResult::success(results),
@@ -127,17 +125,15 @@ impl Remocon for RemoconImpl {
         log::debug!("Received request to stop packages: {package_names:?}");
 
         let names = self.resolve_package_names(package_names).await;
-        let results = futures_util::stream::iter(names)
-            .fold(Vec::new(), |mut results, name| async {
-                let outcome = self
-                    .package_manager
-                    .stop_package(&name)
-                    .await
-                    .inspect_err(|e| log::error!("Failed to stop package {name}: {e:#}"));
-                results.push(into_package_op_result(name, outcome));
-                results
-            })
-            .await;
+        let package_manager = &self.package_manager;
+        let results = futures_util::future::join_all(names.into_iter().map(|name| async move {
+            let outcome = package_manager
+                .stop_package(&name)
+                .await
+                .inspect_err(|e| log::error!("Failed to stop package {name}: {e:#}"));
+            into_package_op_result(name, outcome)
+        }))
+        .await;
 
         Ok(Response::new(StopPackageResponse {
             result: JsonResult::success(results),
@@ -422,6 +418,7 @@ pub(crate) mod tests {
     use libssam::superblock::FsType;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::Barrier;
     use tonic::Request;
 
     type InstallResultMap = Arc<Mutex<HashMap<String, Result<PackageMetadata, anyhow::Error>>>>;
@@ -435,6 +432,8 @@ pub(crate) mod tests {
         pub wipe_data_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
         pub start_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
         pub stop_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
+        pub start_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
+        pub stop_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
         pub all_package_info_error: Arc<Mutex<Option<String>>>,
         pub last_install_args: Arc<Mutex<Option<(PathBuf, bool, bool)>>>,
     }
@@ -449,6 +448,8 @@ pub(crate) mod tests {
                 wipe_data_results: Arc::new(Mutex::new(HashMap::new())),
                 start_results: Arc::new(Mutex::new(HashMap::new())),
                 stop_results: Arc::new(Mutex::new(HashMap::new())),
+                start_barrier: Arc::new(Mutex::new(None)),
+                stop_barrier: Arc::new(Mutex::new(None)),
                 all_package_info_error: Arc::new(Mutex::new(None)),
                 last_install_args: Arc::new(Mutex::new(None)),
             }
@@ -505,6 +506,14 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .insert(package_name, result);
+        }
+
+        pub fn set_start_barrier(&self, barrier: Arc<Barrier>) {
+            *self.start_barrier.lock().unwrap() = Some(barrier);
+        }
+
+        pub fn set_stop_barrier(&self, barrier: Arc<Barrier>) {
+            *self.stop_barrier.lock().unwrap() = Some(barrier);
         }
 
         pub fn set_all_package_info_error(&self, error: String) {
@@ -651,6 +660,11 @@ pub(crate) mod tests {
         }
 
         async fn start_package(&self, package_name: &str) -> anyhow::Result<()> {
+            let barrier = self.start_barrier.lock().unwrap().clone();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
+
             let outcome = {
                 let guard = self.start_results.lock().unwrap();
                 guard
@@ -686,6 +700,11 @@ pub(crate) mod tests {
         }
 
         async fn stop_package(&self, package_name: &str) -> anyhow::Result<()> {
+            let barrier = self.stop_barrier.lock().unwrap().clone();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
+
             let outcome = {
                 let guard = self.stop_results.lock().unwrap();
                 guard
@@ -902,6 +921,49 @@ pub(crate) mod tests {
         let names: Vec<&str> = ops.iter().map(|op| op.package_name.as_str()).collect();
         assert!(names.contains(&"pkg-a"));
         assert!(names.contains(&"pkg-b"));
+    }
+
+    #[tokio::test]
+    async fn test_start_and_stop_packages_in_one_request_are_concurrent() {
+        let (remocon, mock_manager) = create_test_remocon();
+        let start_barrier = Arc::new(Barrier::new(2));
+        let stop_barrier = Arc::new(Barrier::new(2));
+
+        mock_manager.add_package("pkg-a".to_string(), PackageStatusEnum::Ready);
+        mock_manager.add_package("pkg-b".to_string(), PackageStatusEnum::Ready);
+        mock_manager.set_start_barrier(start_barrier);
+        mock_manager.set_stop_barrier(stop_barrier);
+
+        let start_response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            remocon.start_package(Request::new(StartPackageRequest {
+                package_names: vec!["pkg-a".to_string(), "pkg-b".to_string()],
+            })),
+        )
+        .await
+        .expect("start operations did not run concurrently")
+        .expect("start request failed");
+        assert!(check_json_success(&start_response.into_inner().result));
+
+        mock_manager.add_package(
+            "pkg-a".to_string(),
+            PackageStatusEnum::Running("pkg-a".to_string()),
+        );
+        mock_manager.add_package(
+            "pkg-b".to_string(),
+            PackageStatusEnum::Running("pkg-b".to_string()),
+        );
+
+        let stop_response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            remocon.stop_package(Request::new(StopPackageRequest {
+                package_names: vec!["pkg-a".to_string(), "pkg-b".to_string()],
+            })),
+        )
+        .await
+        .expect("stop operations did not run concurrently")
+        .expect("stop request failed");
+        assert!(check_json_success(&stop_response.into_inner().result));
     }
 
     #[tokio::test]
