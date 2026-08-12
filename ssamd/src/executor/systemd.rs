@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::str::FromStr as _;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use anyhow::Context as _;
 use futures_util::{Stream, StreamExt as _};
@@ -17,7 +17,7 @@ use systemd_dbus::JobResult;
 
 use crate::configuration;
 use crate::executor::systemd::systemd_dbus::manager_messages::{
-    ResetFailedUnit, StartTransientUnit, StopUnit,
+    CancelJobWatch, ResetFailedUnit, StartTransientUnit, StopUnit,
 };
 use crate::executor::{ExecuteCommand, ExecutionResult, ExecutionState, ExecutionStatus};
 
@@ -41,9 +41,8 @@ mod systemd_dbus {
     use strum::Display;
     use tokio::sync::oneshot;
 
+    use zbus::zvariant::ObjectPath;
     use zbus_systemd::systemd1::{JobRemovedStream, ManagerProxy};
-
-    use crate::executor::systemd::constants;
 
     use super::JobRemovedSenderMap;
 
@@ -176,6 +175,8 @@ mod systemd_dbus {
     }
 
     pub(crate) mod manager_messages {
+        use zbus::zvariant::ObjectPath;
+
         pub(crate) struct ResetFailedUnit {
             pub(crate) unit_name: String,
         }
@@ -187,6 +188,10 @@ mod systemd_dbus {
 
         pub(crate) struct StopUnit {
             pub(crate) unit_name: String,
+        }
+
+        pub(crate) struct CancelJobWatch {
+            pub(crate) job_path: ObjectPath<'static>,
         }
     }
 
@@ -246,7 +251,7 @@ mod systemd_dbus {
             &mut self,
             msg: manager_messages::StartTransientUnit,
             _actor_ref: &ActorRef<Self>,
-        ) -> anyhow::Result<JobResult> {
+        ) -> anyhow::Result<(ObjectPath<'static>, oneshot::Receiver<JobResult>)> {
             let properties = msg.properties;
             let job_path = self
                 .manager_proxy
@@ -264,19 +269,7 @@ mod systemd_dbus {
                 .await
                 .context("JobRemoveWatcher has been stopped or not initialized")?;
 
-            let result = tokio::time::timeout(constants::JOB_WAIT_TIMEOUT, recv).await;
-            if let Ok(result) = result {
-                result.context("JobRemovedSignalWatcher has been stopped or not initialized")
-            } else {
-                log::warn!("Start has timed out for job: {job_path}");
-                self.job_removed_watcher_actor
-                    .ask(watcher_messages::CancelWatchSignal {
-                        job_path: job_path.to_owned(),
-                    })
-                    .await
-                    .context("JobRemoveWatcher has been stopped or not initialized")?;
-                Ok(JobResult::Timeout)
-            }
+            Ok((job_path, recv))
         }
 
         #[handler]
@@ -284,7 +277,7 @@ mod systemd_dbus {
             &mut self,
             msg: manager_messages::StopUnit,
             _actor_ref: &ActorRef<Self>,
-        ) -> anyhow::Result<JobResult> {
+        ) -> anyhow::Result<(ObjectPath<'static>, oneshot::Receiver<JobResult>)> {
             let job_path = self
                 .manager_proxy
                 .stop_unit(msg.unit_name, "replace".to_owned())
@@ -300,19 +293,22 @@ mod systemd_dbus {
                 .await
                 .context("JobRemoveWatcher has been stopped or not initialized")?;
 
-            let result = tokio::time::timeout(constants::JOB_WAIT_TIMEOUT, recv).await;
-            if let Ok(result) = result {
-                result.context("JobRemovedSignalWatcher has been stopped or not initialized")
-            } else {
-                log::warn!("Stop has timed out for job: {job_path}");
-                self.job_removed_watcher_actor
-                    .ask(watcher_messages::CancelWatchSignal {
-                        job_path: job_path.to_owned(),
-                    })
-                    .await
-                    .context("JobRemoveWatcher has been stopped or not initialized")?;
-                Ok(JobResult::Timeout)
-            }
+            Ok((job_path, recv))
+        }
+
+        #[handler]
+        async fn handle_cancel_job_watch(
+            &mut self,
+            msg: manager_messages::CancelJobWatch,
+            _actor_ref: &ActorRef<Self>,
+        ) -> anyhow::Result<()> {
+            self.job_removed_watcher_actor
+                .ask(watcher_messages::CancelWatchSignal {
+                    job_path: msg.job_path,
+                })
+                .await
+                .context("JobRemoveWatcher has been stopped or not initialized")?;
+            Ok(())
         }
     }
 
@@ -469,6 +465,25 @@ pub(crate) fn cgroups_path() -> &'static str {
     }
 }
 
+async fn await_job_with_cancel<F, Fut>(
+    job_path: ObjectPath<'static>,
+    recv: oneshot::Receiver<JobResult>,
+    timeout: std::time::Duration,
+    cancel_job_watch: F,
+) -> anyhow::Result<JobResult>
+where
+    F: FnOnce(CancelJobWatch) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    if let Ok(result) = tokio::time::timeout(timeout, recv).await {
+        result.context("JobRemovedSignalWatcher has been stopped or not initialized")
+    } else {
+        log::warn!("Job has timed out: {job_path}");
+        cancel_job_watch(CancelJobWatch { job_path }).await?;
+        Ok(JobResult::Timeout)
+    }
+}
+
 impl TransientUnitExecutor<'_> {
     pub(crate) async fn new(
         package_name: String,
@@ -577,6 +592,21 @@ impl TransientUnitExecutor<'_> {
         Ok(properties.into_iter().collect())
     }
 
+    async fn await_job(
+        &self,
+        job_path: ObjectPath<'static>,
+        recv: oneshot::Receiver<JobResult>,
+    ) -> anyhow::Result<JobResult> {
+        await_job_with_cancel(job_path, recv, constants::JOB_WAIT_TIMEOUT, |msg| async {
+            self.systemd_interface
+                .ask(msg)
+                .await
+                .context("JobRemoveWatcher has been stopped or not initialized")??;
+            Ok(())
+        })
+        .await
+    }
+
     fn unit_name(&self) -> &str {
         &self.unit_name
     }
@@ -683,14 +713,15 @@ impl CommandExecutorBackend for TransientUnitExecutor<'_> {
         let unit_properties = self
             .gen_unit_properties()
             .with_context(|| format!("Failed to generate properties for unit {unit_name}"))?;
-        let job_result = self
+        let (job_path, recv) = self
             .systemd_interface
             .ask(StartTransientUnit {
                 unit_name: self.unit_name().to_owned(),
                 properties: unit_properties,
             })
             .await
-            .context("Check whether SystemdManagerActor has died.")?;
+            .context("Check whether SystemdManagerActor has died.")??;
+        let job_result = self.await_job(job_path, recv).await;
 
         self.handle_job_result(job_result).await
     }
@@ -715,13 +746,14 @@ impl CommandExecutorBackend for TransientUnitExecutor<'_> {
             return Ok(ExecutionResult::Success(UnitActiveState::Inactive.into()));
         }
 
-        let job_result = self
+        let (job_path, recv) = self
             .systemd_interface
             .ask(StopUnit {
                 unit_name: unit_name.to_owned(),
             })
             .await
-            .context("Check whether SystemdManagerActor has died.")?;
+            .context("Check whether SystemdManagerActor has died.")??;
+        let job_result = self.await_job(job_path, recv).await;
         self.handle_job_result(job_result).await
     }
 
@@ -1152,6 +1184,30 @@ mod tests {
         let status = inactive_status();
         let result = map_job_result("test.service", JobResult::Timeout, status);
         assert!(matches!(result, ExecutionResult::Timeout));
+    }
+
+    #[tokio::test]
+    async fn test_await_job_timeout_cancels_watch() {
+        let job_path = ObjectPath::try_from("/org/freedesktop/systemd1/job/1")
+            .expect("valid systemd job path");
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (_job_tx, job_rx) = oneshot::channel::<JobResult>();
+
+        let result = await_job_with_cancel(
+            job_path.clone(),
+            job_rx,
+            std::time::Duration::ZERO,
+            |msg| async move {
+                cancel_tx
+                    .send(msg.job_path)
+                    .map_err(|_| anyhow::anyhow!("cancel receiver dropped"))
+            },
+        )
+        .await
+        .expect("timed out job should return a result");
+
+        assert!(matches!(result, JobResult::Timeout));
+        assert_eq!(cancel_rx.await.expect("cancel message"), job_path);
     }
 
     #[tokio::test]
