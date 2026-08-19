@@ -114,6 +114,10 @@ section).
 
 The package filesystem image is protected by **dm-verity**:
 
+- dm-verity implements the runtime package filesystem integrity policy. The
+  policy is enabled by default and can be disabled through
+  `[integrity].disable_runtime_integrity`. Package signature verification
+  remains enabled when this policy is disabled.
 - The signed `metadata` contains the **entire set of dm-verity parameters**
   (including the root hash).
 - At load time `ssamd` builds the dm-verity target from those signed parameters.

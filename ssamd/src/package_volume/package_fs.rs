@@ -31,6 +31,20 @@ impl PackageFsMetadata {
         path: impl AsRef<Path>,
         package_file: &F,
     ) -> anyhow::Result<Self> {
+        Self::new_with_roots(
+            path,
+            package_file,
+            configuration::packages_mnt_root(),
+            configuration::packages_overlayfs_root(),
+        )
+    }
+
+    fn new_with_roots<F: PackageFileInfo + ?Sized>(
+        path: impl AsRef<Path>,
+        package_file: &F,
+        mnt_root: &str,
+        packages_overlayfs_root: &str,
+    ) -> anyhow::Result<Self> {
         let package_path = path.as_ref().to_path_buf();
         let pkgfs_info = package_file.pkgfs()?;
         let package_name = package_file.get_package_name();
@@ -38,10 +52,8 @@ impl PackageFsMetadata {
             utils::is_safe_path_segment(package_name),
             "Unsafe package name rejected: {package_name}"
         );
-        let mnt_root = configuration::packages_mnt_root();
         let mount_point = Path::new(mnt_root).join(package_name);
 
-        let packages_overlayfs_root = configuration::packages_overlayfs_root();
         let overlayfs_root = if packages_overlayfs_root.is_empty() {
             PathBuf::new()
         } else {
@@ -171,6 +183,15 @@ where
 pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    impl PackageFsMetadata {
+        pub(crate) fn new_for_test<F: PackageFileInfo + ?Sized>(
+            path: impl AsRef<Path>,
+            package_file: &F,
+        ) -> anyhow::Result<Self> {
+            Self::new_with_roots(path, package_file, "/test/pkgfs", "")
+        }
+    }
 
     pub(crate) mod mocks {
         use super::*;
@@ -304,6 +325,10 @@ pub(crate) mod tests {
 
         pub(crate) fn create_test_ssam_package_file() -> MockPackageFile {
             crate::configuration::ensure_test_init();
+            create_test_ssam_package_file_without_config()
+        }
+
+        pub(crate) fn create_test_ssam_package_file_without_config() -> MockPackageFile {
             MockPackageFile {
                 package_name: "test-package".to_string(),
                 pkgfs: PackageFilesystem::new(

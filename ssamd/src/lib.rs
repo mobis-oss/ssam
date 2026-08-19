@@ -3,7 +3,6 @@
 
 pub mod apparmor;
 pub mod configuration;
-#[cfg(feature = "dm-verity")]
 mod dm;
 mod executor;
 pub mod ext4quota;

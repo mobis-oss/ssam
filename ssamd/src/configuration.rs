@@ -136,6 +136,13 @@ impl BridgeConfig {
     }
 }
 
+/// Integrity-related runtime configuration parsed from `[integrity]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct IntegrityConfig {
+    #[serde(default)]
+    disable_runtime_integrity: bool,
+}
+
 /// Runtime configuration structure for TOML file
 #[derive(Debug, Clone, Deserialize)]
 struct RuntimeConfig {
@@ -144,6 +151,10 @@ struct RuntimeConfig {
     /// Optional network section — `None` when `[network]` is absent from the config file
     #[serde(default)]
     network: Option<NetworkConfig>,
+
+    /// Runtime package filesystem integrity configuration.
+    #[serde(default)]
+    integrity: IntegrityConfig,
 }
 
 /// Configuration manager that holds the runtime configuration
@@ -243,6 +254,11 @@ impl Configuration {
     /// Get bridge networking config (`None` when `[network.bridge]` is absent).
     pub(crate) fn bridge_config(&self) -> Option<&BridgeConfig> {
         self.network_config()?.bridge.as_ref()
+    }
+
+    /// Whether runtime package filesystem integrity is disabled.
+    pub(crate) fn runtime_integrity_disabled(&self) -> bool {
+        self.runtime_config.integrity.disable_runtime_integrity
     }
 }
 
@@ -402,6 +418,14 @@ pub(crate) fn bridge_config() -> Option<&'static BridgeConfig> {
         .bridge_config()
 }
 
+/// Whether runtime package filesystem integrity is disabled.
+pub(crate) fn runtime_integrity_disabled() -> bool {
+    RUNTIME_CONFIG
+        .get()
+        .expect("Configuration not initialized. Call init() first.")
+        .runtime_integrity_disabled()
+}
+
 /// Ensures test configuration is initialized. Safe to call multiple times.
 /// This function is only available in test builds.
 #[cfg(test)]
@@ -459,6 +483,16 @@ mod tests {
             public_key_file_path = "/custom/key.pub"
             packages_cgroup = "custom.slice"
             packages_ext = "cpkg"
+
+            [network.bridge]
+            enabled = true
+
+            [network.bridge.addr_pool]
+            base = "172.20.0.0/16"
+            size = 29
+
+            [integrity]
+            disable_runtime_integrity = false
         "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
@@ -468,6 +502,40 @@ mod tests {
         let config = config.unwrap();
         assert_eq!(config.bundled_packages_dir(), "/custom/base");
         assert_eq!(config.downloaded_packages_dir(), "/custom/packages");
+        let bridge = config.bridge_config().unwrap();
+        assert!(bridge.enabled);
+        let pool = bridge.addr_pool.as_ref().unwrap();
+        assert_eq!(pool.base.as_deref(), Some("172.20.0.0/16"));
+        assert_eq!(pool.size, Some(29));
+        assert!(!config.runtime_integrity_disabled());
+    }
+
+    #[test]
+    fn test_integrity_table_absent_defaults_to_enabled() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            bundled_packages_dir = "/custom/base"
+            downloaded_packages_dir = "/custom/packages"
+            packages_data_root = "/custom/data"
+            packages_overlayfs_root = "/custom/overlay"
+            packages_mnt_root = "/custom/mnt"
+            public_key_file_path = "/custom/key.pub"
+            packages_cgroup = "custom.slice"
+            packages_ext = "cpkg"
+
+            [network.bridge]
+            enabled = true
+
+            [network.bridge.addr_pool]
+            base = "172.20.0.0/16"
+            size = 29
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+        assert!(!config.runtime_integrity_disabled());
     }
 
     #[test]
@@ -515,6 +583,9 @@ mod tests {
             public_key_file_path = "/test/key.pub"
             packages_cgroup = "test.slice"
             packages_ext = "tpkg"
+
+            [integrity]
+            disable_runtime_integrity = true
         "#;
         temp_file.write_all(config_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
@@ -529,6 +600,53 @@ mod tests {
         assert_eq!(config.public_key_file_path(), "/test/key.pub");
         assert_eq!(config.packages_cgroup(), "test.slice");
         assert_eq!(config.packages_ext(), "tpkg");
+        assert!(config.runtime_integrity_disabled());
+    }
+
+    #[test]
+    fn test_integrity_field_defaults_to_enabled() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            bundled_packages_dir = "/test/base"
+            downloaded_packages_dir = "/test/packages"
+            packages_data_root = "/test/data"
+            packages_overlayfs_root = "/test/overlay"
+            packages_mnt_root = "/test/mnt"
+            public_key_file_path = "/test/key.pub"
+            packages_cgroup = "test.slice"
+            packages_ext = "tpkg"
+
+            [integrity]
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+        assert!(!config.runtime_integrity_disabled());
+    }
+
+    #[test]
+    fn test_invalid_disable_runtime_integrity_type() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            bundled_packages_dir = "/test/base"
+            downloaded_packages_dir = "/test/packages"
+            packages_data_root = "/test/data"
+            packages_overlayfs_root = "/test/overlay"
+            packages_mnt_root = "/test/mnt"
+            public_key_file_path = "/test/key.pub"
+            packages_cgroup = "test.slice"
+            packages_ext = "tpkg"
+
+            [integrity]
+            disable_runtime_integrity = "true"
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        assert!(Configuration::load_from_path(temp_file.path()).is_err());
     }
 
     #[test]
@@ -597,6 +715,7 @@ mod tests {
         let key_path = public_key_file_path();
         let cgroup = packages_cgroup();
         let ext = packages_ext();
+        let runtime_integrity_disabled = runtime_integrity_disabled();
 
         assert_eq!(base_dir, "/var/lib/ssamd/bundled");
         assert_eq!(active_dir, "/var/lib/ssamd/downloaded");
@@ -606,6 +725,7 @@ mod tests {
         assert_eq!(key_path, "/var/lib/ssamd/keys/test.pub.key");
         assert_eq!(cgroup, "");
         assert_eq!(ext, "ssam");
+        assert!(!runtime_integrity_disabled);
     }
 
     #[test]

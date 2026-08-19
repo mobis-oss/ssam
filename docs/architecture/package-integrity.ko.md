@@ -109,6 +109,9 @@ flowchart LR
 
 패키지 파일시스템 이미지는 **dm-verity** 로 보호됩니다:
 
+- dm-verity는 기본적으로 활성화되며 `[integrity].disable_runtime_integrity` 설정으로
+  비활성화할 수 있습니다. 비활성화하면 블록 수준의 런타임 검증은 제거되지만 패키지
+  서명 검증은 계속 적용됩니다.
 - 서명된 `metadata`에는 dm-verity **파라미터 전체**(루트 해시 포함)가 담깁니다.
 - 로드 시점에 `ssamd`는 그 서명된 파라미터로 dm-verity 타깃을 구성합니다.
   dm-verity의 특성상 **읽기마다 모든 블록이 재검증** 되어, 변조는 로드 시점뿐

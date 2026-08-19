@@ -36,6 +36,7 @@ SSAMD_CONFIG=(
     [CONF_BRIDGE_ENABLED]="false"
     [CONF_BRIDGE_POOL_BASE]="172.20.0.0/16"
     [CONF_BRIDGE_POOL_SIZE]="29"
+    [CONF_DISABLE_RUNTIME_INTEGRITY]="false"
 )
 
 error_exit() {
@@ -90,6 +91,8 @@ Arguments for SSAMD configuration (All paths below are on the target device)
                                  (default: "${SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]}")
     --bridge-pool-size     BITS  Prefix size of each per-bridge subnet.
                                  (default: ${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]})
+    --disable-runtime-integrity BOOL  Disable runtime package filesystem integrity.
+                                      (default: ${SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]})
 
 Example - Generate all available configuration files:
     $(basename "$0") \\
@@ -141,6 +144,7 @@ update_template_common () {
         -e "s|@CONF_BRIDGE_ENABLED@|${SSAMD_CONFIG[CONF_BRIDGE_ENABLED]}|g" \
         -e "s|@CONF_BRIDGE_POOL_BASE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]}|g" \
         -e "s|@CONF_BRIDGE_POOL_SIZE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]}|g" \
+        -e "s|@CONF_DISABLE_RUNTIME_INTEGRITY@|${SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]}|g" \
         - > "$output_filename"
 }
 
@@ -302,7 +306,7 @@ generate_ssamd_config() {
 # Parse command line arguments
 parse_arguments() {
     temp_args=$(getopt -o h \
-        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,rpc-bind-ip:,bridge-enabled:,bridge-pool-base:,bridge-pool-size: \
+        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,rpc-bind-ip:,bridge-enabled:,bridge-pool-base:,bridge-pool-size:,disable-runtime-integrity: \
         -n "$(basename "$0")" -- "$@") || error_exit "Invalid argument"
 
     eval set -- "$temp_args"
@@ -408,6 +412,14 @@ parse_arguments() {
                 SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]="$2"
                 shift 2
                 ;;
+            --disable-runtime-integrity)
+                case "$2" in
+                    true|false) ;;
+                    *) error_exit "--disable-runtime-integrity must be 'true' or 'false', got: '$2'" ;;
+                esac
+                SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]="$2"
+                shift 2
+                ;;
             --)
                 shift
                 break
@@ -473,6 +485,9 @@ enabled = @CONF_BRIDGE_ENABLED@
 [network.bridge.addr_pool]
 base = \"@CONF_BRIDGE_POOL_BASE@\"
 size = @CONF_BRIDGE_POOL_SIZE@
+
+[integrity]
+disable_runtime_integrity = @CONF_DISABLE_RUNTIME_INTEGRITY@
 "
 
 TEMPLATE_SSAMD_SERVICE_UNIT="

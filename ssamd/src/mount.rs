@@ -2,22 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::configuration;
-#[cfg(feature = "dm-verity")]
 use crate::dm::VerityDevice;
-#[cfg(feature = "dm-verity")]
 use crate::network::pkg_hash10;
 use crate::package_volume::PackageFsMetadata;
 
 use crate::utils::actor_supervisor::{SupervisedActor, spawn_with};
 use anyhow::Context;
 use derive_more::Deref;
+use libssam::ssam_package::PackageFsVerityInfo;
 use rsactor::{Actor, ActorRef, message_handlers};
 use rustix::mount::{MountFlags, UnmountFlags};
 use std::ffi::CString;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::{
     io,
-    path::Path,
+    path::{Path, PathBuf},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -618,7 +617,7 @@ fn do_mount(
     ))
 }
 
-/// Mount steps performed by `mount_device`, injectable to unit-test rollback.
+/// Mount steps performed by package mounting, injectable to unit-test rollback.
 trait DeviceMountBackend {
     fn mount_base(&self, blkdev: &Path) -> anyhow::Result<()>;
     fn mount_overlay(&self) -> anyhow::Result<()>;
@@ -650,13 +649,14 @@ impl DeviceMountBackend for DefaultDeviceMountBackend<'_> {
     }
 }
 
-fn mount_device(blkdev: impl AsRef<Path>, pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
-    let overlay_enabled = !configuration::packages_overlayfs_root().is_empty();
-    mount_device_with(
-        blkdev.as_ref(),
-        overlay_enabled,
-        &DefaultDeviceMountBackend { pkgfs_meta },
-    )
+trait VerityDeviceBackend {
+    fn devnode(&self) -> PathBuf;
+}
+
+impl VerityDeviceBackend for VerityDevice {
+    fn devnode(&self) -> PathBuf {
+        VerityDevice::devnode(self)
+    }
 }
 
 /// Mount the base package fs, then the overlay. Roll back the base if the
@@ -778,6 +778,35 @@ pub(crate) async fn mount_pkgfs(
         return Ok(());
     }
 
+    let mount_backend = DefaultDeviceMountBackend { pkgfs_meta };
+    let overlay_enabled = !configuration::packages_overlayfs_root().is_empty();
+    mount_pkgfs_with(
+        configuration::runtime_integrity_disabled(),
+        overlay_enabled,
+        pkg_name,
+        pkgfs_meta,
+        loop_control,
+        VerityDevice::new,
+        &mount_backend,
+    )
+    .await
+}
+
+async fn mount_pkgfs_with<L, F, D, B>(
+    dm_verity_disabled: bool,
+    overlay_enabled: bool,
+    pkg_name: &str,
+    pkgfs_meta: &PackageFsMetadata,
+    loop_control: &L,
+    create_verity: F,
+    mount_backend: &B,
+) -> anyhow::Result<()>
+where
+    L: LoopDeviceAttacher,
+    F: Fn(&str, &Path, &PackageFsVerityInfo) -> anyhow::Result<D>,
+    D: VerityDeviceBackend,
+    B: DeviceMountBackend,
+{
     let pkgfs_path = pkgfs_meta.path.as_path();
     let pkgfs_info = &pkgfs_meta.packagefs_info;
     let total_time = Instant::now();
@@ -804,46 +833,38 @@ pub(crate) async fn mount_pkgfs(
         format!("{pkg_name}: loop device for {pkgfs_path:?} has no associated path after attach")
     })?;
 
-    #[cfg(feature = "dm-verity")]
-    // This variable must be kept alive until mount_device() is finished.
-    // Unless dm device would be removed by VerityDevice::drop().
-    // Once mounted, VerityDevice::drop() can be safely called because
-    // removing is done with the DM_DEFERRED_REMOVE flag.
-    let veritydev = {
-        let dm_setup_time = Instant::now();
+    // Keep the device alive until the mount operation finishes. VerityDevice::drop()
+    // requests deferred removal, so it is safe to drop after a successful mount.
+    let veritydev = (!dm_verity_disabled)
+        .then(|| -> anyhow::Result<_> {
+            let dm_setup_time = Instant::now();
 
-        // ssam-<hash>-verity-<suffix>: hash the (uncontrolled) package name so a
-        // long name cannot truncate past the 128-byte dm field and collide, as
-        // network.rs does. Random suffix keeps a quick remount unique while the
-        // old device's DM_DEFERRED_REMOVE is still pending.
-        let suffix = uuid::Uuid::new_v4().simple();
-        let verity_name = format!("ssam-{}-verity-{suffix}", pkg_hash10(pkg_name));
-        let veritydev = VerityDevice::new(&verity_name, &loop_dev_path, &pkgfs_info.verity_info)
-            .with_context(|| {
-                format!(
-                    "{pkg_name}: failed while creating dm-verity device from {}",
-                    loop_dev_path.display()
-                )
-            })?;
+            // ssam-<hash>-verity-<suffix>: hash the (uncontrolled) package name so a
+            // long name cannot truncate past the 128-byte dm field and collide, as
+            // network.rs does. Random suffix keeps a quick remount unique while the
+            // old device's DM_DEFERRED_REMOVE is still pending.
+            let suffix = uuid::Uuid::new_v4().simple();
+            let verity_name = format!("ssam-{}-verity-{suffix}", pkg_hash10(pkg_name));
+            let veritydev = create_verity(&verity_name, &loop_dev_path, &pkgfs_info.verity_info)
+                .with_context(|| {
+                    format!(
+                        "{pkg_name}: failed while creating dm-verity device from {}",
+                        loop_dev_path.display()
+                    )
+                })?;
 
-        log::trace!("dm-verity create elapsed: {:?}", dm_setup_time.elapsed());
+            log::trace!("dm-verity create elapsed: {:?}", dm_setup_time.elapsed());
 
-        veritydev
-    };
+            Ok(veritydev)
+        })
+        .transpose()?;
 
-    let mount_src_dev = {
-        #[cfg(feature = "dm-verity")]
-        {
-            veritydev.devnode()
-        }
-        #[cfg(not(feature = "dm-verity"))]
-        {
-            loop_dev_path
-        }
-    };
+    let mount_src_dev = veritydev
+        .as_ref()
+        .map_or_else(|| loop_dev_path, VerityDeviceBackend::devnode);
 
     let mount_time = Instant::now();
-    mount_device(&mount_src_dev, pkgfs_meta).with_context(|| {
+    mount_device_with(&mount_src_dev, overlay_enabled, mount_backend).with_context(|| {
         format!(
             "{pkg_name}: failed while mounting attached device {}",
             mount_src_dev.display()
@@ -921,6 +942,10 @@ fn is_exact_mount(mount_point: &Path) -> bool {
 pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn escape_overlay_opt_escapes_metachars() {
@@ -948,6 +973,7 @@ pub(crate) mod tests {
         base_mounted: bool,
         overlay_attempted: bool,
         unmounted: bool,
+        mounted_source: Option<PathBuf>,
         // Call order, for sequencing asserts.
         order: Vec<&'static str>,
     }
@@ -960,9 +986,10 @@ pub(crate) mod tests {
     }
 
     impl DeviceMountBackend for MockDeviceMountBackend {
-        fn mount_base(&self, _blkdev: &Path) -> anyhow::Result<()> {
+        fn mount_base(&self, blkdev: &Path) -> anyhow::Result<()> {
             let mut calls = self.calls.borrow_mut();
             calls.base_mounted = true;
+            calls.mounted_source = Some(blkdev.to_path_buf());
             calls.order.push("base");
             if self.base_ok {
                 Ok(())
@@ -998,6 +1025,190 @@ pub(crate) mod tests {
             base_ok: true,
             overlay_ok,
             unmount_ok: true,
+        }
+    }
+
+    struct MockLoopDevice {
+        path: PathBuf,
+    }
+
+    impl DevicePathBackend for MockLoopDevice {
+        fn path(&self) -> Option<PathBuf> {
+            Some(self.path.clone())
+        }
+    }
+
+    struct MockLoopDeviceAttacher {
+        path: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl LoopDeviceAttacher for MockLoopDeviceAttacher {
+        type Device = MockLoopDevice;
+
+        async fn attach(&self, _: loopdev_message::AttachInfo) -> anyhow::Result<Self::Device> {
+            Ok(MockLoopDevice {
+                path: self.path.clone(),
+            })
+        }
+    }
+
+    struct MockVerityDevice {
+        path: PathBuf,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl VerityDeviceBackend for MockVerityDevice {
+        fn devnode(&self) -> PathBuf {
+            self.path.clone()
+        }
+    }
+
+    impl Drop for MockVerityDevice {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn test_pkgfs_metadata() -> PackageFsMetadata {
+        use crate::package_volume::tests::package_fs_metadata_test::create_test_ssam_package_file_without_config;
+
+        PackageFsMetadata::new_for_test(
+            Path::new("/test/package/path"),
+            &create_test_ssam_package_file_without_config(),
+        )
+        .unwrap()
+    }
+
+    fn mock_verity_creator(
+        path: &str,
+        created: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    ) -> impl Fn(&str, &Path, &PackageFsVerityInfo) -> anyhow::Result<MockVerityDevice> {
+        let path = PathBuf::from(path);
+        move |_: &str, _: &Path, _: &PackageFsVerityInfo| {
+            created.fetch_add(1, Ordering::SeqCst);
+            Ok(MockVerityDevice {
+                path: path.clone(),
+                dropped: dropped.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mount_pkgfs_with_verity_uses_verity_device() {
+        let pkgfs_meta = test_pkgfs_metadata();
+        let loop_control = MockLoopDeviceAttacher {
+            path: PathBuf::from("/dev/loop-test"),
+        };
+        let created = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let create_verity = mock_verity_creator("/dev/dm-test", created.clone(), dropped.clone());
+        let backend = mock_backend(true);
+
+        mount_pkgfs_with(
+            false,
+            true,
+            "test-package",
+            &pkgfs_meta,
+            &loop_control,
+            create_verity,
+            &backend,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            backend.calls.borrow().mounted_source,
+            Some(PathBuf::from("/dev/dm-test"))
+        );
+        assert_eq!(created.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mount_pkgfs_without_verity_uses_loop_device() {
+        let pkgfs_meta = test_pkgfs_metadata();
+        let loop_control = MockLoopDeviceAttacher {
+            path: PathBuf::from("/dev/loop-test"),
+        };
+        let created = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let create_verity = mock_verity_creator("/dev/dm-test", created.clone(), dropped.clone());
+        let backend = mock_backend(true);
+
+        mount_pkgfs_with(
+            true,
+            false,
+            "test-package",
+            &pkgfs_meta,
+            &loop_control,
+            create_verity,
+            &backend,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            backend.calls.borrow().mounted_source,
+            Some(PathBuf::from("/dev/loop-test"))
+        );
+        assert!(!backend.calls.borrow().overlay_attempted);
+        assert_eq!(created.load(Ordering::SeqCst), 0);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mount_pkgfs_verity_cleanup_matches_mount_result() {
+        for dm_verity_disabled in [false, true] {
+            let pkgfs_meta = test_pkgfs_metadata();
+            let loop_control = MockLoopDeviceAttacher {
+                path: PathBuf::from("/dev/loop-test"),
+            };
+            let created = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let create_verity =
+                mock_verity_creator("/dev/dm-test", created.clone(), dropped.clone());
+            let backend = MockDeviceMountBackend {
+                calls: RefCell::new(MockMountCalls::default()),
+                base_ok: true,
+                overlay_ok: false,
+                unmount_ok: true,
+            };
+
+            assert!(
+                mount_pkgfs_with(
+                    dm_verity_disabled,
+                    true,
+                    "test-package",
+                    &pkgfs_meta,
+                    &loop_control,
+                    create_verity,
+                    &backend,
+                )
+                .await
+                .is_err()
+            );
+            let calls = backend.calls.borrow();
+            assert_eq!(
+                calls.mounted_source,
+                Some(if dm_verity_disabled {
+                    PathBuf::from("/dev/loop-test")
+                } else {
+                    PathBuf::from("/dev/dm-test")
+                })
+            );
+            assert!(calls.overlay_attempted);
+            assert!(calls.unmounted);
+            assert_eq!(calls.order, vec!["base", "overlay", "unmount"]);
+            assert_eq!(
+                created.load(Ordering::SeqCst),
+                usize::from(!dm_verity_disabled)
+            );
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                usize::from(!dm_verity_disabled)
+            );
         }
     }
 

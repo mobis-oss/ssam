@@ -7,7 +7,6 @@ rust_library(
         exclude = ["src/main.rs"],
     ),
     crate_name = "ssamd",
-    crate_features = ["dm-verity"],
     edition = "2024",
     visibility = ["//visibility:public"],
     deps = [

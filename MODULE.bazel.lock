@@ -478,7 +478,7 @@
           "FILE:@@//Cargo.toml 2e6e445415927cb7eaaca11ad0c49a4848e06d8fb009ace7084c68b4802f3d16",
           "FILE:@@//libssam/Cargo.toml d8396bf7b1929d6e4b4286fa02b8d15bd4b26f3983fc9f3c1d7a28040322e00a",
           "FILE:@@//proc_macros/Cargo.toml 1cb6df23346e29c6061fc7dfdad3305b7abbcb4ff2f888479483ccebe74bdea2",
-          "FILE:@@//ssamd/Cargo.toml 9b77a25c164777d659af8fbd84c263d1eb66d33166997e8bdd316dfe3a54697f",
+          "FILE:@@//ssamd/Cargo.toml 36fc67ee88b167887e7ab63a935bdb27d9e1bdf415163155daed580745366898",
           "FILE:@@//quotactl-rs/Cargo.toml b506908e9096bff30924ca1b418e3f168b4b128834755cecfd8b75965032071e",
           "FILE:@@//ssam-log/Cargo.toml 3b440b012561bfb8fdf149d96c02505b0d9fc384e7d41fcd467431559b59bc5e",
           "FILE:@@//ssam/Cargo.toml b12fd9c8164d44e988980a7c72b9db152075d6e3ee36298652988bd6dd087145",

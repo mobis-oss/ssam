@@ -14,8 +14,6 @@ name = "ssamd"
 path = "src/main.rs"
 
 [features]
-default = ["dm-verity"]
-dm-verity = []
 profile = []
 
 [dependencies]

@@ -9,6 +9,9 @@ public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
 packages_cgroup = ""
 packages_ext = "ssam"
 
+[integrity]
+disable_runtime_integrity = false
+
 [network.bridge]
 enabled = true
 

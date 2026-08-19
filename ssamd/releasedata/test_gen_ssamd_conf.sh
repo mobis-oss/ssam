@@ -235,6 +235,8 @@ test_runtime_config_only() {
     verify_file_content "$output_file" "\[network\.bridge\.addr_pool\]" "Runtime config - addr_pool section"
     verify_file_content "$output_file" 'base = "172.20.0.0/16"' "Runtime config - default base"
     verify_file_content "$output_file" "size = 29" "Runtime config - default size"
+    verify_file_content "$output_file" "\[integrity\]" "Runtime config - integrity section"
+    verify_file_content "$output_file" "disable_runtime_integrity = false" "Runtime config - runtime integrity enabled"
     verify_no_placeholders "$output_file" "Runtime config"
 }
 
@@ -398,6 +400,33 @@ test_defaults() {
     verify_file_content "$output_file" "rpc_bind_ip = \"127.0.0.1\"" "Ssamd default configuration - rpc_bind_ip"
     verify_file_content "$output_file" 'bundled_packages_dir = "/var/lib/ssamd/bundled"' "Ssamd default configuration - bundled dir"
     verify_file_content "$output_file" 'downloaded_packages_dir = "/var/lib/ssamd/downloaded"' "Ssamd default configuration - downloaded dir"
+    verify_file_content "$output_file" "disable_runtime_integrity = false" "Ssamd default configuration - runtime integrity enabled"
+}
+
+# Test 6b: runtime package filesystem integrity configuration option
+test_runtime_integrity_option() {
+    print_test_header "Test 6b: Runtime Package Filesystem Integrity Configuration Option"
+
+    local test_dir="${TEST_OUTPUT_DIR}/test6b"
+    mkdir -p "$test_dir"
+    local output_file="${test_dir}/ssamd.toml"
+
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        --disable-runtime-integrity true
+
+    verify_file_content "$output_file" "disable_runtime_integrity = true" "Runtime config - runtime integrity disabled"
+
+    local output rc
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --disable-runtime-integrity invalid 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "disable-runtime-integrity must be 'true' or 'false'"; then
+        print_result "Error handling - invalid disable-runtime-integrity" "PASS"
+    else
+        print_result "Error handling - invalid disable-runtime-integrity" "FAIL"
+    fi
 }
 
 # Test 10: Generate systemd service unit
@@ -780,6 +809,7 @@ main() {
     test_rpc_bind_ip
     test_network_overrides
     test_network_arg_validation
+    test_runtime_integrity_option
     test_apparmor_var_run_special_case
     test_apparmor_run_special_case
     test_apparmor_var_run_prefix_collision
