@@ -133,7 +133,7 @@ mod rootfs {
             .map(|path| rootfs.join(path.strip_prefix("/").unwrap_or(path)))
             .filter(|path| path.exists())
             .for_each(|path| {
-                println!("Warning: {} is missing in config.json", path.display());
+                println!("Warning: {} is missing in runtime.json", path.display());
             });
         Ok(())
     }
@@ -161,7 +161,7 @@ mod rootfs {
 
         if let Some(missing) = find_missing_path(&mandatory, &mount_dests) {
             anyhow::bail!(
-                "Required definition of mount '{}' is missing in runtime config - config.json.",
+                "Required definition of mount '{}' is missing in the runtime config (runtime.json).",
                 missing.display()
             );
         }
