@@ -504,7 +504,9 @@ service_type = "simple"
 
     fn spawn_actor(fs_ops: impl PackageFileBackend + 'static) -> ActorRef<PackageTransactionActor> {
         crate::configuration::ensure_test_init();
-        let (vol_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(());
+        let (vol_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(
+            crate::configuration::packages_data_root(),
+        ));
         let actor = PackageTransactionActor::new(vol_ref, fs_ops, None);
         let (actor_ref, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         actor_ref
@@ -675,7 +677,9 @@ service_type = "simple"
         fs_ops: impl PackageFileBackend + 'static,
     ) -> ActorRef<PackageTransactionActor> {
         crate::configuration::ensure_test_init();
-        let (vol_ref, vol_handle) = rsactor::spawn::<PackageVolumeManagerActor>(());
+        let (vol_ref, vol_handle) = rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(
+            crate::configuration::packages_data_root(),
+        ));
         vol_handle.abort();
         let actor = PackageTransactionActor::new(vol_ref, fs_ops, None);
         let (actor_ref, _) = rsactor::spawn::<PackageTransactionActor>(actor);

@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::configuration;
 use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor};
 
 pub trait PackageFileInfo {
@@ -157,23 +156,24 @@ pub struct PackageVolumeManagerActor {
 }
 
 impl Actor for PackageVolumeManagerActor {
-    type Args = ();
+    type Args = PathBuf;
     type Error = anyhow::Error;
 
-    async fn on_start(_args: Self::Args, _actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
-        let root = PathBuf::from(configuration::packages_data_root());
-        let quota = crate::mount::findmnt(&root).ok().and_then(|mount_point| {
-            Ext4Quota::new(
-                Path::new(&mount_point),
-                crate::ext4quota::QuotaType::Project,
-            )
-            .inspect_err(|e| {
-                log::warn!("Failed to initialize quota system: {e:#}");
-            })
+    async fn on_start(data_root: Self::Args, _actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
+        let quota = crate::mount::findmnt(&data_root)
             .ok()
-        });
+            .and_then(|mount_point| {
+                Ext4Quota::new(
+                    Path::new(&mount_point),
+                    crate::ext4quota::QuotaType::Project,
+                )
+                .inspect_err(|e| {
+                    log::warn!("Failed to initialize quota system: {e:#}");
+                })
+                .ok()
+            });
 
-        let data_directory_manager = DataDirectoryManager::new(quota, root).await?;
+        let data_directory_manager = DataDirectoryManager::new(quota, data_root).await?;
         let loop_controller = crate::mount::LoopDeviceControl::new();
 
         Ok(Self {
@@ -494,6 +494,10 @@ pub(crate) mod tests {
         // Instead, we focus on the actor's message handling and interaction with PackageVolume.
 
         // Helper function to create test package volume metadata
+        fn test_data_root() -> PathBuf {
+            std::env::temp_dir()
+        }
+
         fn create_test_volume_metadata(package_name: &str) -> PackageVolumeMetadata {
             let test_pkg_file = package_fs_metadata_test::create_test_ssam_package_file();
             let test_path = PathBuf::from("/test/package/path");
@@ -501,7 +505,7 @@ pub(crate) mod tests {
 
             let data_meta = DataDirMetadata {
                 package_name: package_name.to_string(),
-                path: PathBuf::from("/tmp").join(package_name),
+                path: test_data_root().join(package_name),
                 data_dirs: Some("/app/data:/var/log".to_string()),
                 storage_limit: Some(1024),
             };
@@ -515,7 +519,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_package_volume_manager_actor_creation() {
-            let (actor_ref, join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             // Verify actor was created successfully
             assert!(!format!("{:?}", actor_ref.identity()).is_empty());
@@ -537,7 +542,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_handle_acquire_volume_success() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             // Create test volume metadata
             let volume_meta = create_test_volume_metadata("test-package");
@@ -555,7 +561,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_handle_acquire_volume_idempotent() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             let first = actor_ref
                 .ask(messages::AcquireVolume {
@@ -582,7 +589,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_handle_acquire_volume_with_different_packages() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             let package_names = vec!["package1", "package2", "package3"];
 
@@ -603,7 +611,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_handle_purge_volume_success() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             // First create a package volume
             let volume_meta = create_test_volume_metadata("test-package-purge");
@@ -626,7 +635,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_handle_purge_volume_not_found() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             let purge_result = actor_ref
                 .ask(messages::PurgeVolume {
@@ -643,7 +653,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_handle_wipe_volume_data_success() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             let volume_meta = create_test_volume_metadata("test-package-wipe");
             let volume = actor_ref
@@ -672,7 +683,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_handle_wipe_volume_data_not_found() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             let wipe_result = actor_ref
                 .ask(messages::WipeVolumeData {
@@ -689,7 +701,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_acquire_volume_with_empty_package_name() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             // Create metadata with empty package name
             let volume_meta = create_test_volume_metadata("");
@@ -706,7 +719,8 @@ pub(crate) mod tests {
 
         #[tokio::test]
         async fn test_acquire_volume_with_special_characters_in_name() {
-            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(());
+            crate::configuration::ensure_test_init();
+            let (actor_ref, _join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             let special_name = "test-pkg_v1.0.1-beta+20241222";
             let volume_meta = create_test_volume_metadata(special_name);

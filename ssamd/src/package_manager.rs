@@ -287,7 +287,9 @@ impl PackageManagerActor {
 
         let package_store = PackageStore::new(HashMapPackageStore::new());
 
-        let volume_manager_ref = spawn_with::<PackageVolumeManagerActor>(());
+        let volume_manager_ref = spawn_with::<PackageVolumeManagerActor>(PathBuf::from(
+            crate::configuration::packages_data_root(),
+        ));
         let actor =
             PackageTransactionActor::new(volume_manager_ref, DefaultPackageFileBackend, network);
         let transaction_actor = spawn_with::<PackageTransactionActor>(actor);
@@ -922,7 +924,9 @@ impl PackageManagerActor {
         fs_ops: impl pkg_file::PackageFileBackend + 'static,
     ) -> Self {
         let package_store = PackageStore::new(HashMapPackageStore::new());
-        let (volume_manager_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(());
+        let (volume_manager_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(
+            crate::configuration::packages_data_root(),
+        ));
         let actor = PackageTransactionActor::new(volume_manager_ref, fs_ops, None);
         let (transaction_actor, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         PackageManagerActor {
