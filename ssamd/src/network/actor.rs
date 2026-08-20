@@ -82,6 +82,7 @@ pub struct NetworkActor {
 impl Actor for NetworkActor {
     type Args = Self;
     type Error = std::convert::Infallible;
+    type IdleEvent = ();
 
     /// Rebuild bridge/subnet/IP state from host truth so a container that
     /// outlived the daemon keeps its exact address.

@@ -5,7 +5,7 @@ pub mod actor_supervisor {
     use std::any::type_name;
     use std::fmt::Display;
 
-    use rsactor::{Actor, ActorRef, ActorResult};
+    use rsactor::{Actor, ActorRef, ActorResult, SpawnOptions};
 
     /// Policy defines ONLY the action on failure.
     /// Logging is the supervisor's (`spawn_with`) concern — NOT the policy's.
@@ -40,13 +40,25 @@ pub mod actor_supervisor {
         A: SupervisedActor,
         A::Error: Display + Send,
     {
-        let (actor_ref, handle) = rsactor::spawn::<A>(args);
+        spawn_with_options(args, SpawnOptions::new())
+    }
+
+    pub fn spawn_with_options<A>(args: A::Args, options: SpawnOptions) -> ActorRef<A>
+    where
+        A: SupervisedActor,
+        A::Error: Display + Send,
+    {
+        let (actor_ref, handle) = rsactor::spawn_with_options::<A>(args, options);
         tokio::spawn(async move {
             let result = handle.await;
             let name = type_name::<A>();
             match &result {
-                Ok(ActorResult::Failed { error, phase, .. }) => {
-                    log::error!("actor '{name}' failed in {phase}: {error}");
+                Ok(ActorResult::Failed { failure, .. }) => {
+                    log::error!(
+                        "actor '{name}' failed in {}: {}",
+                        failure.phase(),
+                        failure.error()
+                    );
                     A::FailurePolicy::invoke();
                 }
                 Err(join_err) if join_err.is_panic() => {
@@ -72,6 +84,7 @@ pub mod actor_supervisor {
         impl Actor for TestActor {
             type Args = ();
             type Error = anyhow::Error;
+            type IdleEvent = ();
 
             async fn on_start((): Self::Args, _: &ActorRef<Self>) -> Result<Self, Self::Error> {
                 Ok(Self)
@@ -83,10 +96,25 @@ pub mod actor_supervisor {
         }
 
         fn failed(phase: FailurePhase) -> ActorResult<TestActor> {
+            let error = || anyhow::anyhow!("simulated actor failure");
+            let failure = match phase {
+                FailurePhase::OnStart => rsactor::ActorFailure::OnStart { error: error() },
+                FailurePhase::OnIdle => rsactor::ActorFailure::OnIdle {
+                    actor: TestActor,
+                    error: error(),
+                },
+                FailurePhase::OnStop => rsactor::ActorFailure::OnStop {
+                    actor: TestActor,
+                    error: error(),
+                },
+                FailurePhase::OnIdleThenOnStop => rsactor::ActorFailure::OnIdleThenOnStop {
+                    actor: TestActor,
+                    error: error(),
+                    stop_error: error(),
+                },
+            };
             ActorResult::Failed {
-                actor: None,
-                error: anyhow::anyhow!("simulated actor failure"),
-                phase,
+                failure,
                 killed: false,
             }
         }
@@ -126,9 +154,9 @@ pub mod actor_supervisor {
         fn classifies_actor_failure_in_every_phase() {
             for phase in [
                 FailurePhase::OnStart,
-                FailurePhase::OnRun,
+                FailurePhase::OnIdle,
                 FailurePhase::OnStop,
-                FailurePhase::OnRunThenOnStop,
+                FailurePhase::OnIdleThenOnStop,
             ] {
                 assert!(
                     is_failure::<TestActor>(&Ok(failed(phase))),
@@ -156,10 +184,7 @@ pub mod actor_supervisor {
         #[tokio::test]
         async fn spawn_with_returns_live_supervised_actor() {
             let actor_ref = spawn_with::<TestActor>(());
-            actor_ref
-                .stop()
-                .await
-                .expect("graceful stop of a supervised actor should succeed");
+            actor_ref.stop().await;
         }
     }
 }

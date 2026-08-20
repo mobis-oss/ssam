@@ -25,7 +25,7 @@ toml.workspace = true
 serde-big-array.workspace = true
 derive_more.workspace = true
 oci-spec.workspace = true
-jiff = "0.2.15"
+jiff = "0.2.35"
 semver.workspace = true
 tonic-prost = "0.14"
 linux-raw-sys = { workspace = true, features = ["general"] }
@@ -42,6 +42,6 @@ proc-macro2.workspace = true
 itertools.workspace = true
 tonic-build = "0.14"
 serde_json.workspace = true
-typify = "0.6.1"
+typify = "0.7.0"
 schemars = "0.8.22"
 tonic-prost-build = "0.14"

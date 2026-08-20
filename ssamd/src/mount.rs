@@ -334,6 +334,7 @@ impl Actor for LoopDeviceControlActor {
     type Args = Box<dyn LoopControlOpener>;
 
     type Error = anyhow::Error;
+    type IdleEvent = ();
 
     async fn on_start(opener: Self::Args, _: &ActorRef<Self>) -> anyhow::Result<Self> {
         let control = opener.open()?;
@@ -1105,8 +1106,8 @@ pub(crate) mod tests {
             rsactor::spawn::<LoopDeviceControlActor>(Box::new(FailingLoopControlOpener));
 
         match handle.await.expect("supervised actor task must not panic") {
-            rsactor::ActorResult::Failed { phase, .. } => {
-                assert_eq!(phase, rsactor::FailurePhase::OnStart);
+            rsactor::ActorResult::Failed { failure, .. } => {
+                assert_eq!(failure.phase(), rsactor::FailurePhase::OnStart);
             }
             rsactor::ActorResult::Completed { .. } => {
                 panic!("expected on_start failure, got successful completion")

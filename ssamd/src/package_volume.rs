@@ -158,6 +158,7 @@ pub struct PackageVolumeManagerActor {
 impl Actor for PackageVolumeManagerActor {
     type Args = PathBuf;
     type Error = anyhow::Error;
+    type IdleEvent = ();
 
     async fn on_start(data_root: Self::Args, _actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
         let quota = crate::mount::findmnt(&data_root)
@@ -526,7 +527,7 @@ pub(crate) mod tests {
             assert!(!format!("{:?}", actor_ref.identity()).is_empty());
 
             // Stop the actor gracefully
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
 
             // Verify actor completed successfully
             let result = join_handle.await.unwrap();
@@ -534,8 +535,8 @@ pub(crate) mod tests {
                 rsactor::ActorResult::Completed { .. } => {
                     // Expected successful completion
                 }
-                rsactor::ActorResult::Failed { error, .. } => {
-                    panic!("Actor failed unexpectedly: {error}");
+                rsactor::ActorResult::Failed { failure, .. } => {
+                    panic!("Actor failed unexpectedly: {}", failure.error());
                 }
             }
         }
@@ -556,7 +557,7 @@ pub(crate) mod tests {
             assert_eq!(volume.package_name(), "test-package");
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -584,7 +585,7 @@ pub(crate) mod tests {
             );
             assert_eq!(second.unwrap().package_name(), "test-package-idempotent");
 
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -606,7 +607,7 @@ pub(crate) mod tests {
             }
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -630,7 +631,7 @@ pub(crate) mod tests {
             assert!(purge_result.is_ok());
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -648,7 +649,7 @@ pub(crate) mod tests {
             assert!(purge_result.is_ok());
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -678,7 +679,7 @@ pub(crate) mod tests {
             assert!(!data_path.join("leftover.txt").exists());
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -696,7 +697,7 @@ pub(crate) mod tests {
             assert!(wipe_result.is_ok());
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -714,7 +715,7 @@ pub(crate) mod tests {
             assert_eq!(volume.package_name(), "");
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
 
         #[tokio::test]
@@ -732,7 +733,7 @@ pub(crate) mod tests {
             assert_eq!(volume.package_name(), special_name);
 
             // Stop the actor
-            actor_ref.stop().await.unwrap();
+            actor_ref.stop().await;
         }
     }
 }

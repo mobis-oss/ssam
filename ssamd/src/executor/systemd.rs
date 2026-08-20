@@ -34,9 +34,11 @@ mod constants {
 }
 
 mod systemd_dbus {
-    use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor, spawn_with};
+    use crate::utils::actor_supervisor::{
+        IgnoreOnFailure, SupervisedActor, spawn_with, spawn_with_options,
+    };
     use anyhow::Context;
-    use futures_util::StreamExt;
+    use futures_util::Stream;
     use rsactor::{Actor, ActorRef, ActorWeak, message_handlers};
     use strum::Display;
     use tokio::sync::oneshot;
@@ -80,61 +82,57 @@ mod systemd_dbus {
 
     #[derive(Debug)]
     struct JobRemovedSignalWatcherActor {
-        stream: JobRemovedStream,
         senders: JobRemovedSenderMap,
     }
 
     impl rsactor::Actor for JobRemovedSignalWatcherActor {
-        type Args = Self;
+        type Args = JobRemovedStream;
         type Error = anyhow::Error;
+        type IdleEvent = <JobRemovedStream as Stream>::Item;
 
-        async fn on_start(args: Self::Args, _actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
+        async fn on_start(args: Self::Args, actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
             log::debug!("SystemDSignalWatcher started");
-            Ok(args)
+            actor_ref
+                .subscribe_idle(args)
+                .map_err(|e| anyhow::anyhow!("Failed to subscribe to JobRemoved stream: {e}"))?;
+            Ok(Self {
+                senders: JobRemovedSenderMap::new(),
+            })
         }
 
-        async fn on_run(&mut self, _actor_ref: &ActorWeak<Self>) -> anyhow::Result<bool> {
+        async fn on_idle(
+            &mut self,
+            signal: Self::IdleEvent,
+            _actor_ref: &ActorWeak<Self>,
+        ) -> anyhow::Result<()> {
             log::debug!("JobRemovedSignalWatcher is running");
-            if let Some(signal) = self.stream.next().await {
-                let args = match signal.args() {
-                    Ok(args) => args,
-                    Err(e) => {
-                        log::warn!("Got unexpected signal. Report to zbus: {e}");
-                        return Ok(true);
-                    }
-                };
-
-                let result = match args.result().as_str() {
-                    "done" => JobResult::Success,
-                    "canceled" => JobResult::Canceled,
-                    res => JobResult::Failed(res.to_owned()),
-                };
-                let job = args.job().as_ref().to_owned();
-                let unit = args.unit();
-
-                let sender = self.senders.remove(&job);
-                if let Some(sender) = sender {
-                    log::debug!(
-                        "Send job result to watcher for {job}. unit: {unit}, result: {result}",
-                    );
-                    let _ = sender.send(result);
+            let args = match signal.args() {
+                Ok(args) => args,
+                Err(e) => {
+                    log::warn!("Got unexpected signal. Report to zbus: {e}");
+                    return Ok(());
                 }
-                Ok(true)
-            } else {
-                anyhow::bail!("JobRemovedStream ended unexpectedly");
+            };
+
+            let result = match args.result().as_str() {
+                "done" => JobResult::Success,
+                "canceled" => JobResult::Canceled,
+                res => JobResult::Failed(res.to_owned()),
+            };
+            let job = args.job().as_ref().to_owned();
+            let unit = args.unit();
+
+            let sender = self.senders.remove(&job);
+            if let Some(sender) = sender {
+                log::debug!("Send job result to watcher for {job}. unit: {unit}, result: {result}");
+                let _ = sender.send(result);
             }
+            Ok(())
         }
     }
 
     #[message_handlers]
     impl JobRemovedSignalWatcherActor {
-        fn new(stream: JobRemovedStream) -> Self {
-            Self {
-                stream,
-                senders: JobRemovedSenderMap::new(),
-            }
-        }
-
         #[handler]
         // rsactor #[handler] requires async fn signature even without await
         #[allow(clippy::unused_async)]
@@ -224,9 +222,10 @@ mod systemd_dbus {
                 .receive_job_removed()
                 .await
                 .context("Failed to create JobRemovedStream")?;
-            let job_removed_watcher = JobRemovedSignalWatcherActor::new(stream);
-            let job_removed_watcher =
-                spawn_with::<JobRemovedSignalWatcherActor>(job_removed_watcher);
+            let job_removed_watcher = spawn_with_options::<JobRemovedSignalWatcherActor>(
+                stream,
+                rsactor::SpawnOptions::new().with_idle(),
+            );
 
             Ok(Self {
                 manager_proxy,
@@ -392,6 +391,7 @@ struct ActiveStateConverterActor {
 impl Actor for ActiveStateConverterActor {
     type Args = mpsc::Sender<ExecutionStatus>;
     type Error = anyhow::Error;
+    type IdleEvent = ();
 
     async fn on_start(args: Self::Args, _actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
         Ok(Self {

@@ -180,7 +180,7 @@ fn build_driver<'a>(
         container_name: &options.container_name,
         container_dns_servers: &options.dns_servers,
         netns_host: hostns_fd,
-        netns_container: netns_fd,
+        netns_container: Some(netns_fd),
         netns_path,
         network,
         per_network_opts: &named.opts,
