@@ -5,9 +5,12 @@
 </p>
 
 SSAM guarantees that a device runs **only trusted, unmodified** packages and
-keeps detecting tampering for as long as they run. It does this with an
-**integrity model** built from three parts: a trust anchor (the on-device public
-key), an RSA signature, and dm-verity.
+keeps detecting tampering for as long as they run. Packages can be installed and
+updated freely at runtime, yet — regardless of where they are stored or how
+mutable that location is — their integrity is always verified at execution time:
+software shipped as a SSAM package gets **free updates and run-time integrity at
+once**. It does this with an **integrity model** built from three parts: a trust
+anchor (the on-device public key), an *RSA* signature, and *dm-verity*.
 
 ---
 
@@ -55,35 +58,42 @@ package runs:
 
 ```mermaid
 flowchart LR
-  subgraph SIGN["Build — sign (off-device)"]
+  subgraph SIGN["At build — sign (off-device)"]
     direction TB
-    IMG["package filesystem image<br/>(large, unsigned)"]
-    IMG -->|"build verity table"| RH["dm-verity table<br/>root hash + params"]
-    RH -->|"stored in"| CFG["metadata · runtime_config · seccomp<br/>(small)"]
-    CFG -->|"RSA sign (private key)"| SIG["signature"]
+    IMG[/"package filesystem image<br/>(large, unsigned)"/]
+    IMG -->|"build dm-verity table"| RH[/"dm-verity table<br/>root hash + params"/]
+    RH -->|"stored in"| CFG[/"metadata · runtime_config · seccomp<br/>(small)"/]
+    CFG -->|"RSA sign (private key)"| SIG[/"signature"/]
   end
 
-  subgraph DEV["On-device — verify (ssamd)"]
+  subgraph DEV["At runtime — verify (on-device)"]
     direction TB
     ONCE["① load: verify signature<br/>(public key)"]
     CONT["② every read: dm-verity checks<br/>each block vs root hash — continuous"]
     ONCE -->|"root hash now trusted"| CONT
   end
 
-  SIGN ==>|".ssam package"| DEV
+  SIGN ==>|"SSAM package"| DEV
+
+  classDef actor fill:#dbeafe,stroke:#2563eb,color:#1e3a5f;
+  classDef data fill:#eef1f5,stroke:#94a3b8,color:#334155;
+  class IMG,RH,CFG,SIG data;
+  class ONCE,CONT actor;
+  style SIGN stroke:#94a3b8
+  style DEV stroke:#94a3b8
 ```
 
 - **Sign (build).** `ssam-wrap` RSA-signs only the **configuration data** — the
   package filesystem image is not signed.
 - **Verify (load).** `ssamd` verifies the signature at load with the public key.
-- **Verify continuously (runtime).** The kernel's dm-verity re-checks each
+- **Verify continuously (runtime).** The kernel's dm-verity checks each
   filesystem block **on every read**.
 
 The signature covers only a few kilobytes but, through the embedded root hash,
 **transitively protects the entire filesystem**.
 
 This split is a deliberate **performance choice**. Signing the whole filesystem
-would force re-verifying all of it at load, slowing startup; instead SSAM signs
+would force verifying all of it at load, slowing startup; instead SSAM signs
 only the few-kilobyte configuration data and leaves the filesystem to dm-verity,
 which verifies it on demand at runtime. The load-time signature check therefore
 stays cheap — keeping container startup fast while still guaranteeing integrity at
@@ -95,7 +105,7 @@ The next two sections detail each half.
 
 ## Package authenticity — RSA signature
 
-Each `.ssam` package carries an **RSA PKCS#1 v1.5 signature over a SHA-256
+Each SSAM package carries an **RSA PKCS#1 v1.5 signature over a SHA-256
 digest** of its **configuration data** — the few kilobytes that describe how the
 package is built and run.
 
@@ -112,16 +122,15 @@ section).
 
 ## Filesystem integrity — dm-verity
 
-The package filesystem image is protected by **dm-verity**:
+The package filesystem image is protected by *dm-verity*:
 
-- dm-verity implements the runtime package filesystem integrity policy. The
-  policy is enabled by default and can be disabled through
-  `[integrity].disable_runtime_integrity`. Package signature verification
-  remains enabled when this policy is disabled.
+- dm-verity is enabled by default and can be disabled through
+  `[integrity].disable_runtime_integrity`. Disabling it removes block-level
+  runtime verification, but package signature verification still applies.
 - The signed `metadata` contains the **entire set of dm-verity parameters**
   (including the root hash).
 - At load time `ssamd` builds the dm-verity target from those signed parameters.
-  By dm-verity's design, **every block is re-verified on each read**, so
+  By dm-verity's design, **every block is verified on each read**, so
   tampering is detected not just at load but **continuously at runtime**.
 
 ---
@@ -173,7 +182,7 @@ container-level threats (syscalls, host access, storage, network), see
 
 ---
 
-For container-level confinement (seccomp, AppArmor, resource limits, networking),
+For container-level confinement (*seccomp*, *AppArmor*, resource limits, networking),
 see [Container Isolation](container-isolation.md). For the byte-level details of
 signing and verification, see the
 [Package Format Reference](package-format.md#signature-and-integrity).

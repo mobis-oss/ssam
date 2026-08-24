@@ -4,7 +4,7 @@
   <a href="remocon-rpc.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
 </p>
 
-This document describes the Remocon API `ssamd` provides over gRPC to
+This document describes the Remocon API `ssamd` provides over *gRPC* to
 control packages.
 
 ---

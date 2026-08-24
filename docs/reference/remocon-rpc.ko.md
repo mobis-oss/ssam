@@ -4,7 +4,7 @@
   <a href="remocon-rpc.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
 </p>
 
-이 문서는 패키지를 제어하기 위해 `ssamd`가 gRPC로 제공하는 Remocon API를
+이 문서는 패키지를 제어하기 위해 `ssamd` 가 *gRPC* 로 제공하는 Remocon API를
 설명합니다.
 
 ---
@@ -68,8 +68,8 @@
 같은 패키지의 현재 설치된 버전과 비교한 결과에 따라 결정됩니다:
 
 - **동일 버전** — `downgrade` 값과 무관하게 항상 거부됩니다.
-- **낮은 버전** — `downgrade: true`를 지정하지 않으면 거부됩니다.
-- **높은 버전** — `downgrade: true`를 지정하면 오히려 거부됩니다. 업그레이드에는
+- **낮은 버전** — `downgrade: true` 를 지정하지 않으면 거부됩니다.
+- **높은 버전** — `downgrade: true` 를 지정하면 오히려 거부됩니다. 업그레이드에는
   기본값(`false`)을 사용하세요.
 
 ### `RemovePackage`
@@ -148,9 +148,9 @@
 
 ## Request messages
 
-`ListPackagesStatus`, `GetAllPackageInfo`, `GetTimelineInfo`는
-`google.protobuf.Empty`를 받으며 자체 요청 필드가 없습니다 — 아래
-메시지들만 필드를 가집니다.
+`ListPackagesStatus`, `GetAllPackageInfo`, `GetTimelineInfo` 는
+`google.protobuf.Empty` 를 받으며 자체 요청 필드가 없습니다 — 아래
+메시지에만 필드가 있습니다.
 
 ### `InstallPackageRequest`
 
@@ -203,13 +203,13 @@
 `result` string은 자유 형식 텍스트가 **아닙니다**. 고정된 스키마 —
 [`remocon-responses.schema.json`](../../libssam/data/remocon-responses.schema.json)
 (JSON Schema, draft 2020-12) — 을 따르는 직렬화된 JSON 문서입니다:
-`schema_version`과 `success`는 항상 존재하고, 성공 시 `data`가 RPC별
-response data payload를 담으며, 실패 시엔 대신 `reason`이 사람이 읽을 수
-있는 메시지를 담습니다. `data`와 `reason`은 상호 배타적입니다.
+`schema_version` 과 `success` 는 항상 존재하고, 성공 시 `data` 가 RPC별
+response data payload를 담으며, 실패 시엔 대신 `reason` 이 사람이 읽을 수
+있는 메시지를 담습니다. `data` 와 `reason` 은 상호 배타적입니다.
 
 | 필드 | 타입 | 존재 | 의미 |
 | --- | --- | --- | --- |
-| `schema_version` | `string` | 항상 | 응답 스키마 버전. 현재 값은 `"2"`. `schema_version`이 없으면 현재 버전으로 간주합니다. |
+| `schema_version` | `string` | 항상 | 응답 스키마 버전. 현재 값은 `"2"`. `schema_version` 이 없으면 현재 버전으로 간주합니다. |
 | `success` | `bool` | 항상 | 성공이면 `true`, 실패면 `false`. |
 | `data` | [resp data payload](#response-data-payload) | 성공 시 | 반환할 데이터가 없으면 생략(예: `RemovePackage`); RPC별 정확한 형태는 [API at a Glance](#api-at-a-glance) 참조. |
 | `reason` | `string` | 실패 시 | 사람이 읽을 수 있는 실패 메시지. |
@@ -326,7 +326,7 @@ response data payload를 담으며, 실패 시엔 대신 `reason`이 사람이 �
 #### `packageOpResult`
 
 일괄 작업(`StartPackage`, `StopPackage`, `WipePackageData`)의 패키지별 결과. 이
-작업들은 패키지당 한 항목씩 담은 **배열**을 반환합니다.
+작업들은 패키지당 한 항목씩 담은 **배열** 을 반환합니다.
 
 | 필드 | 타입 | 존재 | 의미 |
 | --- | --- | --- | --- |
@@ -334,8 +334,8 @@ response data payload를 담으며, 실패 시엔 대신 `reason`이 사람이 �
 | `success` | `bool` | 항상 | 해당 패키지에 대한 작업 성공 여부 |
 | `message` | `string` | 선택 | 상세, 보통 실패 시 |
 
-응답 자체의 `success`와 개별 항목의 `success`는 서로 독립적입니다 —
-응답은 `true`를 보고하면서도 개별 항목은 `false`를 보고할 수 있습니다.
+응답 자체의 `success` 와 개별 항목의 `success` 는 서로 독립적입니다 —
+응답은 `true` 를 보고하면서도 개별 항목은 `false` 를 보고할 수 있습니다.
 
 #### `installResponse`
 
@@ -379,7 +379,7 @@ response data payload를 담으며, 실패 시엔 대신 `reason`이 사람이 �
 
 ## Examples
 
-`GetPackageInfo` — 성공. `data`까지 완전히 채워진 전체 응답:
+`GetPackageInfo` — 성공. `data` 까지 완전히 채워진 전체 응답:
 
 ```json
 {
