@@ -15,7 +15,6 @@ use zbus::zvariant::{Array, ObjectPath, OwnedValue, Str, Value};
 
 use systemd_dbus::JobResult;
 
-use crate::configuration;
 use crate::executor::systemd::systemd_dbus::manager_messages::{
     CancelJobWatch, ResetFailedUnit, StartTransientUnit, StopUnit,
 };
@@ -449,6 +448,7 @@ pub(crate) struct TransientUnitExecutor<'u> {
     unit_name: String,
     cmd_args: Arc<dyn ExecuteCommand>,
     service_info: ServiceInfo,
+    packages_cgroup: String,
     active_state_handler: ActiveStateHandler<'u>,
     systemd_interface: systemd_dbus::SystemdManager,
 }
@@ -456,8 +456,7 @@ pub(crate) struct TransientUnitExecutor<'u> {
 const DEF_CGROUPS_PATH: &str = "system.slice";
 const BLOCKING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-pub(crate) fn cgroups_path() -> &'static str {
-    let packages_cgroup = configuration::packages_cgroup();
+pub(crate) fn cgroups_path(packages_cgroup: &str) -> &str {
     if packages_cgroup.is_empty() {
         DEF_CGROUPS_PATH
     } else {
@@ -490,6 +489,7 @@ impl TransientUnitExecutor<'_> {
         cmd_args: Arc<dyn ExecuteCommand>,
         service_info: ServiceInfo,
         active_state_sender: mpsc::Sender<ExecutionStatus>,
+        packages_cgroup: String,
     ) -> anyhow::Result<Self> {
         let systemd_interface = systemd_dbus::SystemdManager::new()
             .await
@@ -506,6 +506,7 @@ impl TransientUnitExecutor<'_> {
             unit_name,
             cmd_args,
             service_info,
+            packages_cgroup,
             active_state_handler,
             systemd_interface,
         })
@@ -551,7 +552,7 @@ impl TransientUnitExecutor<'_> {
             ("ExecStopPost".to_owned(), exec_stop_post),
         ];
 
-        let cgroups_path = cgroups_path();
+        let cgroups_path = cgroups_path(&self.packages_cgroup);
         match utils::slice_str_from_cgroups_path(cgroups_path) {
             Ok(slice_str) => {
                 properties.push(("Slice".to_owned(), Str::from(slice_str).into()));

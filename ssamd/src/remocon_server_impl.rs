@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures_util::StreamExt as _;
 
+use crate::configuration::Configuration;
 use crate::package::PackageStatus as InternalPackageStatus;
 use crate::utils::ellipsis;
 use anyhow::Context as _;
@@ -31,6 +32,7 @@ use crate::package_manager::PackageManagerService;
 
 pub(crate) struct RemoconImpl {
     package_manager: Arc<dyn PackageManagerService>,
+    config: Arc<Configuration>,
 }
 
 /// Convert a handler-local `Result<T, E>` into a JSON-encoded `String`.
@@ -62,8 +64,14 @@ fn build_install_response(
 }
 
 impl RemoconImpl {
-    pub(crate) fn new(package_manager: Arc<dyn PackageManagerService>) -> Self {
-        Self { package_manager }
+    pub(crate) fn new(
+        package_manager: Arc<dyn PackageManagerService>,
+        config: Arc<Configuration>,
+    ) -> Self {
+        Self {
+            package_manager,
+            config,
+        }
     }
 }
 
@@ -337,7 +345,10 @@ impl Remocon for RemoconImpl {
 
         // Accept regular files with the expected package extension only — a
         // mismatched extension can never install, so reject it here too.
-        let has_package_ext = crate::package_manager::parser::has_package_extension(&package_path);
+        let has_package_ext = crate::package_manager::parser::has_package_extension(
+            &package_path,
+            self.config.packages_ext(),
+        );
         if let Ok(meta) = tokio::fs::metadata(&package_path).await
             && (!meta.is_file() || !has_package_ext)
         {
@@ -348,9 +359,13 @@ impl Remocon for RemoconImpl {
         }
 
         let pkg_path = package_path.clone();
+        let public_key_path = self.config.public_key_file_path().to_owned();
         let result = tokio::task::spawn_blocking(move || {
-            crate::package_manager::parser::parse_package_file(pkg_path)
-                .and_then(|r| r.package_file)
+            crate::package_manager::parser::parse_package_file(
+                pkg_path,
+                Path::new(&public_key_path),
+            )
+            .and_then(|r| r.package_file)
         })
         .await
         .context("inspect_local_package task panicked")
@@ -825,7 +840,8 @@ pub(crate) mod tests {
     fn create_test_remocon() -> (RemoconImpl, MockPackageManagerService) {
         let mock = MockPackageManagerService::new();
         let mock_clone = mock.clone();
-        let remocon = RemoconImpl::new(Arc::new(mock));
+        let config = crate::configuration::tests::test_configuration();
+        let remocon = RemoconImpl::new(Arc::new(mock), config);
         (remocon, mock_clone)
     }
 
@@ -1363,7 +1379,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_inspect_local_package_nonexistent_file() {
-        crate::configuration::ensure_test_init();
         let (remocon, _mock_manager) = create_test_remocon();
 
         let request = Request::new(InspectLocalPackageRequest {
@@ -1386,7 +1401,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_inspect_local_package_invalid_file() {
-        crate::configuration::ensure_test_init();
         let (remocon, _mock_manager) = create_test_remocon();
 
         let tmp = tempfile::Builder::new()
@@ -1411,7 +1425,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_inspect_local_package_rejects_wrong_extension() {
-        crate::configuration::ensure_test_init();
         let (remocon, _mock_manager) = create_test_remocon();
 
         let tmp = tempfile::Builder::new()
@@ -1445,7 +1458,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_inspect_local_package_rejects_fifo() {
-        crate::configuration::ensure_test_init();
         let (remocon, _mock_manager) = create_test_remocon();
 
         let temp_dir = tempfile::tempdir().expect("temp dir creation should succeed");
@@ -1484,7 +1496,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_inspect_local_package_rejects_relative_path() {
-        crate::configuration::ensure_test_init();
         let (remocon, _mock_manager) = create_test_remocon();
 
         let request = Request::new(InspectLocalPackageRequest {
@@ -1675,7 +1686,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_install_package_rejects_relative_path() {
-        crate::configuration::ensure_test_init();
         let (remocon, _mock_manager) = create_test_remocon();
 
         let request = Request::new(InstallPackageRequest {

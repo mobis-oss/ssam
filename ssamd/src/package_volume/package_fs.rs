@@ -1,7 +1,6 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::configuration;
 use crate::mount::{LoopDeviceAttacher, mount_pkgfs, unmount_pkgfs};
 use crate::utils;
 use libssam::ssam_package::{PackageFsVerityInfo, PkgfsExtent};
@@ -23,27 +22,17 @@ pub(crate) struct PackageFsMetadata {
     pub(crate) path: PathBuf,
     pub(crate) mount_point: PathBuf,
     pub(crate) overlayfs_root: PathBuf,
+    pub(crate) dm_verity_disabled: bool,
     pub(crate) packagefs_info: PackageFsInfo,
 }
 
 impl PackageFsMetadata {
-    pub(crate) fn new<F: PackageFileInfo + ?Sized>(
-        path: impl AsRef<Path>,
-        package_file: &F,
-    ) -> anyhow::Result<Self> {
-        Self::new_with_roots(
-            path,
-            package_file,
-            configuration::packages_mnt_root(),
-            configuration::packages_overlayfs_root(),
-        )
-    }
-
-    fn new_with_roots<F: PackageFileInfo + ?Sized>(
+    pub(super) fn new_with_roots<F: PackageFileInfo + ?Sized>(
         path: impl AsRef<Path>,
         package_file: &F,
         mnt_root: &str,
         packages_overlayfs_root: &str,
+        dm_verity_disabled: bool,
     ) -> anyhow::Result<Self> {
         let package_path = path.as_ref().to_path_buf();
         let pkgfs_info = package_file.pkgfs()?;
@@ -82,6 +71,7 @@ impl PackageFsMetadata {
             path: package_path,
             mount_point,
             overlayfs_root,
+            dm_verity_disabled,
             packagefs_info,
         })
     }
@@ -189,7 +179,7 @@ pub(crate) mod tests {
             path: impl AsRef<Path>,
             package_file: &F,
         ) -> anyhow::Result<Self> {
-            Self::new_with_roots(path, package_file, "/test/pkgfs", "")
+            Self::new_with_roots(path, package_file, "/test/pkgfs", "", false)
         }
     }
 
@@ -324,7 +314,6 @@ pub(crate) mod tests {
         }
 
         pub(crate) fn create_test_ssam_package_file() -> MockPackageFile {
-            crate::configuration::ensure_test_init();
             create_test_ssam_package_file_without_config()
         }
 
@@ -345,14 +334,14 @@ pub(crate) mod tests {
             let pkg_file = create_test_ssam_package_file();
             let test_path = PathBuf::from("/test/package/path");
 
-            let result = PackageFsMetadata::new(&test_path, &pkg_file);
+            let result = PackageFsMetadata::new_for_test(&test_path, &pkg_file);
 
             assert!(result.is_ok());
             let pkgfs_meta = result.unwrap();
 
             // Verify the basic fields
             assert_eq!(pkgfs_meta.path, test_path);
-            let mnt_root = configuration::packages_mnt_root();
+            let mnt_root = "/test/pkgfs";
             assert_eq!(
                 pkgfs_meta.mount_point,
                 Path::new(mnt_root).join("test-package")
@@ -374,20 +363,12 @@ pub(crate) mod tests {
             let test_path = PathBuf::from("/test/package/path");
 
             // When PACKAGES_OVERLAYFS_ROOT is empty, overlayfs_root should be empty PathBuf
-            let result = PackageFsMetadata::new(&test_path, &metadata);
+            let result = PackageFsMetadata::new_for_test(&test_path, &metadata);
 
             assert!(result.is_ok());
             let pkgfs_meta = result.unwrap();
 
-            let packages_overlayfs_root = configuration::packages_overlayfs_root();
-            if packages_overlayfs_root.is_empty() {
-                assert_eq!(pkgfs_meta.overlayfs_root, PathBuf::new());
-            } else {
-                assert_eq!(
-                    pkgfs_meta.overlayfs_root,
-                    Path::new(packages_overlayfs_root).join("test-package")
-                );
-            }
+            assert_eq!(pkgfs_meta.overlayfs_root, PathBuf::new());
         }
 
         #[test]
@@ -402,7 +383,7 @@ pub(crate) mod tests {
                 pkg_file.pkgfs =
                     PackageFilesystem::new(1024, 8192 + 2048, fs_type, default_test_verity());
 
-                let result = PackageFsMetadata::new(&test_path, &pkg_file);
+                let result = PackageFsMetadata::new_for_test(&test_path, &pkg_file);
                 assert!(result.is_ok());
 
                 let pkgfs_meta = result.unwrap();
@@ -426,7 +407,7 @@ pub(crate) mod tests {
             };
             pkg_file.pkgfs = PackageFilesystem::new(2048, 16384 + 4096, FsType::Ext4, verity);
 
-            let result = PackageFsMetadata::new(&test_path, &pkg_file);
+            let result = PackageFsMetadata::new_for_test(&test_path, &pkg_file);
             assert!(result.is_ok());
 
             let pkgfs_meta = result.unwrap();
@@ -446,7 +427,7 @@ pub(crate) mod tests {
                 default_test_verity(),
             );
 
-            let err = PackageFsMetadata::new(&test_path, &pkg_file).unwrap_err();
+            let err = PackageFsMetadata::new_for_test(&test_path, &pkg_file).unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains("Failed to get package filesystem"),
@@ -465,7 +446,7 @@ pub(crate) mod tests {
             let mut pkg_file = create_test_ssam_package_file();
             pkg_file.package_name = String::new();
 
-            let result = PackageFsMetadata::new(&test_path, &pkg_file);
+            let result = PackageFsMetadata::new_for_test(&test_path, &pkg_file);
             assert!(result.is_err());
         }
 
@@ -477,7 +458,7 @@ pub(crate) mod tests {
                 let mut pkg_file = create_test_ssam_package_file();
                 pkg_file.package_name = package_name.to_string();
 
-                assert!(PackageFsMetadata::new(&test_path, &pkg_file).is_err());
+                assert!(PackageFsMetadata::new_for_test(&test_path, &pkg_file).is_err());
             }
         }
 
@@ -488,11 +469,11 @@ pub(crate) mod tests {
             let mut pkg_file = create_test_ssam_package_file();
             pkg_file.package_name = "test-package_v1.0.1".to_string();
 
-            let result = PackageFsMetadata::new(&test_path, &pkg_file);
+            let result = PackageFsMetadata::new_for_test(&test_path, &pkg_file);
             assert!(result.is_ok());
 
             let pkgfs_meta = result.unwrap();
-            let mnt_root = configuration::packages_mnt_root();
+            let mnt_root = "/test/pkgfs";
             assert_eq!(
                 pkgfs_meta.mount_point,
                 Path::new(mnt_root).join("test-package_v1.0.1")
@@ -512,7 +493,7 @@ pub(crate) mod tests {
 
             let test_pkg_file = package_fs_metadata_test::create_test_ssam_package_file();
             let test_path = PathBuf::from("/test/package/path");
-            let pkgfs_meta = PackageFsMetadata::new(&test_path, &test_pkg_file).unwrap();
+            let pkgfs_meta = PackageFsMetadata::new_for_test(&test_path, &test_pkg_file).unwrap();
 
             PackageFileSystem {
                 package_name,

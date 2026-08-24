@@ -131,6 +131,7 @@ struct ExecutorInitArgs {
     package_name: String,
     execution_type: executor::ExecutorType,
     state_sender: mpsc::Sender<ExecutionStatus>,
+    packages_cgroup: String,
 }
 
 #[derive(Debug)]
@@ -169,6 +170,7 @@ impl LazyExecutor {
                         self.command.clone(),
                         init_args.execution_type,
                         init_args.state_sender,
+                        init_args.packages_cgroup,
                     )
                     .await
                 })
@@ -459,6 +461,7 @@ impl Package {
         pkg_volume: &PackageVolume,
         volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
         network: Option<NetworkManager>,
+        packages_cgroup: &str,
     ) -> anyhow::Result<Self> {
         let (sender, receiver) = mpsc::channel(8);
 
@@ -518,6 +521,7 @@ impl Package {
             package_file,
             pkg_volume,
             network_mode,
+            packages_cgroup,
         ));
 
         let service_info = executor::systemd::ServiceInfo::new_from_metadata(metadata)?;
@@ -528,6 +532,7 @@ impl Package {
             package_name: pkg_name.clone(),
             execution_type,
             state_sender: sender,
+            packages_cgroup: packages_cgroup.to_owned(),
         };
 
         let executor = Arc::new(LazyExecutor::new(command, init_args));

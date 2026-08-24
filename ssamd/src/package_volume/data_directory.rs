@@ -1,7 +1,6 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::configuration;
 use crate::ext4quota::Ext4QuotaEntry;
 use crate::utils::{self, quota_utils};
 use anyhow::Context;
@@ -245,7 +244,10 @@ pub(crate) struct DataDirMetadata {
 }
 
 impl DataDirMetadata {
-    pub(crate) fn new<F: PackageFileInfo + ?Sized>(pkg_file: &F) -> anyhow::Result<Self> {
+    pub(crate) fn new<F: PackageFileInfo + ?Sized>(
+        pkg_file: &F,
+        data_root: impl AsRef<Path>,
+    ) -> anyhow::Result<Self> {
         let package_name = pkg_file.get_package_name().to_string();
         anyhow::ensure!(
             utils::is_safe_path_segment(&package_name),
@@ -257,8 +259,7 @@ impl DataDirMetadata {
             .map(|v| u64::try_from(*v))
             .transpose()
             .context("storage_limit value is invalid")?;
-        let root = configuration::packages_data_root();
-        let path = PathBuf::from(root).join(&package_name);
+        let path = data_root.as_ref().join(&package_name);
         Ok(Self {
             package_name,
             path,
@@ -759,7 +760,7 @@ pub(crate) mod tests {
                     storage_limit: None,
                 };
 
-                assert!(DataDirMetadata::new(&pkg_file).is_err());
+                assert!(DataDirMetadata::new(&pkg_file, "/tmp").is_err());
             }
         }
 

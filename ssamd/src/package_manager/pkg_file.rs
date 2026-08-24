@@ -1,6 +1,7 @@
 // Copyright 2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::configuration::Configuration;
 use crate::package::{Package, PackageContext};
 use crate::package_volume::messages::{AcquireVolume, PurgeVolume};
 use crate::package_volume::{PackageVolume, PackageVolumeManagerActor, PackageVolumeMetadata};
@@ -59,6 +60,7 @@ impl PackageFileBackend for DefaultPackageFileBackend {
 
 #[derive(Actor)]
 pub(crate) struct PackageTransactionActor {
+    config: Arc<Configuration>,
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
     fs_ops: Arc<dyn PackageFileBackend>,
     network: Option<NetworkManager>,
@@ -66,11 +68,13 @@ pub(crate) struct PackageTransactionActor {
 
 impl PackageTransactionActor {
     pub(crate) fn new(
+        config: Arc<Configuration>,
         volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
         fs_ops: impl PackageFileBackend + 'static,
         network: Option<NetworkManager>,
     ) -> Self {
         Self {
+            config,
             volume_manager_ref,
             fs_ops: Arc::new(fs_ops),
             network,
@@ -176,8 +180,9 @@ impl PackageTransactionActor {
         msg: message::CreatePackage,
         _actor_ref: &ActorRef<Self>,
     ) -> anyhow::Result<Arc<Package>> {
-        let volume_meta = PackageVolumeMetadata::new(&msg.path, &msg.package_file)
-            .context("Failed to create volume metadata")?;
+        let volume_meta =
+            PackageVolumeMetadata::new(&msg.path, &msg.package_file, self.config.as_ref())
+                .context("Failed to create volume metadata")?;
         let volume = self.acquire_volume(volume_meta).await?;
         let context = PackageContext::new(&msg.path, msg.package_file);
         let package = Package::new(
@@ -185,6 +190,7 @@ impl PackageTransactionActor {
             &volume,
             self.volume_manager_ref.clone(),
             self.network.clone(),
+            self.config.packages_cgroup(),
         )?;
         Ok(Arc::new(package))
     }
@@ -332,6 +338,7 @@ impl PackageTransactionActor {
             &volume,
             self.volume_manager_ref.clone(),
             self.network.clone(),
+            self.config.packages_cgroup(),
         ) {
             Ok(package) => {
                 if let InstallMode::UpgradeDownloaded { ref installed_path } = mode {
@@ -383,6 +390,7 @@ mod tests {
     use super::PackageFileBackend;
     use super::message::{Install, InstallMode};
     use super::*;
+    use crate::configuration::IntegrityConfig;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -491,8 +499,25 @@ service_type = "simple"
         let package_file = create_test_ssam_package_file(dir);
         let dest = PathBuf::from("/tmp/dest.ssam");
         let mock_pkg = create_test_volume_pkg();
+        let config = Configuration::new(
+            crate::configuration::Common {
+                bundled_packages_dir: String::new(),
+                downloaded_packages_dir: String::new(),
+                packages_data_root: "/tmp".to_owned(),
+                packages_overlayfs_root: String::new(),
+                packages_mnt_root: "/test/pkgfs".to_owned(),
+                public_key_file_path: String::new(),
+                packages_cgroup: String::new(),
+                packages_ext: "ssam".to_owned(),
+                rpc_bind_ip: None,
+            },
+            None,
+            IntegrityConfig {
+                disable_runtime_integrity: false,
+            },
+        );
         let volume_meta =
-            PackageVolumeMetadata::new(&dest, &mock_pkg).expect("test volume metadata");
+            PackageVolumeMetadata::new(&dest, &mock_pkg, &config).expect("test volume metadata");
         InstallInfo {
             package_name: name.to_string(),
             package_file,
@@ -503,11 +528,10 @@ service_type = "simple"
     }
 
     fn spawn_actor(fs_ops: impl PackageFileBackend + 'static) -> ActorRef<PackageTransactionActor> {
-        crate::configuration::ensure_test_init();
-        let (vol_ref, _) = rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(
-            crate::configuration::packages_data_root(),
-        ));
-        let actor = PackageTransactionActor::new(vol_ref, fs_ops, None);
+        let config = crate::configuration::tests::test_configuration();
+        let (vol_ref, _) =
+            rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(config.packages_data_root()));
+        let actor = PackageTransactionActor::new(config, vol_ref, fs_ops, None);
         let (actor_ref, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         actor_ref
     }
@@ -676,12 +700,11 @@ service_type = "simple"
     fn spawn_actor_with_dead_volume_manager(
         fs_ops: impl PackageFileBackend + 'static,
     ) -> ActorRef<PackageTransactionActor> {
-        crate::configuration::ensure_test_init();
-        let (vol_ref, vol_handle) = rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(
-            crate::configuration::packages_data_root(),
-        ));
+        let config = crate::configuration::tests::test_configuration();
+        let (vol_ref, vol_handle) =
+            rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(config.packages_data_root()));
         vol_handle.abort();
-        let actor = PackageTransactionActor::new(vol_ref, fs_ops, None);
+        let actor = PackageTransactionActor::new(config, vol_ref, fs_ops, None);
         let (actor_ref, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         actor_ref
     }

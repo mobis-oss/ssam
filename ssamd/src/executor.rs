@@ -24,6 +24,7 @@ impl PackageExecutor {
         command: Arc<dyn ExecuteCommand>,
         execution_type: ExecutorType,
         state_sender: tokio::sync::mpsc::Sender<ExecutionStatus>,
+        packages_cgroup: String,
     ) -> anyhow::Result<Self> {
         let mgr = match execution_type {
             ExecutorType::Systemd(service_info) => systemd::TransientUnitExecutor::new(
@@ -31,6 +32,7 @@ impl PackageExecutor {
                 command,
                 service_info,
                 state_sender,
+                packages_cgroup,
             )
             .await
             .map(|executor| Arc::new(executor) as Arc<dyn CommandExecutorBackend>),
@@ -697,6 +699,7 @@ pub(crate) mod container {
             package_file: &PackageFile,
             pkg_volume: &PackageVolume,
             network_mode: container::NetworkMode,
+            packages_cgroup: &str,
         ) -> Self {
             let metadata = package_file.metadata();
 
@@ -704,7 +707,7 @@ pub(crate) mod container {
                 .get_container_security_seccomp()
                 .then(|| package_file.seccomp_policy().clone());
 
-            let cgroups_path = super::systemd::cgroups_path().to_owned();
+            let cgroups_path = super::systemd::cgroups_path(packages_cgroup).to_owned();
 
             let data_mounts = pkg_volume.data_directory().map(oci::DataMountPaths::new);
 
@@ -825,7 +828,7 @@ mod tests {
 
         let package_name = "test-package".to_string();
         let test_pkg_file = package_fs_metadata_test::create_test_ssam_package_file();
-        let pkgfs_meta = PackageFsMetadata::new(mount_point, &test_pkg_file)?;
+        let pkgfs_meta = PackageFsMetadata::new_for_test(mount_point, &test_pkg_file)?;
 
         let pkgfs = PackageFileSystem {
             package_name: package_name.clone(),
@@ -851,7 +854,7 @@ mod tests {
 
         let package_name = "test-package".to_string();
         let test_pkg_file = package_fs_metadata_test::create_test_ssam_package_file();
-        let pkgfs_meta = PackageFsMetadata::new(mount_point, &test_pkg_file)?;
+        let pkgfs_meta = PackageFsMetadata::new_for_test(mount_point, &test_pkg_file)?;
 
         let pkgfs = PackageFileSystem {
             package_name: package_name.clone(),

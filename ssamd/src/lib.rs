@@ -27,8 +27,7 @@ use tokio::sync::oneshot;
 use package_manager::PackageManagerService;
 use utils::actor_supervisor::spawn_with;
 
-fn package_cgroup_exists() -> bool {
-    let packages_cgroup = configuration::packages_cgroup();
+fn package_cgroup_exists(packages_cgroup: &str) -> bool {
     packages_cgroup.is_empty() || Cgroup::load(hierarchies::auto(), packages_cgroup).exists()
 }
 
@@ -45,26 +44,23 @@ impl Daemon {
     const DEFAULT_RPC_BIND_IP_ADDR: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
     async fn run() -> anyhow::Result<()> {
-        // Initialize configuration with default path
         let config_path = configuration::default_config_path();
-        configuration::init(&config_path);
+        let config = Arc::new(
+            configuration::Configuration::load_from_path(&config_path)
+                .context("Failed to load daemon configuration")?,
+        );
 
-        let bundled_dir_str = configuration::bundled_packages_dir();
-        let downloaded_dir_str = configuration::downloaded_packages_dir();
-        Self::validate_package_dirs(bundled_dir_str, downloaded_dir_str)?;
+        let _ = package_manager::resolve_bundled_dir(config.bundled_packages_dir())?;
+        Self::setup_runtime_environ(&config)?;
 
-        Self::setup_runtime_environ()?;
-
-        if !package_cgroup_exists() {
-            let packages_cgroup = configuration::packages_cgroup();
+        if !package_cgroup_exists(config.packages_cgroup()) {
+            let packages_cgroup = config.packages_cgroup();
             anyhow::bail!(
                 "Cgroup {packages_cgroup} does not exist. Check your build configuration."
             );
         }
 
-        let actor =
-            package_manager::PackageManagerActor::from_config(bundled_dir_str, downloaded_dir_str)
-                .await?;
+        let actor = package_manager::PackageManagerActor::new(Arc::clone(&config)).await?;
 
         let actor_ref = spawn_with::<package_manager::PackageManagerActor>(actor);
 
@@ -74,10 +70,10 @@ impl Daemon {
         log::debug!("Successfully started.");
         let package_manager: Arc<dyn PackageManagerService> =
             Arc::new(package_manager::PackageManager::new(actor_ref));
-        let remocon_service = RemoconImpl::new(Arc::clone(&package_manager));
+        let remocon_service = RemoconImpl::new(Arc::clone(&package_manager), Arc::clone(&config));
         let server = libssam::remocon::remocon_server::RemoconServer::new(remocon_service);
 
-        let ipaddr = configuration::rpc_bind_ip().map_or_else(
+        let ipaddr = config.rpc_bind_ip().map_or_else(
             || {
                 log::debug!("No bind IP address configured, defaulting to localhost");
                 Self::DEFAULT_RPC_BIND_IP_ADDR
@@ -128,33 +124,14 @@ impl Daemon {
         Ok(())
     }
 
-    fn validate_package_dirs(
-        bundled_dir_str: &str,
-        downloaded_dir_str: &str,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !bundled_dir_str.is_empty(),
-            "bundled_packages_dir must not be empty"
-        );
-        anyhow::ensure!(
-            !downloaded_dir_str.is_empty(),
-            "downloaded_packages_dir must not be empty"
-        );
-        anyhow::ensure!(
-            Path::new(bundled_dir_str).is_dir(),
-            "Bundled packages directory does not exist: {bundled_dir_str}"
-        );
-        Ok(())
-    }
-
-    fn setup_runtime_environ() -> anyhow::Result<()> {
-        let public_key_path = configuration::public_key_file_path();
+    fn setup_runtime_environ(config: &configuration::Configuration) -> anyhow::Result<()> {
+        let public_key_path = config.public_key_file_path();
         anyhow::ensure!(
             Path::new(public_key_path).is_file(),
             "Public key file not found: {public_key_path}"
         );
 
-        let downloaded_dir = configuration::downloaded_packages_dir();
+        let downloaded_dir = config.downloaded_packages_dir();
         fs::DirBuilder::new()
             .mode(0o755)
             .recursive(true)
@@ -163,7 +140,7 @@ impl Daemon {
                 format!("Failed to create downloaded packages directory '{downloaded_dir}'")
             })?;
 
-        let packages_data_root = configuration::packages_data_root();
+        let packages_data_root = config.packages_data_root();
         fs::DirBuilder::new()
             .mode(0o755)
             .recursive(true)
@@ -172,7 +149,7 @@ impl Daemon {
                 format!("Failed to create package data directory '{packages_data_root}'")
             })?;
 
-        let packages_mnt_root = configuration::packages_mnt_root();
+        let packages_mnt_root = config.packages_mnt_root();
         fs::DirBuilder::new()
             .mode(0o755)
             .recursive(true)
@@ -210,48 +187,4 @@ pub fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(Daemon::run())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn validate_rejects_empty_bundled_dir() {
-        let result = Daemon::validate_package_dirs("", "/some/path");
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("bundled_packages_dir must not be empty")
-        );
-    }
-
-    #[test]
-    fn validate_rejects_empty_downloaded_dir() {
-        let result = Daemon::validate_package_dirs("/some/path", "");
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("downloaded_packages_dir must not be empty")
-        );
-    }
-
-    #[test]
-    fn validate_rejects_nonexistent_bundled_dir() {
-        let tmp = TempDir::new().unwrap();
-        let bundled = tmp.path().join("no_such_dir");
-        let downloaded = tmp.path().join("downloaded");
-
-        let result =
-            Daemon::validate_package_dirs(bundled.to_str().unwrap(), downloaded.to_str().unwrap());
-        assert!(
-            result.is_err(),
-            "nonexistent bundled_dir should be rejected"
-        );
-    }
 }

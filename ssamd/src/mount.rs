@@ -1,7 +1,6 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::configuration;
 use crate::dm::VerityDevice;
 use crate::network::pkg_hash10;
 use crate::package_volume::PackageFsMetadata;
@@ -739,7 +738,7 @@ pub(crate) fn unmount_pkgfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()
     // the same mount point. mount_pkgfs's idempotency gate prevents restacking,
     // so at most these two layers exist; unmount top-down, each guard making an
     // already-unmounted layer a no-op during recovery.
-    if !configuration::packages_overlayfs_root().is_empty() && is_exact_mount(mount_point) {
+    if !pkgfs_meta.overlayfs_root.as_os_str().is_empty() && is_exact_mount(mount_point) {
         do_unmount(mount_point).context(format!(
             "unmount_pkgfs({}): Failed while unmounting overlayfs",
             pkgfs_meta.path.display()
@@ -779,9 +778,9 @@ pub(crate) async fn mount_pkgfs(
     }
 
     let mount_backend = DefaultDeviceMountBackend { pkgfs_meta };
-    let overlay_enabled = !configuration::packages_overlayfs_root().is_empty();
+    let overlay_enabled = !pkgfs_meta.overlayfs_root.as_os_str().is_empty();
     mount_pkgfs_with(
-        configuration::runtime_integrity_disabled(),
+        pkgfs_meta.dm_verity_disabled,
         overlay_enabled,
         pkg_name,
         pkgfs_meta,
@@ -1616,7 +1615,7 @@ pub(crate) mod tests {
 
         // Default mock: offset 1024, length 8192 + 2048
         let pkg_file = create_test_ssam_package_file();
-        let meta = PackageFsMetadata::new(&test_path, &pkg_file).unwrap();
+        let meta = PackageFsMetadata::new_for_test(&test_path, &pkg_file).unwrap();
         assert_eq!(meta.packagefs_info.length, 8192 + 2048);
 
         // Override payload size — length must follow the mock, not be recomputed.
@@ -1627,7 +1626,7 @@ pub(crate) mod tests {
             ..default_test_verity()
         };
         pkg_file2.pkgfs = PackageFilesystem::new(2048, 16_384 + 4_096, FsType::Ext4, verity);
-        let meta2 = PackageFsMetadata::new(&test_path, &pkg_file2).unwrap();
+        let meta2 = PackageFsMetadata::new_for_test(&test_path, &pkg_file2).unwrap();
         assert_eq!(meta2.packagefs_info.length, 16_384 + 4_096);
     }
 }

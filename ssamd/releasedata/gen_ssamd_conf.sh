@@ -341,7 +341,7 @@ parse_arguments() {
                 shift 2
                 ;;
             --bundled-pkgs-dir)
-                if [[ "${2:0:1}" != "/" ]]; then
+                if [[ -n "$2" && "${2:0:1}" != "/" ]]; then
                     error_exit "Argument --bundled-pkgs-dir requires an absolute path. Got: '$2'"
                 fi
                 SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]="$2"
@@ -445,7 +445,11 @@ main() {
     parse_arguments "$@"
 
     local bdir ddir
-    bdir=$(realpath -m "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}")
+    if [[ -n "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}" ]]; then
+        bdir=$(realpath -m "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}")
+    else
+        bdir=""
+    fi
     ddir=$(realpath -m "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}")
     SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]="$bdir"
     SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]="$ddir"

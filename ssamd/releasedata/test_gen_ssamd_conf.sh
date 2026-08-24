@@ -303,6 +303,28 @@ test_default_bundled_dir() {
     verify_no_placeholders "$output_file" "Runtime config without bundled"
 }
 
+# Test 4b: Runtime config allows an empty bundled directory
+test_empty_bundled_dir() {
+    print_test_header "Test 4b: Runtime Config without Bundled Directory"
+
+    local test_dir="${TEST_OUTPUT_DIR}/test4b"
+    mkdir -p "$test_dir"
+    local output_file="${test_dir}/ssamd.toml"
+
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        --bundled-pkgs-dir "" \
+        --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
+        --pkgs-mnt-root /var/lib/mcontainer/mnt \
+        --pkgs-data-root /var/lib/mcontainer/data \
+        --pkgs-overlayfs-root /var/run/mcontainer/overlayfs \
+        --pkgs-cgroup mcontainer.slice \
+        --public-key-file /usr/share/ssamd/test.pub.key \
+        --packages-ext spkg
+
+    verify_file_content "$output_file" 'bundled_packages_dir = ""' "Runtime config - empty bundled packages dir"
+}
+
 # Test 5: Error handling - Invalid install path
 test_error_invalid_install_path() {
     print_test_header "Test 5: Error Handling - Invalid install path"
@@ -797,6 +819,7 @@ main() {
     test_runtime_config_only
     test_both_simultaneously
     test_default_bundled_dir
+    test_empty_bundled_dir
     test_error_invalid_install_path
     test_error_invalid_bundled_pkgs_dir
     test_error_invalid_downloaded_pkgs_dir

@@ -4,8 +4,7 @@
 use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
 use serde::Deserialize;
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
 
 /// Per-bridge subnet size used when `[network.bridge] size` is omitted.
 pub(crate) const DEFAULT_SUBNET_SIZE: u8 = 29;
@@ -14,19 +13,11 @@ pub(crate) const DEFAULT_SUBNET_SIZE: u8 = 29;
 pub(crate) const DEFAULT_POOL_BASE: &str = "172.20.0.0/16";
 
 /// Get the default config file path (same directory as the ssamd binary)
-#[cfg(not(test))]
 pub(crate) fn default_config_path() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|exe_path| exe_path.parent().map(|p| p.join("ssamd.toml")))
         .unwrap_or_else(|| PathBuf::from("./ssamd.toml"))
-}
-
-#[cfg(test)]
-pub(crate) fn default_config_path() -> PathBuf {
-    // Test environment: Use testdata/miscs/ssamd.toml relative to workspace root
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.join("testdata/testconfig/ssamd.toml")
 }
 
 pub(crate) fn runtime_bundle_root() -> PathBuf {
@@ -35,33 +26,34 @@ pub(crate) fn runtime_bundle_root() -> PathBuf {
 
 /// Common runtime configuration structure that matches build-time config values
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Common {
-    /// Bundled (read-only) package directory path (required, must not be empty)
-    pub(crate) bundled_packages_dir: String,
+pub struct Common {
+    /// Bundled (read-only) package directory path; empty means no bundled packages.
+    #[serde(default)]
+    pub bundled_packages_dir: String,
 
     /// Downloaded (read-write) package directory path (required, must not be empty)
-    pub(crate) downloaded_packages_dir: String,
+    pub downloaded_packages_dir: String,
 
     /// Package data root directory (required)
-    pub(crate) packages_data_root: String,
+    pub packages_data_root: String,
 
     /// Package overlay filesystem root (required)
-    pub(crate) packages_overlayfs_root: String,
+    pub packages_overlayfs_root: String,
 
     /// Package mount root directory (required)
-    pub(crate) packages_mnt_root: String,
+    pub packages_mnt_root: String,
 
     /// Public key file path (required)
-    pub(crate) public_key_file_path: String,
+    pub public_key_file_path: String,
 
     /// Package cgroup (required)
-    pub(crate) packages_cgroup: String,
+    pub packages_cgroup: String,
 
     /// Package file extension (required)
-    pub(crate) packages_ext: String,
+    pub packages_ext: String,
 
     /// Remote control server bind IP (optional)
-    pub(crate) rpc_bind_ip: Option<String>,
+    pub rpc_bind_ip: Option<String>,
 }
 
 /// Daemon-global network configuration, parsed from the optional `[network]` TOML section
@@ -138,14 +130,15 @@ impl BridgeConfig {
 
 /// Integrity-related runtime configuration parsed from `[integrity]`.
 #[derive(Debug, Clone, Default, Deserialize)]
-struct IntegrityConfig {
+pub struct IntegrityConfig {
+    /// Whether runtime package filesystem integrity checks are disabled.
     #[serde(default)]
-    disable_runtime_integrity: bool,
+    pub disable_runtime_integrity: bool,
 }
 
-/// Runtime configuration structure for TOML file
+/// Configuration manager that holds the runtime configuration
 #[derive(Debug, Clone, Deserialize)]
-struct RuntimeConfig {
+pub struct Configuration {
     common: Common,
 
     /// Optional network section — `None` when `[network]` is absent from the config file
@@ -157,15 +150,23 @@ struct RuntimeConfig {
     integrity: IntegrityConfig,
 }
 
-/// Configuration manager that holds the runtime configuration
-#[derive(Debug, Clone)]
-pub(crate) struct Configuration {
-    runtime_config: RuntimeConfig,
-}
-
 impl Configuration {
+    /// Build a configuration from its runtime sections.
+    #[must_use]
+    pub fn new(common: Common, network: Option<NetworkConfig>, integrity: IntegrityConfig) -> Self {
+        Self {
+            common,
+            network,
+            integrity,
+        }
+    }
+
     /// Load configuration from a file path
-    fn load_from_path<P: AsRef<std::path::Path>>(config_path: P) -> Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, parsed, or contains an invalid bridge configuration.
+    pub fn load_from_path<P: AsRef<Path>>(config_path: P) -> Result<Self> {
         let config_path = config_path.as_ref();
 
         let config_content = std::fs::read_to_string(config_path).with_context(|| {
@@ -176,18 +177,14 @@ impl Configuration {
         })?;
 
         // All required fields must be present in TOML, otherwise it will fail
-        let runtime_config: RuntimeConfig = toml::from_str(&config_content).with_context(|| {
+        let config: Self = toml::from_str(&config_content).with_context(|| {
             format!(
                 "Failed to parse config file: {}. Ensure all required fields are present in [common] section.",
                 config_path.display()
             )
         })?;
 
-        if let Some(bridge) = runtime_config
-            .network
-            .as_ref()
-            .and_then(|n| n.bridge.as_ref())
-        {
+        if let Some(bridge) = config.network.as_ref().and_then(|n| n.bridge.as_ref()) {
             bridge
                 .validate()
                 .context("Invalid [network.bridge] section in config file")?;
@@ -198,57 +195,64 @@ impl Configuration {
             config_path.display()
         );
 
-        Ok(Self { runtime_config })
+        Ok(config)
     }
 
     /// Get bundled packages directory path as a borrowed reference
     pub(crate) fn bundled_packages_dir(&self) -> &str {
-        &self.runtime_config.common.bundled_packages_dir
+        &self.common.bundled_packages_dir
     }
 
     /// Get downloaded packages directory path as a borrowed reference
-    pub(crate) fn downloaded_packages_dir(&self) -> &str {
-        &self.runtime_config.common.downloaded_packages_dir
+    #[must_use]
+    pub fn downloaded_packages_dir(&self) -> &str {
+        &self.common.downloaded_packages_dir
     }
 
     /// Get packages data root directory path as a borrowed reference
-    pub(crate) fn packages_data_root(&self) -> &str {
-        &self.runtime_config.common.packages_data_root
+    #[must_use]
+    pub fn packages_data_root(&self) -> &str {
+        &self.common.packages_data_root
     }
 
     /// Get packages overlayfs root directory path as a borrowed reference
-    pub(crate) fn packages_overlayfs_root(&self) -> &str {
-        &self.runtime_config.common.packages_overlayfs_root
+    #[must_use]
+    pub fn packages_overlayfs_root(&self) -> &str {
+        &self.common.packages_overlayfs_root
     }
 
     /// Get packages mount root directory path as a borrowed reference
-    pub(crate) fn packages_mnt_root(&self) -> &str {
-        &self.runtime_config.common.packages_mnt_root
+    #[must_use]
+    pub fn packages_mnt_root(&self) -> &str {
+        &self.common.packages_mnt_root
     }
 
     /// Get public key file path as a borrowed reference
-    pub(crate) fn public_key_file_path(&self) -> &str {
-        &self.runtime_config.common.public_key_file_path
+    #[must_use]
+    pub fn public_key_file_path(&self) -> &str {
+        &self.common.public_key_file_path
     }
 
     /// Get packages cgroup as a borrowed reference
-    pub(crate) fn packages_cgroup(&self) -> &str {
-        &self.runtime_config.common.packages_cgroup
+    #[must_use]
+    pub fn packages_cgroup(&self) -> &str {
+        &self.common.packages_cgroup
     }
 
     /// Get packages file extension as a borrowed reference
-    pub(crate) fn packages_ext(&self) -> &str {
-        &self.runtime_config.common.packages_ext
+    #[must_use]
+    pub fn packages_ext(&self) -> &str {
+        &self.common.packages_ext
     }
 
     /// Get bind IP address as a borrowed reference (optional)
     pub(crate) fn rpc_bind_ip(&self) -> Option<&str> {
-        self.runtime_config.common.rpc_bind_ip.as_deref()
+        self.common.rpc_bind_ip.as_deref()
     }
 
     /// Get daemon network configuration (`None` when `[network]` section is absent)
     pub(crate) fn network_config(&self) -> Option<&NetworkConfig> {
-        self.runtime_config.network.as_ref()
+        self.network.as_ref()
     }
 
     /// Get bridge networking config (`None` when `[network.bridge]` is absent).
@@ -257,192 +261,62 @@ impl Configuration {
     }
 
     /// Whether runtime package filesystem integrity is disabled.
-    pub(crate) fn runtime_integrity_disabled(&self) -> bool {
-        self.runtime_config.integrity.disable_runtime_integrity
+    #[must_use]
+    pub fn runtime_integrity_disabled(&self) -> bool {
+        self.integrity.disable_runtime_integrity
     }
 }
 
-/// Global static configuration storage (initialized once at startup)
-static RUNTIME_CONFIG: OnceLock<Configuration> = OnceLock::new();
-
-/// Initialize the configuration system
-///
-/// This function initializes the configuration by loading it from the specified path.
-///
-/// # Arguments
-///
-/// * `config_path` - Path to the configuration file.
-///
-/// # Panics
-///
-/// Panics if:
-/// - The configuration has already been initialized
-/// - The configuration file cannot be loaded
-/// - The configuration file is missing required fields
-///
-/// # Examples
-///
-/// ```ignore
-/// // Initialize with custom path
-/// init(std::path::Path::new("/custom/path/ssamd.toml"));
-/// ```
-pub fn init<P: AsRef<std::path::Path>>(config_path: P) {
-    let path = config_path.as_ref().to_path_buf();
-
-    let config = Configuration::load_from_path(&path).unwrap_or_else(|e| {
-        log::error!("Failed to load required configuration: {e}");
-        panic!(
-            "Configuration file is required. Please ensure {} exists with all required fields.",
-            path.display()
-        );
-    });
-
-    RUNTIME_CONFIG.set(config).unwrap_or_else(|_| {
-        panic!("Configuration has already been initialized");
-    });
-}
-
-/// Get a reference to the bundled packages directory path with static lifetime
-///
-/// # Panics
-///
-/// Panics if `init()` has not been called before this function.
-pub fn bundled_packages_dir() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .bundled_packages_dir()
-}
-
-/// Get a reference to the downloaded packages directory path with static lifetime
-///
-/// # Panics
-///
-/// Panics if `init()` has not been called before this function.
-pub fn downloaded_packages_dir() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .downloaded_packages_dir()
-}
-
-/// Get a reference to the packages data root directory path with static lifetime
-///
-/// Returns `&'static str` pointing to either the runtime config value or build-time config.
-///
-/// # Panics
-///
-/// Panics if the daemon configuration has not been initialized via [`init`].
-pub fn packages_data_root() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .packages_data_root()
-}
-
-/// Get a reference to the packages overlayfs root directory path with static lifetime
-///
-/// Returns `&'static str` pointing to either the runtime config value or build-time config.
-pub(crate) fn packages_overlayfs_root() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .packages_overlayfs_root()
-}
-
-/// Get a reference to the packages mount root directory path with static lifetime
-///
-/// Returns `&'static str` pointing to either the runtime config value or build-time config.
-///
-/// # Panics
-///
-/// Panics if the daemon configuration has not been initialized via [`init`].
-pub fn packages_mnt_root() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .packages_mnt_root()
-}
-
-/// Get a reference to the public key file path with static lifetime
-///
-/// Returns `&'static str` pointing to either the runtime config value or build-time config.
-pub(crate) fn public_key_file_path() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .public_key_file_path()
-}
-
-/// Get a reference to the packages cgroup with static lifetime
-///
-/// Returns `&'static str` pointing to either the runtime config value or build-time config.
-pub(crate) fn packages_cgroup() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .packages_cgroup()
-}
-
-/// Get a reference to the packages file extension with static lifetime
-///
-/// Returns `&'static str` pointing to either the runtime config value or build-time config.
-///
-/// # Panics
-///
-/// Panics if `init()` has not been called before this function.
-pub fn packages_ext() -> &'static str {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .packages_ext()
-}
-
-/// Get a reference to the bind IP address with static lifetime (optional)
-pub(crate) fn rpc_bind_ip() -> Option<&'static str> {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .rpc_bind_ip()
-}
-
-/// Get the bridge networking config (`None` when `[network.bridge]` is absent)
-///
-/// # Panics
-///
-/// Panics if `init()` has not been called before this function.
-pub(crate) fn bridge_config() -> Option<&'static BridgeConfig> {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .bridge_config()
-}
-
-/// Whether runtime package filesystem integrity is disabled.
-pub(crate) fn runtime_integrity_disabled() -> bool {
-    RUNTIME_CONFIG
-        .get()
-        .expect("Configuration not initialized. Call init() first.")
-        .runtime_integrity_disabled()
-}
-
-/// Ensures test configuration is initialized. Safe to call multiple times.
-/// This function is only available in test builds.
 #[cfg(test)]
-pub(crate) fn ensure_test_init() {
-    use std::sync::OnceLock;
-    static TEST_INIT: OnceLock<()> = OnceLock::new();
-    TEST_INIT.get_or_init(|| {
-        let config_path = default_config_path();
-        init(config_path);
-    });
-}
-
-#[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
+
+    pub(crate) fn test_configuration() -> Arc<Configuration> {
+        test_configuration_with_package_dirs(
+            Path::new("/var/lib/ssamd/bundled"),
+            Path::new("/var/lib/ssamd/downloaded"),
+        )
+    }
+
+    pub(crate) fn test_configuration_with_package_dirs(
+        bundled_dir: &Path,
+        downloaded_dir: &Path,
+    ) -> Arc<Configuration> {
+        Arc::new(Configuration::new(
+            Common {
+                bundled_packages_dir: bundled_dir
+                    .to_str()
+                    .expect("bundled test directory contains non-UTF-8 characters")
+                    .to_owned(),
+                downloaded_packages_dir: downloaded_dir
+                    .to_str()
+                    .expect("downloaded test directory contains non-UTF-8 characters")
+                    .to_owned(),
+                packages_data_root: "/var/lib/ssamd/data".to_owned(),
+                packages_overlayfs_root: String::new(),
+                packages_mnt_root: "/var/lib/ssamd/mnt".to_owned(),
+                public_key_file_path: "/var/lib/ssamd/keys/test.pub.key".to_owned(),
+                packages_cgroup: String::new(),
+                packages_ext: "ssam".to_owned(),
+                rpc_bind_ip: None,
+            },
+            Some(NetworkConfig {
+                bridge: Some(BridgeConfig {
+                    enabled: false,
+                    addr_pool: Some(PoolConfig {
+                        base: Some("172.20.0.0/16".to_owned()),
+                        size: Some(29),
+                    }),
+                }),
+            }),
+            IntegrityConfig {
+                disable_runtime_integrity: false,
+            },
+        ))
+    }
 
     /// Helper function to create a complete test configuration file
     fn create_test_config_file() -> NamedTempFile {
@@ -508,6 +382,26 @@ mod tests {
         assert_eq!(pool.base.as_deref(), Some("172.20.0.0/16"));
         assert_eq!(pool.size, Some(29));
         assert!(!config.runtime_integrity_disabled());
+    }
+
+    #[test]
+    fn test_missing_bundled_dir_defaults_to_empty() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config_content = r#"
+            [common]
+            downloaded_packages_dir = "/custom/packages"
+            packages_data_root = "/custom/data"
+            packages_overlayfs_root = "/custom/overlay"
+            packages_mnt_root = "/custom/mnt"
+            public_key_file_path = "/custom/key.pub"
+            packages_cgroup = "custom.slice"
+            packages_ext = "cpkg"
+        "#;
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+        assert!(config.bundled_packages_dir().is_empty());
     }
 
     #[test]
@@ -701,43 +595,6 @@ mod tests {
             config1.bundled_packages_dir(),
             config2.bundled_packages_dir()
         );
-    }
-
-    #[test]
-    fn test_global_config_uses_testconfig() {
-        ensure_test_init();
-
-        let base_dir = bundled_packages_dir();
-        let active_dir = downloaded_packages_dir();
-        let data_root = packages_data_root();
-        let overlayfs_root = packages_overlayfs_root();
-        let mnt_root = packages_mnt_root();
-        let key_path = public_key_file_path();
-        let cgroup = packages_cgroup();
-        let ext = packages_ext();
-        let runtime_integrity_disabled = runtime_integrity_disabled();
-
-        assert_eq!(base_dir, "/var/lib/ssamd/bundled");
-        assert_eq!(active_dir, "/var/lib/ssamd/downloaded");
-        assert_eq!(data_root, "/var/lib/ssamd/data");
-        assert_eq!(overlayfs_root, "");
-        assert_eq!(mnt_root, "/var/lib/ssamd/mnt");
-        assert_eq!(key_path, "/var/lib/ssamd/keys/test.pub.key");
-        assert_eq!(cgroup, "");
-        assert_eq!(ext, "ssam");
-        assert!(!runtime_integrity_disabled);
-    }
-
-    #[test]
-    fn test_default_config_path_in_test_mode() {
-        // Verify that default_config_path points to ssamd.toml in test environment
-        let path = default_config_path();
-        let expected = {
-            let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            manifest_dir.join("testdata/testconfig/ssamd.toml")
-        };
-        assert_eq!(path, expected);
-        assert!(path.exists(), "Test config file should exist at {path:?}");
     }
 
     #[test]

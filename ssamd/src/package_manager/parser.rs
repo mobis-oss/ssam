@@ -1,7 +1,6 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::configuration;
 use crate::package::PackagePhase;
 use crate::utils::{elapsed_ns, timeline_complete_at, timeline_start_at};
 use anyhow::Context as _;
@@ -12,15 +11,14 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio_stream::wrappers::ReadDirStream;
 
-pub(crate) fn has_package_extension(path: &Path) -> bool {
-    let packages_ext = configuration::packages_ext();
+pub(crate) fn has_package_extension(path: &Path, packages_ext: &str) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case(packages_ext))
 }
 
-pub(crate) fn is_package_file(path: impl AsRef<Path>) -> bool {
+pub(crate) fn is_package_file(path: impl AsRef<Path>, packages_ext: &str) -> bool {
     let path = path.as_ref();
-    path.is_file() && has_package_extension(path)
+    path.is_file() && has_package_extension(path, packages_ext)
 }
 
 async fn dir_stream(dir: &Path) -> Option<ReadDirStream> {
@@ -58,15 +56,17 @@ pub struct PackageParseResult {
 ///
 /// Returns an error when the provided path cannot be converted into a valid
 /// UTF-8 file name.
-pub(crate) fn parse_package_file(path: PathBuf) -> anyhow::Result<PackageParseResult> {
+pub(crate) fn parse_package_file(
+    path: PathBuf,
+    public_key_file_path: impl AsRef<Path>,
+) -> anyhow::Result<PackageParseResult> {
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow::anyhow!("Failed to get filename from path: {}", path.display()))?;
 
-    let public_key_path = configuration::public_key_file_path();
-    let package_file = PackageFile::from_file_verified(&path, public_key_path)
+    let package_file = PackageFile::from_file_verified(&path, public_key_file_path)
         .context("Failed to parse package file");
 
     let package_name = package_file.as_ref().map_or_else(
@@ -87,12 +87,17 @@ pub(crate) fn parse_package_file(path: PathBuf) -> anyhow::Result<PackageParseRe
 ///
 /// Returns an error when the provided path cannot be converted into a valid
 /// UTF-8 file name.
-pub async fn parse_package(path: impl AsRef<Path>) -> anyhow::Result<PackageParseResult> {
+pub async fn parse_package(
+    path: impl AsRef<Path>,
+    public_key_file_path: impl AsRef<Path>,
+) -> anyhow::Result<PackageParseResult> {
     let path = path.as_ref().to_path_buf();
+    let public_key_file_path = public_key_file_path.as_ref().to_path_buf();
     let start_ns = elapsed_ns();
-    let result = tokio::task::spawn_blocking(move || parse_package_file(path))
-        .await
-        .context("parse_package task panicked")??;
+    let result =
+        tokio::task::spawn_blocking(move || parse_package_file(path, &public_key_file_path))
+            .await
+            .context("parse_package task panicked")??;
     let complete_ns = elapsed_ns();
 
     timeline_start_at(&result.package_name, PackagePhase::Parse, start_ns);
@@ -102,19 +107,26 @@ pub async fn parse_package(path: impl AsRef<Path>) -> anyhow::Result<PackagePars
 }
 
 pub(crate) async fn parse_packages_from_dir(
-    package_dir: &Path,
+    package_dir: impl AsRef<Path>,
+    packages_ext: &str,
+    public_key_file_path: impl AsRef<Path>,
 ) -> Vec<anyhow::Result<PackageParseResult>> {
-    let Some(dir_entries) = dir_stream(package_dir).await else {
+    let Some(dir_entries) = dir_stream(package_dir.as_ref()).await else {
         return Vec::new();
     };
     let paths: Vec<PathBuf> = dir_entries
         .filter_map(|entry| async {
             let path = entry_to_opt_path(entry)?;
-            is_package_file(&path).then_some(path)
+            is_package_file(&path, packages_ext).then_some(path)
         })
         .collect()
         .await;
-    futures_util::future::join_all(paths.into_iter().map(parse_package)).await
+    futures_util::future::join_all(
+        paths
+            .into_iter()
+            .map(|path| parse_package(path, &public_key_file_path)),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -133,35 +145,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_package_file() {
-        crate::configuration::ensure_test_init();
         let tmp = tempfile::tempdir().unwrap();
-        let ext = configuration::packages_ext();
+        let ext = "ssam";
         let pkg = tmp.path().join(format!("foo.{ext}"));
         fs::write(&pkg, b"x").await.unwrap();
-        assert!(is_package_file(&pkg));
+        assert!(is_package_file(&pkg, ext));
 
         let other = tmp.path().join("bar.txt");
         fs::write(&other, b"x").await.unwrap();
-        assert!(!is_package_file(&other));
+        assert!(!is_package_file(&other, ext));
     }
 
     #[tokio::test]
     async fn test_is_package_file_case_insensitive() {
-        crate::configuration::ensure_test_init();
         let tmp = tempfile::tempdir().unwrap();
-        let ext = configuration::packages_ext();
+        let ext = "ssam";
         let pkg = tmp.path().join(format!("foo.{}", ext.to_uppercase()));
         fs::write(&pkg, b"x").await.unwrap();
-        assert!(is_package_file(&pkg));
+        assert!(is_package_file(&pkg, ext));
     }
 
     #[tokio::test]
     async fn test_parse_package_uses_from_path() {
-        crate::configuration::ensure_test_init();
         let path = tempfile::NamedTempFile::new().unwrap();
         let p = path.path().to_path_buf();
 
-        let res = parse_package(&p)
+        let res = parse_package(&p, "/nonexistent/test.pub.key")
             .await
             .expect("parse should return wrapper result");
         assert_eq!(res.path, p);
@@ -171,18 +180,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_packages_from_dir_filters_non_package_files() {
-        crate::configuration::ensure_test_init();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
-        let ext = configuration::packages_ext();
+        let ext = "ssam";
         let pkg = dir.join(format!("a.{ext}"));
         let other = dir.join("b.txt");
         fs::write(&pkg, b"x").await.unwrap();
         fs::write(&other, b"x").await.unwrap();
 
-        let results = parse_packages_from_dir(&dir).await;
+        let results =
+            parse_packages_from_dir(&dir, ext, Path::new("/nonexistent/test.pub.key")).await;
         assert_eq!(results.len(), 1);
-        let ext = configuration::packages_ext();
         let parsed = results[0].as_ref().expect("result should be present");
         assert!(parsed.path.ends_with(format!("a.{ext}")));
         assert!(parsed.package_file.is_err());
@@ -196,7 +204,8 @@ mod tests {
         // Remove directory to cause read_dir error
         std::fs::remove_dir_all(&dir).unwrap();
 
-        let results = parse_packages_from_dir(&dir).await;
+        let results =
+            parse_packages_from_dir(&dir, "ssam", Path::new("/nonexistent/test.pub.key")).await;
         // No packages should be found because read_dir failed
         assert!(results.is_empty());
     }
