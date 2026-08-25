@@ -113,9 +113,14 @@ First it **loads and verifies** the package, in order:
    package's **configuration data** against the configured public key. A
    mismatch stops here and marks the package `Broken`.
 
-Once verified, it **acquires the package's data volume** — its data directory and
-*ext4* Project Quota — then **builds the runtime environment**. These build steps
-run **concurrently wherever possible, and all must succeed (fail-closed)**:
+Once verified, it first **acquires the package's data volume** — it creates a
+per-package directory under [`packages_data_root`](../reference/daemon-config.md#packages_data_root), creates each path the package
+declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and,
+if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps
+usage with *ext4 Project Quota*.
+
+It then **builds the runtime environment**. These build steps run **concurrently
+wherever possible, and all must succeed (fail-closed)**:
 
 - **Establish dm-verity & mount read-only** — from the **signed dm-verity
   table**, set up a device-mapper verity target over the package filesystem
@@ -124,7 +129,7 @@ run **concurrently wherever possible, and all must succeed (fail-closed)**:
 - **Generate the OCI Runtime config** — translate the package's `runtime.json`, combined
   with the following, into the final *OCI Runtime config*:
   - rootfs location
-  - additional mounts (data directories, etc.)
+  - the acquired data directories bind-mounted onto the `data_dirs` paths
   - seccomp policy
   - cgroup placement
   - AppArmor confinement

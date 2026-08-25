@@ -68,7 +68,7 @@ flowchart LR
 | **네트워크** | 선택된 모드로 network namespace를 구성 | 커널 |
 
 설정 *방법* 은 가이드([Securing Containers](../guides/securing-containers.ko.md),
-[Networking](../guides/networking.ko.md))를 보세요.
+[Networking](../guides/networking.ko.md))를 참고하세요.
 
 ---
 
@@ -88,4 +88,4 @@ flowchart LR
 ---
 
 이 모든 것 아래에 놓인 무결성 보장 — SSAM이 실제로 구현하는 부분 — 은
-[Package Integrity](package-integrity.ko.md)를 보세요.
+[Package Integrity](package-integrity.ko.md)를 참고하세요.

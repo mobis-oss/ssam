@@ -9,7 +9,7 @@
 동작하는지 — 를 명세합니다. 패키지를 파싱·검증·재구성하는 도구를 위한 명세입니다.
 
 - **개념적** "패키지 안에 무엇이 들어있나" 개요는
-  [SSAM 패키지의 구조](../guides/wrapping-a-ssam.ko.md#anatomy-of-a-ssam-package)를 보세요.
+  [SSAM 패키지의 구조](../guides/wrapping-a-ssam.ko.md#anatomy-of-a-ssam-package)를 참고하세요.
 - 이 문서는 **포맷 버전 `0.6.0`** 을 기술합니다.
 
 ---
@@ -217,4 +217,4 @@ version data_block_size hash_block_size data_blocks hash_start_block algorithm r
 
 이 바이트들이 실제로 어떻게 생성·소비되는지는
 [SSAM 만들기 가이드](../guides/wrapping-a-ssam.ko.md)와
-[`ssam-wrap` 명령어 레퍼런스](../reference/ssam-wrap.ko.md)를 보세요.
+[`ssam-wrap` 명령어 레퍼런스](../reference/ssam-wrap.ko.md)를 참고하세요.

@@ -112,8 +112,11 @@ flowchart LR
    서명을 설정된 공개 키로 확인합니다. 불일치하면 여기서 멈추고 패키지를
    `Broken` 으로 표시합니다.
 
-검증되면 `ssamd` 는 패키지의 **데이터 볼륨을 확보**(데이터 디렉터리와 *ext4* Project Quota)한 뒤
-**실행 환경을 구성** 합니다. 이 구성 작업들은 가능한 경우 **동시에 실행되며,
+검증되면 `ssamd` 는 먼저 패키지의 **데이터 볼륨을 확보** 합니다 — [`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root)
+아래에 패키지별 디렉터리를 만들고, 패키지가 [`data_dirs`](../reference/package-config.ko.md#data_dirs) 로 선언한 각 경로를 그 안에
+생성하며, [`storage_limit`](../reference/package-config.ko.md#storage_limit) 이 있으면 *ext4 Project Quota* 로 용량을 제한합니다.
+
+이어서 **실행 환경을 구성** 합니다. 이 구성 작업들은 가능한 경우 **동시에 실행되며,
 전부 성공해야 합니다(fail-closed)**:
 
 - **dm-verity 확립 & 읽기 전용 마운트** — **서명된 dm-verity 테이블** 로 패키지
@@ -122,7 +125,7 @@ flowchart LR
 - **OCI Runtime config 생성** — 패키지의 `runtime.json` 과 다음 정보를 조합하여 최종
   *OCI Runtime config* 로 변환합니다:
   - rootfs 위치
-  - 데이터 디렉터리 등 추가 마운트 정보
+  - 확보한 데이터 디렉터리를 `data_dirs` 경로에 bind mount
   - seccomp 정책
   - cgroup 배치
   - AppArmor 격리

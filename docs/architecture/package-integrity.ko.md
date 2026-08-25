@@ -162,7 +162,7 @@ flowchart LR
 
 이 표는 **패키지 무결성과 진위** 를 겨냥한 위협을 다룹니다. 컨테이너 수준 위협
 (시스템 콜, 호스트 접근, 저장소, 네트워크)은
-[Container Isolation](container-isolation.ko.md)을 보세요.
+[Container Isolation](container-isolation.ko.md)을 참고하세요.
 
 | 위협 | 주요 완화 |
 | --- | --- |
@@ -177,4 +177,4 @@ flowchart LR
 컨테이너 수준 구속(*seccomp*, *AppArmor*, 자원 제한, 네트워킹)은
 [Container Isolation](container-isolation.ko.md)을, 서명과 검증의 바이트 수준
 세부는 [패키지 포맷 레퍼런스](package-format.ko.md#signature-and-integrity)를
-보세요.
+참고하세요.

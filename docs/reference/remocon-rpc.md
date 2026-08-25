@@ -7,6 +7,10 @@
 This document describes the Remocon API `ssamd` provides over *gRPC* to
 control packages.
 
+> For a step-by-step walkthrough of writing a gRPC client, see the
+> **[Writing a Remocon Client](../guides/writing-a-remocon-client.md)** guide.
+> This document is the API **reference**.
+
 ---
 
 ## Table of Contents

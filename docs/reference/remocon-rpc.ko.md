@@ -4,8 +4,10 @@
   <a href="remocon-rpc.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
 </p>
 
-이 문서는 패키지를 제어하기 위해 `ssamd` 가 *gRPC* 로 제공하는 Remocon API를
-설명합니다.
+이 문서는 패키지를 제어하기 위해 `ssamd` 가 *gRPC* 로 제공하는 Remocon API를 설명합니다.
+
+> gRPC 클라이언트 작성의 단계별 안내는 **[Remocon 클라이언트 작성](../guides/writing-a-remocon-client.ko.md)** 을
+> 참고하세요. 이 문서는 API **레퍼런스** 입니다.
 
 ---
 
@@ -65,7 +67,7 @@
 패키지는 이 단계에서 거부되어 설치되지 않습니다([제어 인터페이스 보안]
 (../architecture/package-integrity.ko.md#control-interface-security-rpc) 참조).
 
-같은 패키지의 현재 설치된 버전과 비교한 결과에 따라 결정됩니다:
+설치 허용 여부는 같은 패키지의 이미 설치된 버전과 비교해 결정됩니다:
 
 - **동일 버전** — `downgrade` 값과 무관하게 항상 거부됩니다.
 - **낮은 버전** — `downgrade: true` 를 지정하지 않으면 거부됩니다.
@@ -200,7 +202,7 @@
 | --- | --- | --- |
 | `result` | `string` | 결과를 기술하는 JSON 문서 |
 
-`result` string은 자유 형식 텍스트가 **아닙니다**. 고정된 스키마 —
+`result` 문자열은 자유 형식 텍스트가 **아닙니다**. 고정된 스키마 —
 [`remocon-responses.schema.json`](../../libssam/data/remocon-responses.schema.json)
 (JSON Schema, draft 2020-12) — 을 따르는 직렬화된 JSON 문서입니다:
 `schema_version` 과 `success` 는 항상 존재하고, 성공 시 `data` 가 RPC별
@@ -335,7 +337,7 @@ response data payload를 담으며, 실패 시엔 대신 `reason` 이 사람이 
 | `message` | `string` | 선택 | 상세, 보통 실패 시 |
 
 응답 자체의 `success` 와 개별 항목의 `success` 는 서로 독립적입니다 —
-응답은 `true` 를 보고하면서도 개별 항목은 `false` 를 보고할 수 있습니다.
+응답은 `true` 인데도 개별 항목은 `false` 일 수 있습니다.
 
 #### `installResponse`
 
