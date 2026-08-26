@@ -206,20 +206,20 @@ pub(crate) fn timeline_complete(pkg: &str, phase: impl Into<String>) {
 }
 
 pub(crate) fn timeline_start_at(pkg: &str, phase: impl Into<String>, duration_ns: u64) {
-    ssam_log::timeline!(libssam::remocon_schema::TimelineEvent {
+    ssam_log::timeline!(ssam_log::TimelineEvent {
         pkg: pkg.to_owned(),
         phase: phase.into(),
         duration_ns,
-        kind: libssam::remocon_schema::TimelineEventKind::Started,
+        kind: ssam_log::TimelineEventKind::Started,
     });
 }
 
 pub(crate) fn timeline_complete_at(pkg: &str, phase: impl Into<String>, duration_ns: u64) {
-    ssam_log::timeline!(libssam::remocon_schema::TimelineEvent {
+    ssam_log::timeline!(ssam_log::TimelineEvent {
         pkg: pkg.to_owned(),
         phase: phase.into(),
         duration_ns,
-        kind: libssam::remocon_schema::TimelineEventKind::Completed,
+        kind: ssam_log::TimelineEventKind::Completed,
     });
 }
 

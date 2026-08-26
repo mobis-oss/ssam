@@ -8,6 +8,6 @@ release-artifacts:
 		echo "[ERROR] Given release output directory '$(OUTPUT_DIR)' does not exist!"; \
 		exit 1; \
 	fi
-	@cp data/ssam.remocon.proto data/remocon-responses.schema.json $(OUTPUT_DIR)/
+	@cp data/ssam.remocon.proto $(OUTPUT_DIR)/
 
 .PHONY: all release-artifacts

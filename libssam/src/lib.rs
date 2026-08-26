@@ -1,32 +1,206 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod json_result;
 pub mod ssam_package;
 // tonic-generated code; pedantic lints suppressed
 #[allow(clippy::pedantic)]
 pub mod remocon {
     pub const CONTROL_PORT: u16 = 63737;
     tonic::include_proto!("ssamd.remocon");
+
+    use crate::ssam_package::ssam_pkg_info::PackageInfoResult;
+    use crate::ssam_package::ssam_pkg_metadata::PackageMetadata;
+
+    impl From<&PackageMetadata> for PackageData {
+        fn from(metadata: &PackageMetadata) -> Self {
+            Self {
+                package_name: metadata.get_package_name().to_owned(),
+                version: metadata.get_package_version().to_owned(),
+                description: metadata.package.description.clone(),
+            }
+        }
+    }
+
+    impl From<&PackageMetadata> for InstallPackageResponse {
+        fn from(metadata: &PackageMetadata) -> Self {
+            Self {
+                package_data: Some(metadata.into()),
+            }
+        }
+    }
+
+    impl From<PackageInfoResult> for PackageInfo {
+        fn from(result: PackageInfoResult) -> Self {
+            let base = Self {
+                success: true,
+                name: String::new(),
+                status: String::new(),
+                package_data: None,
+                quota: None,
+                package_path: String::new(),
+                error_summary: None,
+                error_details: None,
+            };
+
+            match result {
+                PackageInfoResult::Normal(info) => Self {
+                    name: info.package_name,
+                    status: info.package_status,
+                    package_data: Some((&info.package_metadata).into()),
+                    quota: Some(QuotaInformation {
+                        enabled: info.quota_info.enabled,
+                        limit: info.quota_info.limit,
+                    }),
+                    package_path: info.package_path,
+                    ..base
+                },
+                PackageInfoResult::Broken { filename, info } => Self {
+                    name: filename,
+                    status: "Broken".to_owned(),
+                    package_path: info.package_path,
+                    error_summary: Some(info.broken_info.summary),
+                    error_details: Some(info.broken_info.details),
+                    ..base
+                },
+                PackageInfoResult::NotFound { package_name } => Self {
+                    success: false,
+                    name: package_name.clone(),
+                    status: "NotFound".to_owned(),
+                    package_path: String::new(),
+                    error_summary: Some(format!("Package not found: {package_name}")),
+                    ..base
+                },
+            }
+        }
+    }
 }
 
-pub use json_result::{
-    InstallResponse, JsonResult, ListPackageInfoFromFilesResponse, PackageActionResult,
-    PackageData, PackageInfo, PackageInfoFromFile, PackageStatusEntry, TimelineResponse,
+pub use remocon::{
+    InspectLocalPackageResult, InstallPackageResponse, ListPackageInfoFromFilesRequest,
+    ListPackageInfoRequest, ListPackageInfoResponse, ListPackagesResponse, PackageActionResult,
+    PackageData, PackageInfo, PackageStatusEntry, QuotaInformation, StartPackageResponse,
+    StopPackageResponse, TimelineData, TimelineEvent, TimelineEventKind, WipePackageDataResponse,
 };
 pub use ssam_package::PackageParseError;
+
+#[cfg(test)]
+mod remocon_tests {
+    use super::*;
+    use crate::ssam_package::PackageFsVerityInfo;
+    use crate::ssam_package::ssam_pkg_info::{
+        BrokenPackageInfo, BrokenReason, PackageInfo as PackageStateInfo, PackageInfoResult,
+        QuotaInformation,
+    };
+    use crate::ssam_package::ssam_pkg_metadata::PackageMetadata;
+    use crate::superblock::FsType;
+
+    fn test_metadata() -> PackageMetadata {
+        PackageMetadata::new(
+            crate::config::PackageConfigSpec {
+                package: crate::config::Package {
+                    name: "test-pkg".to_owned(),
+                    version: "1.2.3".to_owned(),
+                    description: "Test package".to_owned(),
+                    autostart: Some(true),
+                },
+                container: crate::config::Container {
+                    storage_limit: Some(1024),
+                    data_dirs: Some("/app/data".to_owned()),
+                    security: crate::config::Security {
+                        seccomp: true,
+                        mac: true,
+                    },
+                    network: Some(crate::config::Network {
+                        mode: None,
+                        bridge: None,
+                    }),
+                },
+                service: crate::config::Service {
+                    service_type: "notify".to_owned(),
+                    bus_name: None,
+                    remain_after_exit: Some(false),
+                },
+            },
+            FsType::Erofs,
+            PackageFsVerityInfo {
+                data_size: 0,
+                hash_size: 0,
+                table_params: "1 4096 4096 100 101 sha256 mock_hash_root deadbeef".to_owned(),
+                hash_offset: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn converts_normal_package_info() {
+        let response = PackageInfo::from(PackageInfoResult::Normal(PackageStateInfo {
+            package_name: "test-pkg".to_owned(),
+            package_path: "/packages/test-pkg.ssam".to_owned(),
+            package_metadata: test_metadata(),
+            package_status: "Running".to_owned(),
+            quota_info: QuotaInformation {
+                enabled: true,
+                limit: 2048,
+            },
+        }));
+
+        assert!(response.success);
+        assert_eq!(response.name, "test-pkg");
+        assert_eq!(response.status, "Running");
+        assert_eq!(response.package_path, "/packages/test-pkg.ssam");
+        let package_data = response.package_data.expect("normal package data");
+        assert_eq!(package_data.package_name, "test-pkg");
+        assert_eq!(package_data.version, "1.2.3");
+        assert_eq!(package_data.description, "Test package");
+        let quota = response.quota.expect("normal package quota");
+        assert!(quota.enabled);
+        assert_eq!(quota.limit, 2048);
+    }
+
+    #[test]
+    fn converts_not_found_package_info() {
+        let response = PackageInfo::from(PackageInfoResult::NotFound {
+            package_name: "missing-pkg".to_owned(),
+        });
+
+        assert!(!response.success);
+        assert_eq!(response.name, "missing-pkg");
+        assert_eq!(response.status, "NotFound");
+        assert!(
+            response
+                .error_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("missing-pkg"))
+        );
+    }
+
+    #[test]
+    fn converts_broken_package_info() {
+        let response = PackageInfo::from(PackageInfoResult::Broken {
+            filename: "broken-pkg".to_owned(),
+            info: BrokenPackageInfo {
+                package_path: "/packages/broken-pkg.ssam".to_owned(),
+                broken_info: BrokenReason::new("Parse error", "Invalid package metadata"),
+            },
+        });
+
+        assert!(response.success);
+        assert_eq!(response.name, "broken-pkg");
+        assert_eq!(response.status, "Broken");
+        assert_eq!(response.package_path, "/packages/broken-pkg.ssam");
+        assert!(response.package_data.is_none());
+        assert_eq!(response.error_summary.as_deref(), Some("Parse error"));
+        assert_eq!(
+            response.error_details.as_deref(),
+            Some("Invalid package metadata")
+        );
+    }
+}
 
 /// Seccomp policy module providing default security profile for containers.
 pub mod seccomp {
     include!(concat!(env!("OUT_DIR"), "/default_seccomp_policy.rs"));
-}
-
-/// JSON-RPC response types generated from remocon-responses.schema.json.
-/// Provides schema version constant and response payload types.
-// typify-generated code; clippy lints suppressed
-#[allow(clippy::pedantic, clippy::all)]
-pub mod remocon_schema {
-    include!(concat!(env!("OUT_DIR"), "/remocon_schema_types.rs"));
 }
 
 pub mod config {

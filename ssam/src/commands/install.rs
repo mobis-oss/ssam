@@ -10,7 +10,7 @@ use tonic::async_trait;
 
 use crate::client::Client;
 use crate::commands::CommandHandler;
-use libssam::{InstallResponse, JsonResult};
+use libssam::InstallPackageResponse;
 
 pub static COMMAND: Install = Install;
 
@@ -97,15 +97,15 @@ impl CommandHandler for Install {
         }
 
         writeln!(stdout, "Installing package: {processed_path}")?;
-        let json_result = client
+        let response = client
             .install_package(&processed_path, downgrade, remove_data)
             .await?;
-        let InstallResponse { metadata } =
-            JsonResult::<InstallResponse>::parse_response(&json_result)?;
+        let InstallPackageResponse { package_data } = response;
+        let package_data = package_data.context("Install response missing package data")?;
         writeln!(
             stdout,
             "Installed: {} ({})",
-            metadata.package_name, metadata.version
+            package_data.package_name, package_data.version
         )?;
         Ok(())
     }
@@ -116,7 +116,6 @@ mod tests {
     use super::*;
     use crate::client::MockClient;
     use crate::commands::CommandHandler;
-    use libssam::remocon_schema::JSON_RESULT_SCHEMA_VERSION;
     use std::fs;
     use tempfile::TempDir;
 
@@ -190,11 +189,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_install_missing_metadata_error() {
+    async fn test_install_missing_package_data_error() {
         let mut client = MockClient::new_success();
-        client.install_package_result = Some(Ok(format!(
-            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":true,"data":{{}}}}"#
-        )));
+        client.install_package_result = Some(Ok(InstallPackageResponse { package_data: None }));
 
         let handler = Install;
         let cmd = handler.command();
@@ -210,7 +207,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Failed to parse JSON response")
+                .contains("missing package data")
         );
     }
 

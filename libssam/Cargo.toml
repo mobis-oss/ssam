@@ -36,12 +36,5 @@ rustix = { workspace = true, features = ["fs"] }
 
 [build-dependencies]
 anyhow.workspace = true
-quote.workspace = true
-syn.workspace = true
-proc-macro2.workspace = true
-itertools.workspace = true
-tonic-build = "0.14"
 serde_json.workspace = true
-typify = "0.7.0"
-schemars = "0.8.22"
 tonic-prost-build = "0.14"

@@ -18,7 +18,7 @@
 3. [Methods](#methods)
 4. [Request messages](#request-messages)
 5. [Response messages](#response-messages)
-6. [Response data payload](#response-data-payload)
+6. [Response data types](#response-data-types)
 7. [Examples](#examples)
 
 ---
@@ -37,17 +37,17 @@
 
 ## API at a Glance
 
-| Method | Request | Response | Response data payload |
+| Method | Request | Response | Response data type |
 | --- | --- | --- | --- |
-| [`InstallPackage`](#installpackage) | [`InstallPackageRequest`](#installpackagerequest) | [`InstallPackageResponse`](#installpackageresponse) | [`installResponse`](#installresponse) |
-| [`RemovePackage`](#removepackage) | [`RemovePackageRequest`](#removepackagerequest) | [`RemovePackageResponse`](#removepackageresponse) | *(없음)* |
-| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#startpackageresponse) | [`packageActionResult`](#packageactionresult) 배열 |
-| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#stoppackageresponse) | [`packageActionResult`](#packageactionresult) 배열 |
-| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#wipepackagedataresponse) | [`packageActionResult`](#packageactionresult) 배열 |
-| [`ListPackages`](#listpackages) | `google.protobuf.Empty` | [`ListPackagesResponse`](#listpackagesresponse) | [`packageStatusEntry`](#packagestatusentry) 배열 |
-| [`ListPackageInfo`](#listpackageinfo) | [`ListPackageInfoRequest`](#listpackageinforequest) | [`ListPackageInfoResponse`](#listpackageinforesponse) | [`packageInfo`](#packageinfo) 배열 |
-| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest) | [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse) | [`packageInfoFromFile`](#packageinfofromfile-data-payload-item) 배열 |
-| [`GetTimelineInfo`](#gettimelineinfo) | `google.protobuf.Empty` | [`GetTimelineInfoResponse`](#gettimelineinforesponse) | [`timelineData`](#timelinedata) |
+| [`InstallPackage`](#installpackage) | [`InstallPackageRequest`](#installpackagerequest) | [`InstallPackageResponse`](#installpackageresponse) | [`PackageData`](#packagedata) |
+| [`RemovePackage`](#removepackage) | [`RemovePackageRequest`](#removepackagerequest) | `google.protobuf.Empty` | *(없음)* |
+| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#startpackageresponse) | array of [`PackageActionResult`](#packageactionresult) |
+| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#stoppackageresponse) | array of [`PackageActionResult`](#packageactionresult) |
+| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#wipepackagedataresponse) | array of [`PackageActionResult`](#packageactionresult) |
+| [`ListPackages`](#listpackages) | `google.protobuf.Empty` | [`ListPackagesResponse`](#listpackagesresponse) | array of [`PackageStatusEntry`](#packagestatusentry) |
+| [`ListPackageInfo`](#listpackageinfo) | [`ListPackageInfoRequest`](#listpackageinforequest) | [`ListPackageInfoResponse`](#listpackageinforesponse) | array of [`PackageInfo`](#packageinfo) |
+| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest) | [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse) | array of [`InspectLocalPackageResult`](#inspectlocalpackageresult) |
+| [`GetTimelineInfo`](#gettimelineinfo) | `google.protobuf.Empty` | [`TimelineData`](#timelinedata) | [`TimelineData`](#timelinedata) |
 
 ---
 
@@ -59,7 +59,7 @@
 
 - **Request:** [`InstallPackageRequest`](#installpackagerequest)
 - **Response:** [`InstallPackageResponse`](#installpackageresponse)
-- **Response data payload:** [`installResponse`](#installresponse)
+- **Response data type:** [`PackageData`](#packagedata)
 
 설치는 `downgrade` 여부나 호출 주체와 무관하게 항상 서명·무결성 검사를 거칩니다
 ([패키지 무결성](../architecture/package-integrity.ko.md) 참조). 서명 검증에 실패한
@@ -78,8 +78,11 @@
 설치된 패키지 제거.
 
 - **Request:** [`RemovePackageRequest`](#removepackagerequest)
-- **Response:** [`RemovePackageResponse`](#removepackageresponse)
-- **Response data payload:** *(없음)*
+- **Response:** `google.protobuf.Empty`
+- **Response data type:** *(없음)*
+
+패키지가 없으면 gRPC `NotFound`를 반환하며, 그 외 제거 오류는 `Internal`을
+반환합니다.
 
 ### `StartPackage`
 
@@ -87,7 +90,7 @@
 
 - **Request:** [`StartPackageRequest`](#startpackagerequest--stoppackagerequest)
 - **Response:** [`StartPackageResponse`](#startpackageresponse)
-- **Response data payload:** [`packageActionResult`](#packageactionresult) 배열
+- **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `StopPackage`
 
@@ -95,7 +98,7 @@
 
 - **Request:** [`StopPackageRequest`](#startpackagerequest--stoppackagerequest)
 - **Response:** [`StopPackageResponse`](#stoppackageresponse)
-- **Response data payload:** [`packageActionResult`](#packageactionresult) 배열
+- **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `WipePackageData`
 
@@ -103,15 +106,15 @@
 
 - **Request:** [`WipePackageDataRequest`](#wipepackagedatarequest)
 - **Response:** [`WipePackageDataResponse`](#wipepackagedataresponse)
-- **Response data payload:** [`packageActionResult`](#packageactionresult) 배열
+- **Response data type:** array of [`PackageActionResult`](#packageactionresult)
 
 ### `ListPackages`
 
-설치된 패키지와 상태 목록.
+설치된 패키지와 상태 목록. `Broken` 항목도 포함합니다.
 
 - **Request:** `google.protobuf.Empty`
 - **Response:** [`ListPackagesResponse`](#listpackagesresponse)
-- **Response data payload:** [`packageStatusEntry`](#packagestatusentry) 배열
+- **Response data type:** array of [`PackageStatusEntry`](#packagestatusentry)
 
 ### `ListPackageInfo`
 
@@ -120,24 +123,25 @@
 
 - **Request:** [`ListPackageInfoRequest`](#listpackageinforequest)
 - **Response:** [`ListPackageInfoResponse`](#listpackageinforesponse)
-- **Response data payload:** [`packageInfo`](#packageinfo) 배열
+- **Response data type:** array of [`PackageInfo`](#packageinfo)
 
 ### `ListPackageInfoFromFiles`
 
-설치되지 않은 패키지 파일의 상세 정보. 요청한 경로 순서대로 각 파일에 대한 결과를
-반환합니다.
+설치하지 않고 SSAM 패키지 파일을 조회합니다. 경로 목록이 비어 있으면 빈 결과를
+반환합니다. 요청한 경로 순서대로 각 파일에 대한 결과를 반환하며, 상대 경로나
+검사 실패는 해당 결과의 `success=false`로 표시합니다.
 
 - **Request:** [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest)
 - **Response:** [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse)
-- **Response data payload:** [`packageInfoFromFile`](#packageinfofromfile-data-payload-item) 배열
+- **Response data type:** array of [`InspectLocalPackageResult`](#inspectlocalpackageresult)
 
 ### `GetTimelineInfo`
 
 데몬 타임라인 / 가동 시간 정보.
 
 - **Request:** `google.protobuf.Empty`
-- **Response:** [`GetTimelineInfoResponse`](#gettimelineinforesponse)
-- **Response data payload:** [`timelineData`](#timelinedata)
+- **Response:** [`TimelineData`](#timelinedata)
+- **Response data type:** [`TimelineData`](#timelinedata)
 
 ---
 
@@ -183,106 +187,44 @@
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
-| `package_paths` | `repeated string` | 설치 없이 조회할 SSAM 패키지 파일 경로. 빈 목록이면 빈 결과를 반환합니다 |
+| `package_paths` | `repeated string` | 설치 없이 조회할 SSAM 패키지 파일 절대 경로. 빈 목록이면 빈 결과를 반환합니다 |
 
 ---
 
 ## Response messages
 
-모든 응답 메시지는 동일한 구조를 공유합니다:
+각 RPC의 response payload는 선언된 protobuf message입니다.
 
-| 필드 | 타입 | 의미 |
+각 응답 message는 선언된 protobuf 타입이며, 다음 필드를 반환합니다.
+
+| RPC | Response | Fields |
 | --- | --- | --- |
-| `result` | `string` | 결과를 기술하는 JSON 문서 |
-
-`result` 문자열은 자유 형식 텍스트가 **아닙니다**. 고정된 스키마 —
-[`remocon-responses.schema.json`](../../libssam/data/remocon-responses.schema.json)
-(JSON Schema, draft 2020-12) — 을 따르는 직렬화된 JSON 문서입니다:
-`schema_version` 과 `success` 는 항상 존재하고, 성공 시 `data` 가 RPC별
-response data payload를 담으며, 실패 시엔 대신 `reason` 이 사람이 읽을 수
-있는 메시지를 담습니다. `data` 와 `reason` 은 상호 배타적입니다.
-
-| 필드 | 타입 | 존재 | 의미 |
-| --- | --- | --- | --- |
-| `schema_version` | `string` | 항상 | 응답 스키마 버전. |
-| `success` | `bool` | 항상 | 성공이면 `true`, 실패면 `false`. |
-| `data` | [resp data payload](#response-data-payload) | 성공 시 | 반환할 데이터가 없으면 생략(예: `RemovePackage`); RPC별 정확한 형태는 [API at a Glance](#api-at-a-glance) 참조. |
-| `reason` | `string` | 실패 시 | 사람이 읽을 수 있는 실패 메시지. |
-
-성공과 실패 각각의 예:
-
-```json
-{ "schema_version": "2", "success": true, "data": { "package_name": "navi", "status": "Running" } }
-```
-
-```json
-{ "schema_version": "2", "success": false, "reason": "Package not found" }
-```
-
-각 응답 메시지는 이 구조를 공유하는 별개의 proto 메시지이며, 자신만의
-메서드가 반환합니다.
-
-### `InstallPackageResponse`
-
-- **Returned by:** [`InstallPackage`](#installpackage)
-- **Response data payload:** [`installResponse`](#installresponse)
-
-### `RemovePackageResponse`
-
-- **Returned by:** [`RemovePackage`](#removepackage)
-- **Response data payload:** *(없음)*
-
-### `StartPackageResponse`
-
-- **Returned by:** [`StartPackage`](#startpackage)
-- **Response data payload:** [`packageActionResult`](#packageactionresult) 배열
-
-### `StopPackageResponse`
-
-- **Returned by:** [`StopPackage`](#stoppackage)
-- **Response data payload:** [`packageActionResult`](#packageactionresult) 배열
-
-### `WipePackageDataResponse`
-
-- **Returned by:** [`WipePackageData`](#wipepackagedata)
-- **Response data payload:** [`packageActionResult`](#packageactionresult) 배열
-
-### `ListPackagesResponse`
-
-- **Returned by:** [`ListPackages`](#listpackages)
-- **Response data payload:** [`packageStatusEntry`](#packagestatusentry) 배열
-
-### `ListPackageInfoResponse`
-
-- **Returned by:** [`ListPackageInfo`](#listpackageinfo)
-- **Response data payload:** [`packageInfo`](#packageinfo) 배열
-
-### `ListPackageInfoFromFilesResponse`
-
-- **Returned by:** [`ListPackageInfoFromFiles`](#listpackageinfofromfiles)
-- **Response data payload:** [`packageInfoFromFile`](#packageinfofromfile-data-payload-item) 배열
-
-### `GetTimelineInfoResponse`
-
-- **Returned by:** [`GetTimelineInfo`](#gettimelineinfo)
-- **Response data payload:** [`timelineData`](#timelinedata)
+| `InstallPackage` | `InstallPackageResponse` | `package_data` |
+| `RemovePackage` | `google.protobuf.Empty` | *(없음)* |
+| `StartPackage` | `StartPackageResponse` | `results` |
+| `StopPackage` | `StopPackageResponse` | `results` |
+| `WipePackageData` | `WipePackageDataResponse` | `results` |
+| `ListPackages` | `ListPackagesResponse` | `entries` |
+| `ListPackageInfo` | `ListPackageInfoResponse` | `packages`: `repeated PackageInfo` |
+| `ListPackageInfoFromFiles` | `ListPackageInfoFromFilesResponse` | `packages`: `repeated InspectLocalPackageResult` |
+| `GetTimelineInfo` | `TimelineData` | `events`, `ssamd_uptime` |
 
 ---
 
-## Response data payload
+## Response data types
 
-### Objects
+응답에는 다음 protobuf message가 사용됩니다.
 
-#### `packageStatusEntry`
+### `PackageStatusEntry`
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
 | `package_name` | `string` | 설치된 패키지 이름 |
 | `status` | `string` | 패키지 상태(`Ready`, `Running`, `Broken`, …) — 데몬의 [패키지 상태](../architecture/execution.ko.md#package-state-machine)에 대응 |
 
-#### `packageData`
+### `PackageData`
 
-핵심 패키지 메타데이터.
+응답에서 반환하는 패키지 데이터입니다.
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
@@ -290,31 +232,31 @@ response data payload를 담으며, 실패 시엔 대신 `reason` 이 사람이 
 | `version` | `string` | 패키지 버전 |
 | `description` | `string` | 패키지 설명 |
 
-#### `packageInfo`
+### `PackageInfo`
 
-`ListPackageInfo`가 요청한 각 패키지에 대해 반환합니다. `status`는 패키지의
-단일 상태값이며, `success`는 요청한 설치 패키지를 찾았고 패키지 정보가 반환되었는지를
-나타냅니다.
+`ListPackageInfo`가 요청한 각 패키지에 대해 반환합니다. `status`가 패키지의
+단일 상태값이며, 패키지가 없거나 조회 오류이면 `success=false`입니다. `Broken`
+항목은 `success=true`와 오류 field를 함께 반환합니다.
 
 | 필드 | 타입 | 존재 | 의미 |
 | --- | --- | --- | --- |
-| `success` | `bool` | 항상 | 요청한 설치 패키지를 찾았고 패키지 정보가 반환되었는지 여부 |
+| `success` | `bool` | 항상 | 패키지 조회 성공 여부 |
 | `name` | `string` | 항상 | 패키지 이름 |
-| `status` | `string` | 항상 | 패키지 상태(`Ready`, `Running`, `Broken`, `NotFound`) |
-| `package_path` | `string` | 항상 | 디바이스상의 패키지 경로 |
-| `metadata` | [`packageData`](#packagedata) \| `null` | 선택 | 정상 패키지일 때 존재 |
-| `quota` | [`quotaInformation`](#quotainformation) \| `null` | 선택 | 알려진 경우 데이터 쿼터 한도 |
-| `error_summary` | `string` \| `null` | 선택 | 표시용 조회 또는 package-load 오류 |
-| `error_details` | `string` \| `null` | 선택 | Broken 항목과 조회 오류의 debug 형식 선택적 진단 정보 |
+| `status` | `string` | 항상 | 패키지 상태 |
+| `package_path` | `string` | 항상 | 디바이스상의 패키지 경로. 사용할 수 없으면 빈 값 |
+| `package_data` | `PackageData` | 선택 | 정상 패키지의 패키지 데이터 |
+| `quota` | `QuotaInformation` | 선택 | 정상 패키지의 데이터 쿼터 한도 |
+| `error_summary` | `string` | 선택 | 표시용 조회 또는 package-load 오류 |
+| `error_details` | `string` | 선택 | Broken 항목과 조회 오류의 자세한 오류 정보 |
 
-#### `quotaInformation`
+### `QuotaInformation`
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
 | `enabled` | `bool` | 데이터 쿼터 강제 여부 |
-| `limit` | `integer` | 쿼터 한도(바이트, ≥ 0) |
+| `limit` | `uint64` | 쿼터 한도(바이트) |
 
-#### `packageActionResult`
+### `PackageActionResult`
 
 일괄 작업(`StartPackage`, `StopPackage`, `WipePackageData`)의 패키지별 결과. 이
 작업들은 패키지당 한 항목씩 담은 **배열** 을 반환합니다.
@@ -325,104 +267,123 @@ response data payload를 담으며, 실패 시엔 대신 `reason` 이 사람이 
 | `success` | `bool` | 항상 | 해당 패키지에 대한 작업 성공 여부 |
 | `message` | `string` | 선택 | 상세, 보통 실패 시 |
 
-응답 자체의 `success` 와 개별 항목의 `success` 는 서로 독립적입니다 —
-응답은 `true` 인데도 개별 항목은 `false` 일 수 있습니다.
-
-#### `installResponse`
+### `InstallPackageResponse`
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
-| `metadata` | [`packageData`](#packagedata) | 새로 설치된 패키지의 메타데이터 |
+| `package_data` | `PackageData` | 새로 설치된 패키지의 패키지 데이터 |
 
-#### `packageInfoFromFile` (data payload item)
+### `InspectLocalPackageResult`
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
-| `success` | `bool` | package file 검사 성공 여부 |
-| `metadata` | [`packageData`](#packagedata) \| `null` | 정상 package file에서 읽은 메타데이터 |
+| `package_data` | `PackageData` | SSAM 패키지 파일에서 읽은 패키지 데이터 |
 | `package_path` | `string` | 조회한 경로 |
-| `error_summary` | `string` \| `null` | 표시용 검사 오류 |
-| `error_details` | `string` \| `null` | debug 형식의 선택적 진단 정보 |
+| `success` | `bool` | 패키지 검사 성공 여부 |
+| `error_summary` | `string` | 표시용 검사 오류 |
+| `error_details` | `string` | 선택적 자세한 오류 정보 |
 
-#### `timelineData`
+### `TimelineData`
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
-| `events` | [`timelineEvent`](#timelineevent) 배열 | 기록된 수명주기 이벤트 |
-| `ssamd_uptime` | [`duration`](#duration) | 데몬 가동 시간 |
+| `events` | `repeated TimelineEvent` | 기록된 수명주기 이벤트 |
+| `ssamd_uptime` | `google.protobuf.Duration` | `ssamd` 시작 시점의 시스템 가동 시간 |
 
-#### `timelineEvent`
+### `TimelineEvent`
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
 | `pkg` | `string` | 패키지 이름 |
 | `phase` | `string` | 수명주기 단계 |
-| `duration_ns` | `integer` | 단계 소요 시간(나노초, ≥ 0) |
-| `kind` | `string` | `started` 또는 `completed` |
+| `duration_ns` | `uint64` | 단계 소요 시간(나노초) |
+| `kind` | `TimelineEventKind` | 이벤트 종류 |
 
-#### `duration`
+### `TimelineEventKind`
 
-표준 Rust `Duration` 직렬화.
+| 값 | 번호 | 의미 |
+| --- | --- | --- |
+| `TIMELINE_EVENT_KIND_UNSPECIFIED` | `0` | 종류가 지정되지 않음 |
+| `STARTED` | `1` | 단계 시작 |
+| `COMPLETED` | `2` | 단계 완료 |
+
+### `google.protobuf.Duration`
 
 | 필드 | 타입 | 의미 |
 | --- | --- | --- |
-| `secs` | `integer` | 초(≥ 0) |
-| `nanos` | `integer` | 초 미만 나노초(0–999 999 999) |
+| `seconds` | `int64` | 초 |
+| `nanos` | `int32` | 초 미만 나노초 |
 
 ---
 
 ## Examples
 
-`ListPackageInfo` — 성공. `data` 까지 완전히 채워진 전체 응답:
+다음은 실제 wire 형식이 아닌 protobuf text-format pseudo-output입니다.
 
-```json
-{
-  "schema_version": "2",
-  "success": true,
-  "data": [
-    {
-    "success": true,
-    "name": "navi",
-    "status": "Running",
-    "package_path": "/var/lib/ssam/packages/navi",
-    "metadata": {
-      "package_name": "navi",
-      "version": "1.4.0",
-      "description": "Navigation service"
-    },
-    "quota": {
-      "enabled": true,
-      "limit": 536870912
-    },
-    "error_summary": null,
-    "error_details": null
-    }
-  ]
+`ListPackageInfo` — 성공:
+
+```text
+packages {
+  success: true
+  name: "navi"
+  status: "Running"
+  package_path: "/var/lib/ssam/packages/navi"
+  package_data {
+    package_name: "navi"
+    version: "1.4.0"
+    description: "Navigation service"
+  }
+  quota {
+    enabled: true
+    limit: 536870912
+  }
 }
 ```
 
-`ListPackages` — 성공:
+`StartPackage`에서 일부 패키지가 실패한 경우:
 
-```json
-{
-  "schema_version": "2",
-  "success": true,
-  "data": [
-    { "package_name": "navi", "status": "Running" },
-    { "package_name": "cluster", "status": "Ready" }
-  ]
+```text
+results {
+  package_name: "navi"
+  success: true
+}
+results {
+  package_name: "cluster"
+  success: false
+  message: "already running"
 }
 ```
 
-`StartPackage` — 호출 자체는 성공이나 일부 패키지가 실패:
+`GetTimelineInfo` — 성공:
 
-```json
-{
-  "schema_version": "2",
-  "success": true,
-  "data": [
-    { "package_name": "navi", "success": true },
-    { "package_name": "cluster", "success": false, "message": "already running" }
-  ]
+```text
+events {
+  pkg: "navi"
+  phase: "mount"
+  duration_ns: 42000000
+  kind: COMPLETED
+}
+ssamd_uptime {
+  seconds: 1234
+  nanos: 500000000
+}
+```
+
+tonic을 사용하는 Rust에서는 typed response와 optional message field를 처리합니다:
+
+```rust
+let response = client.list_package_info(request).await?.into_inner();
+let package_info = response
+    .packages
+    .first()
+    .context("response missing package info")?;
+if package_info.success {
+    let package_data = package_info
+        .package_data
+        .context("response missing package data")?;
+} else if let Some(summary) = package_info.error_summary.as_deref() {
+    println!(
+        "failed: {summary}"
+    );
 }
 ```

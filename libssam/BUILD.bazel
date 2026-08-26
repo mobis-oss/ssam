@@ -8,7 +8,6 @@ cargo_build_script(
     srcs = ["build.rs"],
     data = [
         "data/default_seccomp.json",
-        "data/remocon-responses.schema.json",
         "data/ssam.remocon.proto",
     ],
     build_script_env = {
@@ -16,15 +15,8 @@ cargo_build_script(
     },
     deps = [
         "@crates//:anyhow",
-        "@crates//:itertools",
-        "@crates//:proc-macro2",
-        "@crates//:quote",
-        "@crates//:schemars",
         "@crates//:serde_json",
-        "@crates//:syn",
-        "@crates//:tonic-build",
         "@crates//:tonic-prost-build",
-        "@crates//:typify",
     ],
     tools = [
         "//bazel/tools:protoc",
@@ -48,6 +40,7 @@ rust_library(
         "@crates//:log",
         "@crates//:oci-spec",
         "@crates//:prost",
+        "@crates//:prost-types",
         "@crates//:rsa",
         "@crates//:semver",
         "@crates//:serde",

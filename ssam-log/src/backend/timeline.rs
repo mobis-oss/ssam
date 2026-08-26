@@ -6,13 +6,28 @@ use std::thread::{self, JoinHandle};
 
 use anyhow::Context;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TimelineEvent {
+    pub pkg: String,
+    pub phase: String,
+    pub duration_ns: u64,
+    pub kind: TimelineEventKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineEventKind {
+    Started,
+    Completed,
+}
+
 // ---------------------------------------------------------------------------
 // Internal channel types
 // ---------------------------------------------------------------------------
 
 enum TimelineCommand {
-    Record(serde_json::Value),
-    GetAll(mpsc::SyncSender<Vec<serde_json::Value>>),
+    Record(TimelineEvent),
+    GetAll(mpsc::SyncSender<Vec<TimelineEvent>>),
 }
 
 // ---------------------------------------------------------------------------
@@ -41,21 +56,21 @@ impl TimelineBackend {
     }
 
     #[must_use]
-    pub fn get_all(&self) -> Vec<serde_json::Value> {
+    pub fn get_all(&self) -> Vec<TimelineEvent> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         if self.sender.send(TimelineCommand::GetAll(reply_tx)).is_err() {
             return Vec::new();
         }
-        if let Ok(map) = reply_rx.recv() {
-            map
+        if let Ok(events) = reply_rx.recv() {
+            events
         } else {
-            log::warn!("timeline: accumulate thread is gone; returning empty map");
+            log::warn!("timeline: accumulate thread is gone; returning empty list");
             Vec::new()
         }
     }
 
-    fn record_event(&self, value: serde_json::Value) {
-        if self.sender.send(TimelineCommand::Record(value)).is_err() {
+    pub(crate) fn record_event(&self, event: TimelineEvent) {
+        if self.sender.send(TimelineCommand::Record(event)).is_err() {
             log::warn!("timeline: accumulate thread is gone; event dropped");
         }
     }
@@ -71,8 +86,9 @@ impl log::Log for TimelineBackend {
             return;
         };
 
-        match serde_json::to_value(value) {
-            Ok(value) => self.record_event(value),
+        let event = serde_json::to_value(value).and_then(serde_json::from_value);
+        match event {
+            Ok(event) => self.record_event(event),
             Err(e) => log::warn!("timeline: invalid event field: {e}"),
         }
     }
@@ -85,13 +101,11 @@ impl log::Log for TimelineBackend {
 // ---------------------------------------------------------------------------
 
 fn accumulate(rx: &mpsc::Receiver<TimelineCommand>) {
-    let mut store: Vec<serde_json::Value> = Vec::new();
+    let mut store = Vec::new();
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            TimelineCommand::Record(value) => {
-                store.push(value);
-            }
+            TimelineCommand::Record(event) => store.push(event),
             TimelineCommand::GetAll(reply_tx) => {
                 // Ignore send failure — caller may have timed out.
                 let _ = reply_tx.send(store.clone());
@@ -108,70 +122,43 @@ fn accumulate(rx: &mpsc::Receiver<TimelineCommand>) {
 mod tests {
     use super::*;
 
-    fn make_event_value(pkg: &str, phase: &str, duration_ns: u64, kind: &str) -> serde_json::Value {
-        serde_json::json!({
-            "pkg": pkg,
-            "phase": phase,
-            "duration_ns": duration_ns,
-            "kind": kind,
-        })
-    }
-
-    fn log_to_backend(
-        backend: &TimelineBackend,
+    fn make_event(
         pkg: &str,
         phase: &str,
         duration_ns: u64,
-        kind: &str,
-    ) {
-        backend.record_event(make_event_value(pkg, phase, duration_ns, kind));
+        kind: TimelineEventKind,
+    ) -> TimelineEvent {
+        TimelineEvent {
+            pkg: pkg.to_owned(),
+            phase: phase.to_owned(),
+            duration_ns,
+            kind,
+        }
     }
 
     #[test]
-    fn accumulates_started() {
+    fn accumulates_events() {
         let backend = TimelineBackend::new().unwrap();
-        log_to_backend(&backend, "pkg-a", "mount", 1_000_000, "started");
-        let events = backend.get_all();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["pkg"], "pkg-a");
-        assert_eq!(events[0]["phase"], "mount");
-        assert_eq!(events[0]["kind"], "started");
-        assert_eq!(events[0]["duration_ns"], 1_000_000u64);
-    }
+        let started = make_event("pkg-a", "mount", 1_000_000, TimelineEventKind::Started);
+        let completed = make_event("pkg-b", "setup", 2_000_000, TimelineEventKind::Completed);
+        backend.record_event(started.clone());
+        backend.record_event(completed.clone());
 
-    #[test]
-    fn accumulates_completed() {
-        let backend = TimelineBackend::new().unwrap();
-        log_to_backend(&backend, "pkg-b", "setup", 2_000_000, "completed");
-        let events = backend.get_all();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["pkg"], "pkg-b");
-        assert_eq!(events[0]["kind"], "completed");
-    }
-
-    #[test]
-    fn multiple_packages() {
-        let backend = TimelineBackend::new().unwrap();
-        log_to_backend(&backend, "alpha", "mount", 100, "started");
-        log_to_backend(&backend, "beta", "setup", 200, "completed");
-        let events = backend.get_all();
-        assert_eq!(events.len(), 2);
-        assert!(events.iter().any(|e| e["pkg"] == "alpha"));
-        assert!(events.iter().any(|e| e["pkg"] == "beta"));
+        assert_eq!(backend.get_all(), vec![started, completed]);
     }
 
     #[test]
     fn non_destructive_read() {
         let backend = TimelineBackend::new().unwrap();
-        log_to_backend(&backend, "pkg-c", "phase1", 500, "started");
-        let first = backend.get_all();
-        let second = backend.get_all();
-        assert_eq!(first.len(), second.len());
-        assert_eq!(first[0]["pkg"], second[0]["pkg"]);
+        let event = make_event("pkg-c", "phase1", 500, TimelineEventKind::Started);
+        backend.record_event(event.clone());
+
+        assert_eq!(backend.get_all(), vec![event.clone()]);
+        assert_eq!(backend.get_all(), vec![event]);
     }
 
     #[test]
-    fn invalid_log_without_event_field_ignored() {
+    fn log_record_without_event_field_is_ignored() {
         let backend = TimelineBackend::new().unwrap();
         log::Log::log(
             &backend,
@@ -181,14 +168,19 @@ mod tests {
                 .args(format_args!("plain message"))
                 .build(),
         );
-        let events = backend.get_all();
-        assert!(events.is_empty());
+
+        assert!(backend.get_all().is_empty());
     }
 
     #[test]
-    fn kv_event_is_accepted() {
+    fn log_record_with_event_is_accepted() {
         let backend = TimelineBackend::new().unwrap();
-        let event = make_event_value("pkg-kv", "phase", 7, "started");
+        let event = serde_json::json!({
+            "pkg": "pkg-kv",
+            "phase": "phase",
+            "duration_ns": 7,
+            "kind": "started",
+        });
         let key_values = [("event", log::kv::Value::from_serde(&event))];
         log::Log::log(
             &backend,
@@ -200,52 +192,32 @@ mod tests {
                 .build(),
         );
 
-        let events = backend.get_all();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["pkg"], "pkg-kv");
-    }
-
-    #[test]
-    fn unknown_shape_kv_event_is_stored_as_value() {
-        let backend = TimelineBackend::new().unwrap();
-        let payload = serde_json::json!({"foo": "bar"});
-        let key_values = [("event", log::kv::Value::from_serde(&payload))];
-        log::Log::log(
-            &backend,
-            &log::Record::builder()
-                .level(log::Level::Info)
-                .target(crate::TIMELINE_TARGET)
-                .key_values(&key_values)
-                .args(format_args!(""))
-                .build(),
+        assert_eq!(
+            backend.get_all(),
+            vec![TimelineEvent {
+                pkg: "pkg-kv".to_owned(),
+                phase: "phase".to_owned(),
+                duration_ns: 7,
+                kind: TimelineEventKind::Started,
+            }]
         );
-
-        let events = backend.get_all();
-        assert_eq!(events.len(), 1);
     }
 
     #[test]
     fn record_event_after_thread_exit_does_not_panic() {
-        let (tx, rx) = std::sync::mpsc::channel::<TimelineCommand>();
-        let handle = std::thread::Builder::new()
+        let (tx, rx) = mpsc::channel::<TimelineCommand>();
+        let handle = thread::Builder::new()
             .name("ssam-timeline-test".into())
-            .spawn(move || {
-                drop(rx);
-            })
+            .spawn(move || drop(rx))
             .unwrap();
         handle.join().unwrap();
         let dead_backend = TimelineBackend {
             sender: tx,
-            _thread: std::thread::Builder::new()
+            _thread: thread::Builder::new()
                 .name("ssam-timeline-noop".into())
                 .spawn(|| {})
                 .unwrap(),
         };
-        dead_backend.record_event(serde_json::json!({
-            "pkg": "x",
-            "phase": "y",
-            "duration_ns": 0u64,
-            "kind": "started",
-        }));
+        dead_backend.record_event(make_event("x", "y", 0, TimelineEventKind::Started));
     }
 }

@@ -104,51 +104,11 @@ let response = client.list_package_info(request).await?;
 
 ## Parse the response
 
-- 모든 method는 동일한 JSON 형식으로 작성된 단일 `result: string` 필드를 반환합니다.
-- Method call이 성공하면 `success` 필드가 `true` 이고 `data` 필드가
-  있으며, 실패하면 `success` 필드가 `false` 이고 `reason` 필드가
-  있습니다. 단, `RemovePackage` 처럼 반환하는 데이터가 없는 RPC는 성공해도
-  `data` 가 생략됩니다.
-- `data` 필드는 메시지마다 다른 형식으로 정의됩니다.
-- 각 메시지별 `data` 에 설정되는 내용은
-  [`libssam/data/remocon-responses.schema.json`](../../libssam/data/remocon-responses.schema.json)
-  (JSON Schema)에 정의되어 있습니다.
-- method별 정확한 response message와 response data payload는 레퍼런스의
-  [API at a Glance](../reference/remocon-rpc.ko.md#api-at-a-glance)를
+- 각 method는 선언된 protobuf response message를 payload로 담은 gRPC
+  response를 반환합니다.
+- RPC 실패는 gRPC `Status`로 반환됩니다. 성공한 response field는 선언된
+  protobuf message에서 직접 읽고, response별 정확한 field는 레퍼런스 문서를
   참고하세요.
-- Response message는 다음과 같은 순서로 처리해주세요.
-  1. `schema_version` 부터 확인하세요. 모르는 버전이면 `data` 의 형태를 추측하지
-     말고 거부하세요.
-  2. `success` 를 확인하세요. 실패면 `reason` 을 읽고, 성공이면 `data` 를 해당
-     method의
-     [response data payload](../reference/remocon-rpc.ko.md#response-data-payload)로
-     디코딩하세요.
-
-예를 들어, `ListPackageInfo` method에 대한 response는 다음과 같이 처리해주세요:
-
-```rust
-#[derive(serde::Deserialize)]
-struct PackageInfo {
-    success: bool,
-    name: String,
-    status: String,
-    package_path: String,
-}
-
-let json_result = response.into_inner().result;
-let parsed: serde_json::Value = serde_json::from_str(&json_result)?;
-if parsed["success"] == true {
-    let packages: Vec<PackageInfo> = serde_json::from_value(parsed["data"].clone())?;
-    for package in packages {
-        println!(
-            "{}: {} (success={}, path={})",
-            package.name, package.status, package.success, package.package_path
-        );
-    }
-} else {
-    println!("failed: {}", parsed["reason"]);
-}
-```
 
 ---
 
@@ -167,9 +127,10 @@ if parsed["success"] == true {
   빈 목록이 실수인지 의도한 것인지 method 자체는 판단할 수 없어 별도의 방어
   코드가 없으니, 빈 목록을 그대로 전달하기 전에 확인 절차나 안전장치를
   두는 걸 권장합니다.
-- 반환되는 [`packageActionResult`](../reference/remocon-rpc.ko.md#packageactionresult)
-  배열은 패키지당 한 항목씩 담습니다. 응답 자체의 `success` 가 `true` 여도
-  개별 항목은 실패했을 수 있으므로, 각 항목을 따로 확인해야 합니다.
+- 중복된 패키지 이름은 한 번만 처리됩니다.
+- 반환되는 [`PackageActionResult`](../reference/remocon-rpc.ko.md#packageactionresult)
+  배열은 패키지당 한 항목씩 담습니다. RPC가 성공해도 개별 작업은 실패할
+  수 있으므로 각 항목을 따로 확인해야 합니다.
 
 예를 들어:
 
@@ -177,14 +138,14 @@ if parsed["success"] == true {
 let request = StopPackageRequest {
     package_names: vec!["navi".to_string(), "cluster".to_string()],
 };
-let response = client.stop_package(request).await?;
-let json_result = response.into_inner().result;
-let parsed: serde_json::Value = serde_json::from_str(&json_result)?;
-if parsed["success"] == true {
-    for entry in parsed["data"].as_array().unwrap() {
-        if entry["success"] != true {
-            println!("{} failed: {}", entry["package_name"], entry["message"]);
-        }
+let response = client.stop_package(request).await?.into_inner();
+for entry in response.results {
+    if !entry.success {
+        println!(
+            "{} failed: {}",
+            entry.package_name,
+            entry.message.as_deref().unwrap_or("unknown error")
+        );
     }
 }
 ```

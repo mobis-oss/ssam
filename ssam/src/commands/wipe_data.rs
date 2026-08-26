@@ -12,7 +12,6 @@ use crate::commands::{
     ALL_ARG, CommandHandler, PACKAGE_NAMES_ARG, dedup_names, multi_package_command,
     write_package_op_results,
 };
-use libssam::{JsonResult, PackageActionResult};
 
 pub static COMMAND: WipeData = WipeData;
 
@@ -55,9 +54,7 @@ impl CommandHandler for WipeData {
         } else {
             writeln!(stdout, "Wiping data for package(s): {}", names.join(", "))?;
         }
-        let json_result = client.wipe_package_data(names).await?;
-        let results: Vec<PackageActionResult> =
-            JsonResult::<Vec<PackageActionResult>>::parse_response(&json_result)?;
+        let results = client.wipe_package_data(names).await?.results;
         if results.is_empty() {
             writeln!(stdout, "  No packages to wipe")?;
             return Ok(());
@@ -73,6 +70,7 @@ impl CommandHandler for WipeData {
 mod tests {
     use super::*;
     use crate::client::MockClient;
+    use libssam::PackageActionResult;
 
     #[test]
     fn test_name() {

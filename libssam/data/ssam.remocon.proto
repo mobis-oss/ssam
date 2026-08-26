@@ -4,6 +4,7 @@
 syntax = "proto3";
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/duration.proto";
 
 package ssamd.remocon;
 
@@ -35,40 +36,91 @@ message WipePackageDataRequest {
     repeated string package_names = 1;
 }
 
-message WipePackageDataResponse {
-    string result = 1;
-}
-
 message ListPackageInfoRequest {
     repeated string package_names = 1;
 }
 
-message StartPackageResponse {
-    string result = 1;
+message PackageData {
+    string package_name = 1;
+    string version = 2;
+    string description = 3;
 }
 
-message StopPackageResponse {
-    string result = 1;
+message QuotaInformation {
+    bool enabled = 1;
+    uint64 limit = 2;
+}
+
+message PackageStatusEntry {
+    string package_name = 1;
+    string status = 2;
+}
+
+message PackageActionResult {
+    string package_name = 1;
+    bool success = 2;
+    optional string message = 3;
+}
+
+message PackageInfo {
+    bool success = 1;
+    string name = 2;
+    string status = 3;
+    string package_path = 4;
+    PackageData package_data = 5;
+    QuotaInformation quota = 6;
+    optional string error_summary = 7;
+    optional string error_details = 8;
 }
 
 message InstallPackageResponse {
-    string result = 1;
+    PackageData package_data = 1;
 }
 
-message RemovePackageResponse {
-    string result = 1;
+message InspectLocalPackageResult {
+    PackageData package_data = 1;
+    string package_path = 2;
+    bool success = 3;
+    optional string error_summary = 4;
+    optional string error_details = 5;
+}
+
+enum TimelineEventKind {
+    TIMELINE_EVENT_KIND_UNSPECIFIED = 0;
+    STARTED = 1;
+    COMPLETED = 2;
+}
+
+message TimelineEvent {
+    string pkg = 1;
+    string phase = 2;
+    uint64 duration_ns = 3;
+    TimelineEventKind kind = 4;
+}
+
+message TimelineData {
+    repeated TimelineEvent events = 1;
+    google.protobuf.Duration ssamd_uptime = 2;
+}
+
+message StartPackageResponse {
+    repeated PackageActionResult results = 1;
+}
+
+message StopPackageResponse {
+    repeated PackageActionResult results = 1;
 }
 
 message ListPackagesResponse {
-    string result = 1;
+    repeated PackageStatusEntry entries = 1;
 }
 
-message GetTimelineInfoResponse {
-    string result = 1;
+message WipePackageDataResponse {
+    repeated PackageActionResult results = 1;
 }
 
 message ListPackageInfoResponse {
-    string result = 1;
+    repeated PackageInfo packages = 1;
 }
 
 message ListPackageInfoFromFilesRequest {
@@ -76,17 +128,17 @@ message ListPackageInfoFromFilesRequest {
 }
 
 message ListPackageInfoFromFilesResponse {
-    string result = 1;
+    repeated InspectLocalPackageResult packages = 1;
 }
 
 service Remocon {
     rpc StartPackage(StartPackageRequest) returns (StartPackageResponse);
     rpc StopPackage(StopPackageRequest) returns (StopPackageResponse);
     rpc InstallPackage(InstallPackageRequest) returns (InstallPackageResponse);
-    rpc RemovePackage(RemovePackageRequest) returns (RemovePackageResponse);
+    rpc RemovePackage(RemovePackageRequest) returns (google.protobuf.Empty);
     rpc WipePackageData(WipePackageDataRequest) returns (WipePackageDataResponse);
     rpc ListPackages(google.protobuf.Empty) returns (ListPackagesResponse);
-    rpc GetTimelineInfo(google.protobuf.Empty) returns (GetTimelineInfoResponse);
+    rpc GetTimelineInfo(google.protobuf.Empty) returns (TimelineData);
     rpc ListPackageInfo(ListPackageInfoRequest) returns (ListPackageInfoResponse);
     rpc ListPackageInfoFromFiles(ListPackageInfoFromFilesRequest) returns (ListPackageInfoFromFilesResponse);
 }

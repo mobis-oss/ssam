@@ -101,49 +101,11 @@ let response = client.list_package_info(request).await?;
 
 ## Parse the response
 
-- Every method returns a single `result: string` field, written in the same
-  JSON format.
-- If the method call succeeds, `success` is `true` and `data` is present;
-  if it fails, `success` is `false` and `reason` is present. An RPC that
-  returns no data, such as `RemovePackage`, omits `data` even on success.
-- The `data` field is defined differently for each message.
-- The exact shape of `data` per message is defined in
-  [`libssam/data/remocon-responses.schema.json`](../../libssam/data/remocon-responses.schema.json)
-  (JSON Schema).
-- For the exact response message and response data payload per method, see
-  the reference's [API at a Glance](../reference/remocon-rpc.md#api-at-a-glance).
-- Process the response message in the following order:
-  1. Check `schema_version` first. Reject a version you don't recognize
-     rather than guess at the shape of `data`.
-  2. Check `success`. On failure, read `reason`. On success, decode `data`
-     as the method's
-     [response data payload](../reference/remocon-rpc.md#response-data-payload).
-
-For example, handle the response for the `ListPackageInfo` method like this:
-
-```rust
-#[derive(serde::Deserialize)]
-struct PackageInfo {
-    success: bool,
-    name: String,
-    status: String,
-    package_path: String,
-}
-
-let json_result = response.into_inner().result;
-let parsed: serde_json::Value = serde_json::from_str(&json_result)?;
-if parsed["success"] == true {
-    let packages: Vec<PackageInfo> = serde_json::from_value(parsed["data"].clone())?;
-    for package in packages {
-        println!(
-            "{}: {} (success={}, path={})",
-            package.name, package.status, package.success, package.package_path
-        );
-    }
-} else {
-    println!("failed: {}", parsed["reason"]);
-}
-```
+- Each method returns a gRPC response whose payload is its declared protobuf
+  response message.
+- RPC failures are returned as gRPC `Status` values. Read successful response
+  fields directly from the declared protobuf message. The exact fields for
+  each response are listed in the reference documentation.
 
 ---
 
@@ -157,16 +119,15 @@ request, and return the result for each requested package as an array:
 - [`WipePackageData`](../reference/remocon-rpc.md#wipepackagedata)
 
 Because they return results this way, watch out for two things:
-
 - An empty `package_names` list targets **every** installed package (see
   [Request messages](../reference/remocon-rpc.md#request-messages)). The method
   itself can't tell whether an empty list was accidental or intentional, so
   there's no built-in safeguard — add your own confirmation or safety guard
   before forwarding an empty list.
-- The returned [`packageActionResult`](../reference/remocon-rpc.md#packageactionresult)
-  array has one entry per package. The response's own `success` can be
-  `true` even when individual entries failed, so check each entry
-  separately.
+- Duplicate package names are processed only once.
+- The returned [`PackageActionResult`](../reference/remocon-rpc.md#packageactionresult)
+  array has one entry per package. Check each entry separately because the
+  RPC can succeed while individual operations fail.
 
 For example:
 
@@ -174,14 +135,14 @@ For example:
 let request = StopPackageRequest {
     package_names: vec!["navi".to_string(), "cluster".to_string()],
 };
-let response = client.stop_package(request).await?;
-let json_result = response.into_inner().result;
-let parsed: serde_json::Value = serde_json::from_str(&json_result)?;
-if parsed["success"] == true {
-    for entry in parsed["data"].as_array().unwrap() {
-        if entry["success"] != true {
-            println!("{} failed: {}", entry["package_name"], entry["message"]);
-        }
+let response = client.stop_package(request).await?.into_inner();
+for entry in response.results {
+    if !entry.success {
+        println!(
+            "{} failed: {}",
+            entry.package_name,
+            entry.message.as_deref().unwrap_or("unknown error")
+        );
     }
 }
 ```

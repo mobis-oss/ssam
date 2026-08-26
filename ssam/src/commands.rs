@@ -91,7 +91,7 @@ pub(crate) fn write_package_detail(stdout: &mut dyn Write, info: &PackageInfo) -
         writeln!(stdout, "    Path: {}", info.package_path)?;
     }
 
-    if !info.success || info.metadata.is_none() {
+    if !info.success || info.package_data.is_none() {
         writeln!(stdout, "    Name: {}", info.name)?;
         if let Some(summary) = &info.error_summary {
             writeln!(stdout, "    Error Summary: {summary}")?;
@@ -102,10 +102,10 @@ pub(crate) fn write_package_detail(stdout: &mut dyn Write, info: &PackageInfo) -
         return Ok(());
     }
 
-    if let Some(metadata) = &info.metadata {
-        writeln!(stdout, "    Version: {}", metadata.version)?;
-        writeln!(stdout, "    Name: {}", metadata.package_name)?;
-        writeln!(stdout, "    Description: {}", metadata.description)?;
+    if let Some(package_data) = &info.package_data {
+        writeln!(stdout, "    Version: {}", package_data.version)?;
+        writeln!(stdout, "    Name: {}", package_data.package_name)?;
+        writeln!(stdout, "    Description: {}", package_data.description)?;
     }
 
     if let Some(quota) = &info.quota {

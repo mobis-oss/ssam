@@ -24,6 +24,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+#[derive(Debug, thiserror::Error)]
+#[error("Package not found: {0}")]
+pub(crate) struct PackageNotFound(pub String);
+
 pub mod parser;
 mod pkg_file;
 mod store;
@@ -681,7 +685,7 @@ impl PackageManagerActor {
                 self.try_recover(package_name, &bundled_path).await;
             }
         } else {
-            return Err(anyhow::anyhow!("Package not found: {package_name}"));
+            return Err(PackageNotFound(package_name.to_owned()).into());
         }
 
         log::debug!("Successfully removed package: {package_name}");

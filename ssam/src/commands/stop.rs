@@ -12,7 +12,6 @@ use crate::commands::{
     ALL_ARG, CommandHandler, PACKAGE_NAMES_ARG, dedup_names, multi_package_command,
     write_package_op_results,
 };
-use libssam::{JsonResult, PackageActionResult};
 
 pub static COMMAND: Stop = Stop;
 
@@ -51,9 +50,7 @@ impl CommandHandler for Stop {
         } else {
             writeln!(stdout, "Stopping package(s): {}", names.join(", "))?;
         }
-        let json_result = client.stop_package(names).await?;
-        let results: Vec<PackageActionResult> =
-            JsonResult::<Vec<PackageActionResult>>::parse_response(&json_result)?;
+        let results = client.stop_package(names).await?.results;
         if results.is_empty() {
             writeln!(stdout, "  No packages to stop")?;
             return Ok(());

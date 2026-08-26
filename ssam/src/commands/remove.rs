@@ -9,7 +9,6 @@ use tonic::async_trait;
 
 use crate::client::Client;
 use crate::commands::CommandHandler;
-use libssam::JsonResult;
 
 pub static COMMAND: Remove = Remove;
 
@@ -47,8 +46,7 @@ impl CommandHandler for Remove {
             .ok_or_else(|| anyhow::anyhow!("Package name is required"))?;
 
         writeln!(stdout, "Removing package: {package_name}")?;
-        let json_result = client.remove_package(package_name).await?;
-        JsonResult::<()>::parse_response(&json_result)
+        client.remove_package(package_name).await
     }
 }
 

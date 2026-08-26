@@ -12,6 +12,8 @@ use router::Router;
 
 use backend::timeline::TimelineBackend;
 
+pub use backend::timeline::{TimelineEvent, TimelineEventKind};
+
 pub const TIMELINE_TARGET: &str = "timeline";
 
 static TIMELINE_BACKEND: OnceLock<Arc<TimelineBackend>> = OnceLock::new();
@@ -32,7 +34,7 @@ pub fn init(level: log::LevelFilter) -> anyhow::Result<()> {
     TIMELINE_BACKEND
         .set(Arc::clone(&timeline))
         .map_err(|_| anyhow::anyhow!("TIMELINE_BACKEND already initialized"))?;
-    let router = Router::new(timeline, level);
+    let router = Router::new(Arc::clone(&timeline), level);
     log::set_boxed_logger(Box::new(SsamLogger::with_router(router)))
         .map_err(|e| anyhow::anyhow!("Failed to set logger: {e}"))?;
     log::set_max_level(level);
@@ -41,15 +43,12 @@ pub fn init(level: log::LevelFilter) -> anyhow::Result<()> {
 
 /// Returns a snapshot of all recorded timeline events.
 #[must_use]
-pub fn get_timelines() -> Vec<serde_json::Value> {
+pub fn get_timelines() -> Vec<TimelineEvent> {
     TIMELINE_BACKEND
         .get()
         .map_or_else(Vec::new, |b| b.get_all())
 }
 
-/// Record a `TimelineEvent` via the global logger.
-///
-/// The event is emitted as a structured key-value with `target: TIMELINE_TARGET`.
 #[macro_export]
 macro_rules! timeline {
     ($event:expr) => {{
@@ -73,28 +72,28 @@ mod tests {
         use crate::backend::timeline::TimelineBackend;
 
         let backend = TimelineBackend::new().unwrap();
-        let event = serde_json::json!({
-            "pkg": "test-pkg",
-            "phase": "mount",
-            "duration_ns": 42u64,
-            "kind": "started",
-        });
-        let key_values = [("event", log::kv::Value::from_serde(&event))];
-        log::Log::log(
-            &backend,
-            &log::Record::builder()
-                .level(log::Level::Info)
-                .target(TIMELINE_TARGET)
-                .key_values(&key_values)
-                .args(format_args!(""))
-                .build(),
-        );
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let event = TimelineEvent {
+            pkg: "test-pkg".to_owned(),
+            phase: "mount".to_owned(),
+            duration_ns: 42,
+            kind: TimelineEventKind::Started,
+        };
+        backend.record_event(event.clone());
         let events = backend.get_all();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["pkg"], "test-pkg");
-        assert_eq!(events[0]["phase"], "mount");
-        assert_eq!(events[0]["kind"], "started");
+        assert_eq!(events, vec![event]);
+    }
+
+    #[test]
+    fn timeline_macro_records_event_in_global_backend() {
+        let _ = init(log::LevelFilter::max());
+        let event = TimelineEvent {
+            pkg: "test-pkg".to_owned(),
+            phase: "mount".to_owned(),
+            duration_ns: 42,
+            kind: TimelineEventKind::Started,
+        };
+        timeline!(event.clone());
+
+        assert!(get_timelines().iter().any(|candidate| candidate == &event));
     }
 }

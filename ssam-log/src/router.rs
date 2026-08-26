@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::backend::{simplelog::SimpleLogBackend, timeline::TimelineBackend};
+use log::Log as _;
 
 pub struct Router {
     routes: HashMap<&'static str, Arc<dyn log::Log + Send + Sync>>,
@@ -23,8 +24,10 @@ impl Router {
     }
 
     pub fn route(&self, record: &log::Record) {
-        let logger = self.routes.get(record.target()).unwrap_or(&self.default);
-        logger.log(record);
+        self.routes
+            .get(record.target())
+            .unwrap_or(&self.default)
+            .log(record);
     }
 
     pub fn flush_all(&self) {
@@ -63,14 +66,15 @@ mod tests {
     fn routes_timeline_target_to_timeline_backend() {
         let (backend, router) = make_router();
         let event = serde_json::json!({
-            "pkg": "p",
-            "phase": "q",
-            "duration_ns": 1u64,
+            "pkg": "pkg-a",
+            "phase": "mount",
+            "duration_ns": 1,
             "kind": "started",
         });
+
         route_record(&router, &event);
-        let map = backend.get_all();
-        assert_eq!(map.len(), 1);
+
+        assert_eq!(backend.get_all().len(), 1);
     }
 
     #[test]
@@ -83,8 +87,8 @@ mod tests {
                 .args(format_args!("unrelated log"))
                 .build(),
         );
-        let events = backend.get_all();
-        assert!(events.is_empty());
+
+        assert!(backend.get_all().is_empty());
     }
 
     #[test]

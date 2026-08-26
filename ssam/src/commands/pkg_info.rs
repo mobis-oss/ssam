@@ -11,7 +11,6 @@ use tonic::async_trait;
 
 use crate::client::Client;
 use crate::commands::{CommandHandler, write_package_detail};
-use libssam::{JsonResult, ListPackageInfoFromFilesResponse, PackageInfo};
 
 /// Represents a package URI that can be either a file path or an installed package name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -63,7 +62,10 @@ impl PkgInfo {
     const NAME: &'static str = "pkg-info";
     const PACKAGE_NAMES: &'static str = "package_names";
 
-    fn write_file_info(stdout: &mut dyn Write, info: &libssam::PackageInfoFromFile) -> Result<()> {
+    fn write_file_info(
+        stdout: &mut dyn Write,
+        info: &libssam::InspectLocalPackageResult,
+    ) -> Result<()> {
         writeln!(stdout, "Package Information:")?;
         writeln!(stdout, "Info:")?;
         writeln!(stdout, "    Path: {}", info.package_path)?;
@@ -77,13 +79,13 @@ impl PkgInfo {
             return Ok(());
         }
 
-        let metadata = info
-            .metadata
+        let package_data = info
+            .package_data
             .as_ref()
-            .context("Package info response missing metadata")?;
-        writeln!(stdout, "    Name: {}", metadata.package_name)?;
-        writeln!(stdout, "    Version: {}", metadata.version)?;
-        writeln!(stdout, "    Description: {}", metadata.description)?;
+            .context("Local package inspection response missing package data")?;
+        writeln!(stdout, "    Name: {}", package_data.package_name)?;
+        writeln!(stdout, "    Version: {}", package_data.version)?;
+        writeln!(stdout, "    Description: {}", package_data.description)?;
         Ok(())
     }
 }
@@ -138,14 +140,14 @@ impl CommandHandler for PkgInfo {
         }
 
         let mut rendered_any = false;
+        let mut package_lookup_failed = false;
         if !package_names.is_empty() {
-            let json_result = client
+            let response = client
                 .list_package_info(package_names)
                 .await
-                .context("Failed to get package info")?;
-            let package_infos = JsonResult::<Vec<PackageInfo>>::parse_response(&json_result)
-                .context("Invalid package info response")?;
-            for info in package_infos {
+                .context("Failed to get package infos")?;
+            for info in response.packages {
+                package_lookup_failed |= !info.success;
                 if rendered_any {
                     writeln!(stdout)?;
                 }
@@ -165,21 +167,19 @@ impl CommandHandler for PkgInfo {
                 .iter()
                 .map(|path| path.to_str().context("Non-UTF8 path").map(str::to_owned))
                 .collect::<Result<Vec<_>>>()?;
-            let json_result = client
+            let response = client
                 .list_package_info_from_files(paths)
                 .await
                 .context("Failed to get package info from file(s)")?;
-            let package_infos =
-                JsonResult::<ListPackageInfoFromFilesResponse>::parse_response(&json_result)
-                    .context("Invalid list package info from files response")?;
-            if package_infos.len() != package_paths.len() {
+            if response.packages.len() != package_paths.len() {
                 anyhow::bail!(
                     "Invalid list package info from files response: expected {} entries, got {}",
                     package_paths.len(),
-                    package_infos.len()
+                    response.packages.len()
                 );
             }
-            for (path, info) in package_paths.iter().zip(package_infos.iter()) {
+            for (path, info) in package_paths.iter().zip(response.packages.iter()) {
+                package_lookup_failed |= !info.success;
                 if rendered_any {
                     writeln!(stdout)?;
                 }
@@ -191,6 +191,10 @@ impl CommandHandler for PkgInfo {
                 Self::write_file_info(stdout, info)?;
                 rendered_any = true;
             }
+        }
+
+        if package_lookup_failed {
+            anyhow::bail!("one or more packages could not be inspected");
         }
 
         Ok(())
@@ -205,16 +209,6 @@ mod tests {
     #[test]
     fn test_name() {
         assert_eq!(COMMAND.name(), PkgInfo::NAME);
-    }
-
-    fn keep_first_package_info(client: &mut MockClient) {
-        let json_result = client.list_package_info_result.take().unwrap().unwrap();
-        let package_info = JsonResult::<Vec<PackageInfo>>::parse_response(&json_result)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        client.list_package_info_result = Some(Ok(JsonResult::success(vec![package_info])));
     }
 
     // ============================================================================
@@ -363,13 +357,18 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_pkg_info_success() {
         let mut client = MockClient::new_success();
-        let json_result = client.list_package_info_result.take().unwrap().unwrap();
-        let package_info = JsonResult::<Vec<PackageInfo>>::parse_response(&json_result)
+        let package_info = client
+            .list_package_info_result
+            .take()
             .unwrap()
+            .unwrap()
+            .packages
             .into_iter()
             .next()
             .unwrap();
-        client.list_package_info_result = Some(Ok(JsonResult::success(vec![package_info])));
+        client.list_package_info_result = Some(Ok(libssam::ListPackageInfoResponse {
+            packages: vec![package_info],
+        }));
         let mut stdout = Vec::new();
 
         let handler = PkgInfo;
@@ -401,7 +400,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_pkg_info_broken_succeeds() {
+    async fn test_pkg_info_broken_success() {
         let mut client = MockClient::new_success().with_broken_pkg_info();
         let mut stdout = Vec::new();
 
@@ -445,18 +444,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_pkg_info_missing_package_prints_error_and_returns_success() {
+    async fn test_pkg_info_missing_package_prints_error_and_returns_failure() {
         let mut client = MockClient::new_success();
-        client.list_package_info_result = Some(Ok(JsonResult::success(vec![PackageInfo {
-            success: false,
-            name: "missing-pkg".to_owned(),
-            status: "NotFound".to_owned(),
-            package_path: String::new(),
-            metadata: None,
-            quota: None,
-            error_summary: Some("Package not found: missing-pkg".to_owned()),
-            error_details: None,
-        }])));
+        client.list_package_info_result = Some(Ok(libssam::ListPackageInfoResponse {
+            packages: vec![libssam::PackageInfo {
+                success: false,
+                name: "missing-pkg".to_owned(),
+                status: "NotFound".to_owned(),
+                package_path: String::new(),
+                package_data: None,
+                quota: None,
+                error_summary: Some("Package not found: missing-pkg".to_owned()),
+                error_details: None,
+            }],
+        }));
         let mut stdout = Vec::new();
 
         let handler = PkgInfo;
@@ -465,7 +466,7 @@ mod tests {
             .get_matches_from(vec!["pkg-info", "ssam://missing-pkg"]);
 
         let result = handler.handle(&matches, &mut client, &mut stdout).await;
-        assert!(result.is_ok());
+        assert!(result.is_err());
 
         let output = String::from_utf8(stdout).unwrap();
         assert!(output.contains("Getting package information for: ssam://missing-pkg"));
@@ -487,9 +488,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_pkg_info_file_uri_routes_to_inspect_local() {
+    async fn test_pkg_info_file_uri_routes_to_list_package_info_from_files() {
         let mut client = MockClient::new_success();
-        // Clear list_package_info so misrouting to it would panic
+        // Clear package lookup so misrouting to it would panic
         client.list_package_info_result = None;
         let mut stdout = Vec::new();
         let handler = PkgInfo;
@@ -514,7 +515,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_pkg_info_pkg_uri_routes_to_list_package_info() {
         let mut client = MockClient::new_success();
-        keep_first_package_info(&mut client);
         // Clear file lookup so misrouting to it would panic
         client.list_package_info_from_files_result = None;
         let mut stdout = Vec::new();
@@ -578,8 +578,10 @@ mod tests {
             "ssam://broken-pkg",
         ]);
 
-        let handle_result = handler.handle(&matches, &mut client, &mut stdout).await;
-        assert!(handle_result.is_ok());
+        handler
+            .handle(&matches, &mut client, &mut stdout)
+            .await
+            .unwrap();
         let result = String::from_utf8(stdout).unwrap();
 
         assert!(result.contains("Getting package information for: ssam://test-pkg"));
@@ -599,7 +601,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_pkg_info_batches_package_and_file_uris() {
         let mut client = MockClient::new_success();
-        keep_first_package_info(&mut client);
         let mut stdout = Vec::new();
         let handler = PkgInfo;
         let matches = handler.command().get_matches_from(vec![
@@ -639,24 +640,26 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_pkg_info_renders_file_failure_after_success() {
         let mut client = MockClient::new_success();
-        let json_result = client
+        let mut package_infos = client
             .list_package_info_from_files_result
             .take()
             .unwrap()
-            .unwrap();
-        let mut package_infos =
-            JsonResult::<ListPackageInfoFromFilesResponse>::parse_response(&json_result).unwrap();
+            .unwrap()
+            .packages;
         let mut success_info = package_infos.pop().unwrap();
         success_info.package_path = "/tmp/good.ssam".to_owned();
         package_infos.push(success_info);
-        package_infos.push(libssam::PackageInfoFromFile {
-            success: false,
-            metadata: None,
+        package_infos.push(libssam::InspectLocalPackageResult {
+            package_data: None,
             package_path: "/nonexistent/path/package.ssam".to_owned(),
+            success: false,
             error_summary: Some("Failed to inspect local package".to_owned()),
             error_details: Some("Package not found".to_owned()),
         });
-        client.list_package_info_from_files_result = Some(Ok(JsonResult::success(package_infos)));
+        client.list_package_info_from_files_result =
+            Some(Ok(libssam::remocon::ListPackageInfoFromFilesResponse {
+                packages: package_infos,
+            }));
 
         let mut stdout = Vec::new();
         let handler = PkgInfo;
@@ -668,7 +671,10 @@ mod tests {
 
         let result = handler.handle(&matches, &mut client, &mut stdout).await;
 
-        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "one or more packages could not be inspected"
+        );
         let output = String::from_utf8(stdout).unwrap();
         assert!(output.contains("Getting package information for: file:///tmp/good.ssam"));
         assert!(
@@ -694,7 +700,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_pkg_info_deduplicates_repeated_uri() {
         let mut client = MockClient::new_success();
-        keep_first_package_info(&mut client);
         let mut stdout = Vec::new();
         let handler = PkgInfo;
         let matches = handler.command().get_matches_from(vec![
@@ -728,7 +733,18 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_pkg_info_deduplicates_resolved_package_uri() {
         let mut client = MockClient::new_success();
-        keep_first_package_info(&mut client);
+        let package_info = client
+            .list_package_info_result
+            .take()
+            .unwrap()
+            .unwrap()
+            .packages
+            .into_iter()
+            .next()
+            .unwrap();
+        client.list_package_info_result = Some(Ok(libssam::ListPackageInfoResponse {
+            packages: vec![package_info],
+        }));
         let mut stdout = Vec::new();
         let handler = PkgInfo;
         let matches =

@@ -8,31 +8,40 @@ use tonic::transport::Channel;
 
 use libssam::remocon::remocon_client::RemoconClient;
 use libssam::remocon::{
-    InstallPackageRequest, ListPackageInfoFromFilesRequest, ListPackageInfoRequest,
-    RemovePackageRequest, StartPackageRequest, StopPackageRequest, WipePackageDataRequest,
+    InstallPackageRequest, InstallPackageResponse, ListPackageInfoFromFilesRequest,
+    ListPackageInfoFromFilesResponse, ListPackageInfoRequest, ListPackageInfoResponse,
+    ListPackagesResponse, RemovePackageRequest, StartPackageRequest, StartPackageResponse,
+    StopPackageRequest, StopPackageResponse, TimelineData, WipePackageDataRequest,
+    WipePackageDataResponse,
 };
+
+#[cfg(test)]
+use libssam::remocon::InspectLocalPackageResult;
 
 #[tonic::async_trait]
 pub trait Client: Send {
-    async fn list_packages(&mut self) -> Result<String>;
+    async fn list_packages(&mut self) -> Result<ListPackagesResponse>;
     /// Empty `names` means "all installed packages" — the server resolves the
     /// full list via `GetPackageNames`. Callers must gate this with an explicit
     /// user intent (e.g. `--all` flag) to prevent accidental bulk operations.
-    async fn start_package(&mut self, names: Vec<String>) -> Result<String>;
+    async fn start_package(&mut self, names: Vec<String>) -> Result<StartPackageResponse>;
     /// See [`Self::start_package`] for empty-names semantics.
-    async fn stop_package(&mut self, names: Vec<String>) -> Result<String>;
+    async fn stop_package(&mut self, names: Vec<String>) -> Result<StopPackageResponse>;
     async fn install_package(
         &mut self,
         path: &str,
         downgrade: bool,
         remove_data: bool,
-    ) -> Result<String>;
-    async fn remove_package(&mut self, name: &str) -> Result<String>;
+    ) -> Result<InstallPackageResponse>;
+    async fn remove_package(&mut self, name: &str) -> Result<()>;
     /// See [`Self::start_package`] for empty-names semantics.
-    async fn wipe_package_data(&mut self, names: Vec<String>) -> Result<String>;
-    async fn get_timeline_info(&mut self) -> Result<String>;
-    async fn list_package_info(&mut self, names: Vec<String>) -> Result<String>;
-    async fn list_package_info_from_files(&mut self, paths: Vec<String>) -> Result<String>;
+    async fn wipe_package_data(&mut self, names: Vec<String>) -> Result<WipePackageDataResponse>;
+    async fn get_timeline_info(&mut self) -> Result<TimelineData>;
+    async fn list_package_info(&mut self, names: Vec<String>) -> Result<ListPackageInfoResponse>;
+    async fn list_package_info_from_files(
+        &mut self,
+        paths: Vec<String>,
+    ) -> Result<ListPackageInfoFromFilesResponse>;
     fn is_local_mode(&self) -> bool;
 }
 
@@ -56,40 +65,37 @@ impl Client for GrpcClient {
         self.server_ip.is_loopback()
     }
 
-    async fn list_packages(&mut self) -> Result<String> {
-        let response = self
+    async fn list_packages(&mut self) -> Result<ListPackagesResponse> {
+        Ok(self
             .inner
             .list_packages(Request::new(()))
             .await
             .context("Daemon side error. list_packages has failed.")?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 
-    async fn start_package(&mut self, names: Vec<String>) -> Result<String> {
+    async fn start_package(&mut self, names: Vec<String>) -> Result<StartPackageResponse> {
         let request = Request::new(StartPackageRequest {
             package_names: names,
         });
-        let response = self
+        Ok(self
             .inner
             .start_package(request)
             .await
             .context("Cannot start requested package(s)")?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 
-    async fn stop_package(&mut self, names: Vec<String>) -> Result<String> {
+    async fn stop_package(&mut self, names: Vec<String>) -> Result<StopPackageResponse> {
         let request = Request::new(StopPackageRequest {
             package_names: names,
         });
-        let response = self
+        Ok(self
             .inner
             .stop_package(request)
             .await
             .context("Cannot stop requested package(s)")?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 
     async fn install_package(
@@ -97,95 +103,96 @@ impl Client for GrpcClient {
         path: &str,
         downgrade: bool,
         remove_data: bool,
-    ) -> Result<String> {
+    ) -> Result<InstallPackageResponse> {
         let request = Request::new(InstallPackageRequest {
             package_path: path.to_owned(),
             downgrade,
             remove_data,
         });
-        let response = self
+        Ok(self
             .inner
             .install_package(request)
             .await
             .with_context(|| format!("Cannot install package {path}"))?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 
-    async fn remove_package(&mut self, name: &str) -> Result<String> {
+    async fn remove_package(&mut self, name: &str) -> Result<()> {
         let request = Request::new(RemovePackageRequest {
             package_name: name.to_owned(),
         });
-        let response = self
-            .inner
+        self.inner
             .remove_package(request)
             .await
             .with_context(|| format!("Cannot remove package {name}"))?
             .into_inner();
-        Ok(response.result)
+        Ok(())
     }
 
-    async fn wipe_package_data(&mut self, names: Vec<String>) -> Result<String> {
+    async fn wipe_package_data(&mut self, names: Vec<String>) -> Result<WipePackageDataResponse> {
         let request = Request::new(WipePackageDataRequest {
             package_names: names,
         });
-        let response = self
+        Ok(self
             .inner
             .wipe_package_data(request)
             .await
             .context("Cannot wipe data for requested package(s)")?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 
-    async fn get_timeline_info(&mut self) -> Result<String> {
-        let response = self
+    async fn get_timeline_info(&mut self) -> Result<TimelineData> {
+        Ok(self
             .inner
             .get_timeline_info(Request::new(()))
             .await
             .context("Daemon side error. get_timeline_info has failed.")?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 
-    async fn list_package_info(&mut self, names: Vec<String>) -> Result<String> {
+    async fn list_package_info(&mut self, names: Vec<String>) -> Result<ListPackageInfoResponse> {
         let request = Request::new(ListPackageInfoRequest {
             package_names: names,
         });
-        let response = self
+        Ok(self
             .inner
             .list_package_info(request)
             .await
             .context("Cannot get package info")?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 
-    async fn list_package_info_from_files(&mut self, paths: Vec<String>) -> Result<String> {
+    async fn list_package_info_from_files(
+        &mut self,
+        paths: Vec<String>,
+    ) -> Result<ListPackageInfoFromFilesResponse> {
         let request = Request::new(ListPackageInfoFromFilesRequest {
             package_paths: paths,
         });
-        let response = self
+        Ok(self
             .inner
             .list_package_info_from_files(request)
             .await
             .context("Cannot get package info from file(s)")?
-            .into_inner();
-        Ok(response.result)
+            .into_inner())
     }
 }
 
 #[cfg(test)]
+use libssam::PackageInfo;
+
+#[cfg(test)]
 pub struct MockClient {
-    pub list_packages_result: Option<anyhow::Result<String>>,
-    pub start_package_result: Option<anyhow::Result<String>>,
-    pub stop_package_result: Option<anyhow::Result<String>>,
-    pub install_package_result: Option<anyhow::Result<String>>,
-    pub remove_package_result: Option<anyhow::Result<String>>,
-    pub wipe_package_data_result: Option<anyhow::Result<String>>,
-    pub get_timeline_info_result: Option<anyhow::Result<String>>,
-    pub list_package_info_result: Option<anyhow::Result<String>>,
-    pub list_package_info_from_files_result: Option<anyhow::Result<String>>,
+    pub list_packages_result: Option<anyhow::Result<ListPackagesResponse>>,
+    pub start_package_result: Option<anyhow::Result<StartPackageResponse>>,
+    pub stop_package_result: Option<anyhow::Result<StopPackageResponse>>,
+    pub install_package_result: Option<anyhow::Result<InstallPackageResponse>>,
+    pub remove_package_result: Option<anyhow::Result<()>>,
+    pub wipe_package_data_result: Option<anyhow::Result<WipePackageDataResponse>>,
+    pub get_timeline_info_result: Option<anyhow::Result<TimelineData>>,
+    pub list_package_info_result: Option<anyhow::Result<ListPackageInfoResponse>>,
+    pub list_package_info_from_files_result:
+        Option<anyhow::Result<ListPackageInfoFromFilesResponse>>,
     pub is_local: bool,
     pub captured_downgrade: Option<bool>,
     pub captured_start_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
@@ -199,79 +206,87 @@ pub struct MockClient {
 #[cfg(test)]
 impl MockClient {
     pub fn new_success() -> Self {
-        use libssam::json_result::serialize_metadata;
-        use libssam::{
-            InstallResponse, JsonResult, PackageActionResult, PackageInfo, PackageInfoFromFile,
-            PackageStatusEntry,
-        };
+        use libssam::remocon::QuotaInformation;
+        use libssam::{PackageActionResult, PackageData, PackageInfo, PackageStatusEntry};
 
         let package_metadata = Self::make_test_metadata();
 
-        let list_json = JsonResult::success(vec![PackageStatusEntry {
-            package_name: "test-pkg".to_owned(),
-            status: "running".to_owned(),
-        }]);
-        let timeline_json = JsonResult::success(Self::make_test_timeline());
+        let list_response = ListPackagesResponse {
+            entries: vec![PackageStatusEntry {
+                package_name: "test-pkg".to_owned(),
+                status: "running".to_owned(),
+            }],
+        };
 
         let package_info_data = PackageInfo {
             success: true,
             name: "test-pkg".to_owned(),
             status: "Running".to_owned(),
             package_path: "/mock/packages/test-pkg.ssam".to_owned(),
-            metadata: Some(serialize_metadata(&package_metadata)),
-            quota: Some(libssam::remocon_schema::QuotaInformation {
+            package_data: Some((&package_metadata).into()),
+            quota: Some(QuotaInformation {
                 enabled: true,
                 limit: 2048,
             }),
             error_summary: None,
             error_details: None,
         };
-        let package_info_json = JsonResult::success(vec![
-            package_info_data,
-            PackageInfo {
-                success: true,
-                name: "broken-pkg".to_owned(),
-                status: "Broken".to_owned(),
-                package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
-                metadata: None,
-                quota: None,
-                error_summary: Some("Parse error".to_owned()),
-                error_details: Some("Failed to parse package.toml".to_owned()),
-            },
-        ]);
+        let package_infos_response = ListPackageInfoResponse {
+            packages: vec![
+                package_info_data.clone(),
+                PackageInfo {
+                    success: true,
+                    name: "broken-pkg".to_owned(),
+                    status: "Broken".to_owned(),
+                    package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
+                    package_data: None,
+                    quota: None,
+                    error_summary: Some("Parse error".to_owned()),
+                    error_details: Some("Failed to parse package.toml".to_owned()),
+                },
+            ],
+        };
 
-        let list_package_info_from_files_json = JsonResult::success(vec![PackageInfoFromFile {
-            success: true,
+        let inspect_local_response = InspectLocalPackageResult {
             package_path: "/mock/packages/test-pkg.ssam".to_owned(),
-            metadata: Some(serialize_metadata(&package_metadata)),
+            package_data: Some((&package_metadata).into()),
+            success: true,
             error_summary: None,
             error_details: None,
-        }]);
-        let start_stop_json = JsonResult::success(vec![PackageActionResult {
-            package_name: "test-pkg".to_owned(),
-            success: true,
-            message: None,
-        }]);
-        let remove_json = JsonResult::<()>::success_empty();
-        let wipe_data_json = JsonResult::success(vec![PackageActionResult {
-            package_name: "test-pkg".to_owned(),
-            success: true,
-            message: None,
-        }]);
-        let install_json = JsonResult::success(InstallResponse {
-            metadata: serialize_metadata(&package_metadata),
-        });
+        };
+        let start_stop_response = StartPackageResponse {
+            results: vec![PackageActionResult {
+                package_name: "test-pkg".to_owned(),
+                success: true,
+                message: None,
+            }],
+        };
+        let stop_response = StopPackageResponse {
+            results: start_stop_response.results.clone(),
+        };
+        let wipe_data_response = WipePackageDataResponse {
+            results: start_stop_response.results.clone(),
+        };
+        let install_response = InstallPackageResponse {
+            package_data: Some(PackageData {
+                package_name: package_metadata.get_package_name().to_owned(),
+                version: package_metadata.get_package_version().to_owned(),
+                description: package_metadata.package.description.clone(),
+            }),
+        };
 
         Self {
-            list_packages_result: Some(Ok(list_json)),
-            start_package_result: Some(Ok(start_stop_json.clone())),
-            stop_package_result: Some(Ok(start_stop_json)),
-            install_package_result: Some(Ok(install_json)),
-            remove_package_result: Some(Ok(remove_json)),
-            wipe_package_data_result: Some(Ok(wipe_data_json)),
-            get_timeline_info_result: Some(Ok(timeline_json)),
-            list_package_info_result: Some(Ok(package_info_json)),
-            list_package_info_from_files_result: Some(Ok(list_package_info_from_files_json)),
+            list_packages_result: Some(Ok(list_response)),
+            start_package_result: Some(Ok(start_stop_response)),
+            stop_package_result: Some(Ok(stop_response)),
+            install_package_result: Some(Ok(install_response)),
+            remove_package_result: Some(Ok(())),
+            wipe_package_data_result: Some(Ok(wipe_data_response)),
+            get_timeline_info_result: Some(Ok(Self::make_test_timeline())),
+            list_package_info_result: Some(Ok(package_infos_response)),
+            list_package_info_from_files_result: Some(Ok(ListPackageInfoFromFilesResponse {
+                packages: vec![inspect_local_response],
+            })),
             is_local: true,
             captured_downgrade: None,
             captured_start_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -325,18 +340,28 @@ impl MockClient {
         .expect("test metadata should be valid")
     }
 
-    fn make_test_timeline() -> libssam::TimelineResponse {
-        use libssam::remocon_schema::{TimelineEvent, TimelineEventKind};
-        use std::time::Duration;
+    fn make_test_timeline() -> libssam::TimelineData {
+        use libssam::remocon::{TimelineEvent, TimelineEventKind};
 
-        libssam::TimelineResponse {
-            events: vec![TimelineEvent {
-                pkg: "test-pkg".to_owned(),
-                phase: "Parse".to_owned(),
-                duration_ns: 1_000_000_000u64,
-                kind: TimelineEventKind::Completed,
-            }],
-            ssamd_uptime: Duration::from_secs(42),
+        libssam::TimelineData {
+            events: vec![
+                TimelineEvent {
+                    pkg: "test-pkg".to_owned(),
+                    phase: "Parse".to_owned(),
+                    duration_ns: 1_000_000_000u64,
+                    kind: TimelineEventKind::Completed as i32,
+                },
+                TimelineEvent {
+                    pkg: "unknown-pkg".to_owned(),
+                    phase: "Unknown".to_owned(),
+                    duration_ns: 0,
+                    kind: 0,
+                },
+            ],
+            ssamd_uptime: Some(prost_types::Duration {
+                seconds: 42,
+                nanos: 0,
+            }),
         }
     }
 
@@ -386,37 +411,36 @@ impl MockClient {
     }
 
     pub fn with_broken_pkg_info(mut self) -> Self {
-        use libssam::{JsonResult, PackageInfo};
+        use libssam::PackageInfo;
 
         let package_info_data = PackageInfo {
             success: true,
             name: "broken-pkg".to_owned(),
             status: "Broken".to_owned(),
             package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
-            metadata: None,
+            package_data: None,
             quota: None,
             error_summary: Some("Parse error".to_owned()),
             error_details: Some("Failed to parse package.toml".to_owned()),
         };
-        self.list_package_info_result = Some(Ok(JsonResult::success(vec![package_info_data])));
+        self.list_package_info_result = Some(Ok(ListPackageInfoResponse {
+            packages: vec![package_info_data],
+        }));
         self
     }
 
     pub fn with_start_results(mut self, results: Vec<libssam::PackageActionResult>) -> Self {
-        use libssam::JsonResult;
-        self.start_package_result = Some(Ok(JsonResult::success(results)));
+        self.start_package_result = Some(Ok(StartPackageResponse { results }));
         self
     }
 
     pub fn with_stop_results(mut self, results: Vec<libssam::PackageActionResult>) -> Self {
-        use libssam::JsonResult;
-        self.stop_package_result = Some(Ok(JsonResult::success(results)));
+        self.stop_package_result = Some(Ok(StopPackageResponse { results }));
         self
     }
 
     pub fn with_wipe_data_results(mut self, results: Vec<libssam::PackageActionResult>) -> Self {
-        use libssam::JsonResult;
-        self.wipe_package_data_result = Some(Ok(JsonResult::success(results)));
+        self.wipe_package_data_result = Some(Ok(WipePackageDataResponse { results }));
         self
     }
 }
@@ -428,20 +452,20 @@ impl Client for MockClient {
         self.is_local
     }
 
-    async fn list_packages(&mut self) -> anyhow::Result<String> {
+    async fn list_packages(&mut self) -> anyhow::Result<ListPackagesResponse> {
         self.list_packages_result
             .take()
             .expect("list_packages_result not set")
     }
 
-    async fn start_package(&mut self, names: Vec<String>) -> anyhow::Result<String> {
+    async fn start_package(&mut self, names: Vec<String>) -> anyhow::Result<StartPackageResponse> {
         self.captured_start_names.lock().unwrap().push(names);
         self.start_package_result
             .take()
             .expect("start_package_result not set")
     }
 
-    async fn stop_package(&mut self, names: Vec<String>) -> anyhow::Result<String> {
+    async fn stop_package(&mut self, names: Vec<String>) -> anyhow::Result<StopPackageResponse> {
         self.captured_stop_names.lock().unwrap().push(names);
         self.stop_package_result
             .take()
@@ -453,43 +477,65 @@ impl Client for MockClient {
         _path: &str,
         downgrade: bool,
         _remove_data: bool,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<InstallPackageResponse> {
         self.captured_downgrade = Some(downgrade);
         self.install_package_result
             .take()
             .expect("install_package_result not set")
     }
 
-    async fn remove_package(&mut self, _name: &str) -> anyhow::Result<String> {
+    async fn remove_package(&mut self, _name: &str) -> anyhow::Result<()> {
         self.remove_package_result
             .take()
             .expect("remove_package_result not set")
     }
 
-    async fn wipe_package_data(&mut self, names: Vec<String>) -> anyhow::Result<String> {
+    async fn wipe_package_data(
+        &mut self,
+        names: Vec<String>,
+    ) -> anyhow::Result<WipePackageDataResponse> {
         self.captured_wipe_names.lock().unwrap().push(names);
         self.wipe_package_data_result
             .take()
             .expect("wipe_package_data_result not set")
     }
 
-    async fn get_timeline_info(&mut self) -> anyhow::Result<String> {
+    async fn get_timeline_info(&mut self) -> anyhow::Result<TimelineData> {
         self.get_timeline_info_result
             .take()
             .expect("get_timeline_info_result not set")
     }
 
-    async fn list_package_info(&mut self, names: Vec<String>) -> anyhow::Result<String> {
+    async fn list_package_info(
+        &mut self,
+        names: Vec<String>,
+    ) -> anyhow::Result<ListPackageInfoResponse> {
+        let requested_names = names.clone();
         self.captured_list_package_info_names
             .lock()
             .unwrap()
             .push(names);
-        self.list_package_info_result
+        let response = self
+            .list_package_info_result
             .take()
-            .expect("list_package_info_result not set")
+            .expect("list_package_info_result not set")?;
+        if requested_names.is_empty() || response.packages.len() == 1 {
+            return Ok(response);
+        }
+
+        Ok(ListPackageInfoResponse {
+            packages: response
+                .packages
+                .into_iter()
+                .filter(|info| requested_names.iter().any(|name| name == &info.name))
+                .collect(),
+        })
     }
 
-    async fn list_package_info_from_files(&mut self, paths: Vec<String>) -> anyhow::Result<String> {
+    async fn list_package_info_from_files(
+        &mut self,
+        paths: Vec<String>,
+    ) -> anyhow::Result<ListPackageInfoFromFilesResponse> {
         self.captured_list_package_info_from_files_paths
             .lock()
             .unwrap()
@@ -519,22 +565,21 @@ mod grpc_fake_server {
             &self,
             _request: Request<()>,
         ) -> Result<Response<ListPackagesResponse>, Status> {
-            use libssam::{JsonResult, PackageStatusEntry};
+            use libssam::PackageStatusEntry;
 
-            let data = vec![PackageStatusEntry {
-                package_name: "test-pkg".to_owned(),
-                status: "running".to_owned(),
-            }];
-            let result = JsonResult::success(data);
-
-            Ok(Response::new(ListPackagesResponse { result }))
+            Ok(Response::new(ListPackagesResponse {
+                entries: vec![PackageStatusEntry {
+                    package_name: "test-pkg".to_owned(),
+                    status: "running".to_owned(),
+                }],
+            }))
         }
 
         async fn start_package(
             &self,
             request: Request<StartPackageRequest>,
         ) -> Result<Response<StartPackageResponse>, Status> {
-            use libssam::{JsonResult, PackageActionResult};
+            use libssam::PackageActionResult;
 
             let names = &request.get_ref().package_names;
             let ops: Vec<PackageActionResult> = names
@@ -555,16 +600,14 @@ mod grpc_fake_server {
                     }
                 })
                 .collect();
-            let result = JsonResult::success(ops);
-
-            Ok(Response::new(StartPackageResponse { result }))
+            Ok(Response::new(StartPackageResponse { results: ops }))
         }
 
         async fn stop_package(
             &self,
             request: Request<StopPackageRequest>,
         ) -> Result<Response<StopPackageResponse>, Status> {
-            use libssam::{JsonResult, PackageActionResult};
+            use libssam::PackageActionResult;
 
             let names = &request.get_ref().package_names;
             let ops: Vec<PackageActionResult> = names
@@ -575,8 +618,7 @@ mod grpc_fake_server {
                     message: None,
                 })
                 .collect();
-            let result = JsonResult::success(ops);
-            Ok(Response::new(StopPackageResponse { result }))
+            Ok(Response::new(StopPackageResponse { results: ops }))
         }
 
         async fn install_package(
@@ -585,13 +627,11 @@ mod grpc_fake_server {
         ) -> Result<Response<InstallPackageResponse>, Status> {
             use std::path::Path;
 
-            use libssam::json_result::serialize_metadata;
-            use libssam::{InstallResponse, JsonResult};
-
             let package_path = &request.get_ref().package_path;
-            let result = if package_path == "/error.ssam" {
-                JsonResult::<InstallResponse>::failure("Installation failed")
-            } else {
+            if package_path == "/error.ssam" {
+                return Err(Status::internal("Installation failed"));
+            }
+            let response = {
                 let name = Path::new(package_path)
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -634,29 +674,26 @@ mod grpc_fake_server {
                         },
                     )
                     .expect("Failed to build package metadata");
-                JsonResult::success(InstallResponse {
-                    metadata: serialize_metadata(&package_metadata),
-                })
+                InstallPackageResponse {
+                    package_data: Some((&package_metadata).into()),
+                }
             };
 
-            Ok(Response::new(InstallPackageResponse { result }))
+            Ok(Response::new(response))
         }
 
         async fn remove_package(
             &self,
             _request: Request<RemovePackageRequest>,
-        ) -> Result<Response<RemovePackageResponse>, Status> {
-            use libssam::JsonResult;
-
-            let result = JsonResult::<()>::success_empty();
-            Ok(Response::new(RemovePackageResponse { result }))
+        ) -> Result<Response<()>, Status> {
+            Ok(Response::new(()))
         }
 
         async fn wipe_package_data(
             &self,
             request: Request<WipePackageDataRequest>,
         ) -> Result<Response<WipePackageDataResponse>, Status> {
-            use libssam::{JsonResult, PackageActionResult};
+            use libssam::PackageActionResult;
 
             let names = &request.get_ref().package_names;
             let ops: Vec<PackageActionResult> = names
@@ -667,39 +704,35 @@ mod grpc_fake_server {
                     message: None,
                 })
                 .collect();
-            let result = JsonResult::success(ops);
-            Ok(Response::new(WipePackageDataResponse { result }))
+            Ok(Response::new(WipePackageDataResponse { results: ops }))
         }
 
         async fn get_timeline_info(
             &self,
             _request: Request<()>,
-        ) -> Result<Response<GetTimelineInfoResponse>, Status> {
-            use libssam::remocon_schema::{TimelineEvent, TimelineEventKind};
-            use libssam::{JsonResult, TimelineResponse};
-            use std::time::Duration;
+        ) -> Result<Response<TimelineData>, Status> {
+            use libssam::remocon::{TimelineEvent, TimelineEventKind};
 
-            let timeline_data = TimelineResponse {
+            let timeline_data = TimelineData {
                 events: vec![TimelineEvent {
                     pkg: "test-pkg".to_owned(),
                     phase: "Parse".to_owned(),
                     duration_ns: 1_000_000_000u64,
-                    kind: TimelineEventKind::Completed,
+                    kind: TimelineEventKind::Completed as i32,
                 }],
-                ssamd_uptime: Duration::from_secs(42),
+                ssamd_uptime: Some(prost_types::Duration {
+                    seconds: 42,
+                    nanos: 0,
+                }),
             };
-            let result = JsonResult::success(timeline_data);
 
-            Ok(Response::new(GetTimelineInfoResponse { result }))
+            Ok(Response::new(timeline_data))
         }
 
         async fn list_package_info(
             &self,
             request: Request<ListPackageInfoRequest>,
         ) -> Result<Response<ListPackageInfoResponse>, Status> {
-            use libssam::json_result::serialize_metadata;
-            use libssam::{JsonResult, PackageInfo};
-
             let package_config = libssam::config::PackageConfigSpec {
                 package: libssam::config::Package {
                     name: "test-pkg".to_owned(),
@@ -742,53 +775,50 @@ mod grpc_fake_server {
                 name: "test-pkg".to_owned(),
                 status: "Running".to_owned(),
                 package_path: "/mock/packages/test-pkg.ssam".to_owned(),
-                metadata: Some(serialize_metadata(&package_metadata)),
-                quota: Some(libssam::remocon_schema::QuotaInformation {
+                package_data: Some((&package_metadata).into()),
+                quota: Some(QuotaInformation {
                     enabled: true,
                     limit: 2048,
                 }),
                 error_summary: None,
                 error_details: None,
             };
-            let data = if request.get_ref().package_names.is_empty() {
-                vec![
-                    package_info_data,
-                    PackageInfo {
-                        success: true,
-                        name: "broken-pkg".to_owned(),
-                        status: "Broken".to_owned(),
-                        package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
-                        metadata: None,
-                        quota: None,
-                        error_summary: Some("Parse error".to_owned()),
-                        error_details: Some("Failed to parse package.toml".to_owned()),
-                    },
-                ]
+            let broken_package_info = PackageInfo {
+                success: true,
+                name: "broken-pkg".to_owned(),
+                status: "Broken".to_owned(),
+                package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
+                package_data: None,
+                quota: None,
+                error_summary: Some("Parse error".to_owned()),
+                error_details: Some("Failed to parse package.toml".to_owned()),
+            };
+            let infos = if request.get_ref().package_names.is_empty() {
+                vec![package_info_data, broken_package_info]
             } else {
                 request
                     .get_ref()
                     .package_names
                     .iter()
-                    .map(|name| {
-                        let mut info = package_info_data.clone();
-                        info.name.clone_from(name);
-                        info.package_path = format!("/mock/packages/{name}.ssam");
-                        info
+                    .map(|name| match name.as_str() {
+                        "test-pkg" => package_info_data.clone(),
+                        "broken-pkg" => broken_package_info.clone(),
+                        _ => {
+                            let mut info = package_info_data.clone();
+                            info.name.clone_from(name);
+                            info.package_path = format!("/mock/packages/{name}.ssam");
+                            info
+                        }
                     })
                     .collect()
             };
-            let result = JsonResult::success(data);
-
-            Ok(Response::new(ListPackageInfoResponse { result }))
+            Ok(Response::new(ListPackageInfoResponse { packages: infos }))
         }
 
         async fn list_package_info_from_files(
             &self,
             _request: Request<ListPackageInfoFromFilesRequest>,
         ) -> Result<Response<ListPackageInfoFromFilesResponse>, Status> {
-            use libssam::JsonResult;
-            use libssam::json_result::{PackageInfoFromFile, serialize_metadata};
-
             let package_config = libssam::config::PackageConfigSpec {
                 package: libssam::config::Package {
                     name: "test-pkg".to_owned(),
@@ -826,16 +856,17 @@ mod grpc_fake_server {
             )
             .expect("Failed to build package metadata");
 
-            let inspect_response = PackageInfoFromFile {
-                success: true,
+            let inspect_response = InspectLocalPackageResult {
                 package_path: "/mock/packages/test-pkg.ssam".to_owned(),
-                metadata: Some(serialize_metadata(&package_metadata)),
+                package_data: Some((&package_metadata).into()),
+                success: true,
                 error_summary: None,
                 error_details: None,
             };
-            let result = JsonResult::success(vec![inspect_response]);
 
-            Ok(Response::new(ListPackageInfoFromFilesResponse { result }))
+            Ok(Response::new(ListPackageInfoFromFilesResponse {
+                packages: vec![inspect_response],
+            }))
         }
     }
 
@@ -875,8 +906,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_list_packages() {
-        use libssam::{JsonResult, PackageStatusEntry};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -887,12 +916,9 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client.list_packages().await.unwrap();
-        let result: JsonResult<Vec<PackageStatusEntry>> =
-            serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        assert!(result.data.is_some());
+        let response = client.list_packages().await.unwrap();
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].package_name, "test-pkg");
 
         shutdown_tx.send(()).ok();
         handle.await.unwrap().unwrap();
@@ -900,8 +926,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_start_package() {
-        use libssam::{JsonResult, PackageActionResult};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -912,15 +936,11 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client
+        let response = client
             .start_package(vec!["test-pkg".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<PackageActionResult>> =
-            serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        let ops = result.data.unwrap();
+        let ops = response.results;
         assert_eq!(ops.len(), 1);
         assert!(ops[0].success);
 
@@ -930,8 +950,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_stop_package() {
-        use libssam::{JsonResult, PackageActionResult};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -942,15 +960,11 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client
+        let response = client
             .stop_package(vec!["test-pkg".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<PackageActionResult>> =
-            serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        let ops = result.data.unwrap();
+        let ops = response.results;
         assert_eq!(ops.len(), 1);
         assert!(ops[0].success);
 
@@ -960,8 +974,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_install_package() {
-        use libssam::{InstallResponse, JsonResult};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -972,16 +984,13 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client
+        let response = client
             .install_package("/tmp/dummy.ssam", false, false)
             .await
             .unwrap();
-        let result: JsonResult<InstallResponse> = serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        let metadata = &result.data.as_ref().unwrap().metadata;
-        assert_eq!(metadata.package_name, "dummy");
-        assert_eq!(metadata.version, "1.0.0");
+        let package_data = response.package_data.as_ref().unwrap();
+        assert_eq!(package_data.package_name, "dummy");
+        assert_eq!(package_data.version, "1.0.0");
 
         shutdown_tx.send(()).ok();
         handle.await.unwrap().unwrap();
@@ -989,8 +998,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_remove_package() {
-        use libssam::JsonResult;
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -1001,10 +1008,7 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client.remove_package("test-pkg").await.unwrap();
-        let result: JsonResult<()> = serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
+        client.remove_package("test-pkg").await.unwrap();
 
         shutdown_tx.send(()).ok();
         handle.await.unwrap().unwrap();
@@ -1012,8 +1016,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_wipe_package_data() {
-        use libssam::{JsonResult, PackageActionResult};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -1024,15 +1026,11 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client
+        let response = client
             .wipe_package_data(vec!["test-pkg".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<PackageActionResult>> =
-            serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        let ops = result.data.unwrap();
+        let ops = response.results;
         assert_eq!(ops.len(), 1);
         assert!(ops[0].success);
 
@@ -1042,8 +1040,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_get_timeline_info() {
-        use libssam::{JsonResult, TimelineResponse};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -1054,11 +1050,9 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client.get_timeline_info().await.unwrap();
-        let result: JsonResult<TimelineResponse> = serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        assert!(result.data.is_some());
+        let response = client.get_timeline_info().await.unwrap();
+        assert_eq!(response.events.len(), 1);
+        assert!(response.ssamd_uptime.is_some());
 
         shutdown_tx.send(()).ok();
         handle.await.unwrap().unwrap();
@@ -1066,8 +1060,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_list_package_info() {
-        use libssam::{JsonResult, PackageInfo};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -1078,22 +1070,14 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client
+        let response = client
             .list_package_info(vec!["test-pkg".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<PackageInfo>> = serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        assert!(result.data.is_some());
-        assert_eq!(result.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(response.packages.len(), 1);
         assert_eq!(
-            result
-                .data
-                .as_ref()
-                .and_then(|infos| infos.first())
-                .map(|info| info.package_path.as_str()),
-            Some("/mock/packages/test-pkg.ssam")
+            response.packages[0].package_path,
+            "/mock/packages/test-pkg.ssam"
         );
 
         shutdown_tx.send(()).ok();
@@ -1102,8 +1086,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_list_package_info_empty_names() {
-        use libssam::{JsonResult, PackageInfo};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -1114,19 +1096,16 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client.list_package_info(Vec::new()).await.unwrap();
-        let result: JsonResult<Vec<PackageInfo>> = serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success);
-        let data = result.data.expect("data should be present");
+        let response = client.list_package_info(Vec::new()).await.unwrap();
+        let data = response.packages;
         assert_eq!(data.len(), 2);
         assert!(
             data.iter()
-                .any(|p| { p.success && p.status == "Running" && p.name == "test-pkg" })
+                .any(|p| p.success && p.status == "Running" && p.name == "test-pkg")
         );
         assert!(
             data.iter()
-                .any(|p| { p.status == "Broken" && p.name == "broken-pkg" })
+                .any(|p| p.status == "Broken" && p.name == "broken-pkg")
         );
 
         shutdown_tx.send(()).ok();
@@ -1135,8 +1114,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_start_package_error() {
-        use libssam::{JsonResult, PackageActionResult};
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -1147,15 +1124,11 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client
+        let response = client
             .start_package(vec!["error".to_owned()])
             .await
             .unwrap();
-        let result: JsonResult<Vec<PackageActionResult>> =
-            serde_json::from_str(&json_result).unwrap();
-
-        assert!(result.success, "Outer result should always be success=true");
-        let ops = result.data.unwrap();
+        let ops = response.results;
         assert_eq!(ops.len(), 1);
         assert!(!ops[0].success, "Per-package result should be failure");
         assert!(
@@ -1173,8 +1146,6 @@ mod grpc_tests {
 
     #[tokio::test]
     async fn test_grpc_install_package_error() {
-        use libssam::JsonResult;
-
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
         let channel = Channel::from_shared(format!("http://{addr}"))
@@ -1185,20 +1156,15 @@ mod grpc_tests {
 
         let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
 
-        let json_result = client
+        let error = client
             .install_package("/error.ssam", false, false)
             .await
-            .unwrap();
-        let result: JsonResult<()> = serde_json::from_str(&json_result).unwrap();
-
-        assert!(
-            !result.success,
-            "Expected success=false for path '/error.ssam'"
-        );
-        assert!(
-            result.reason.unwrap().contains("Installation failed"),
-            "Reason should contain failure message"
-        );
+            .expect_err("installation should return a gRPC status");
+        assert!(error.chain().any(|cause| {
+            cause
+                .downcast_ref::<tonic::Status>()
+                .is_some_and(|status| status.code() == tonic::Code::Internal)
+        }));
 
         shutdown_tx.send(()).ok();
         handle.await.unwrap().unwrap();

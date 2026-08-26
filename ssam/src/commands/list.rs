@@ -9,7 +9,7 @@ use tonic::async_trait;
 
 use crate::client::Client;
 use crate::commands::{CommandHandler, write_package_detail};
-use libssam::{JsonResult, PackageInfo, PackageStatusEntry};
+use libssam::{PackageInfo, PackageStatusEntry};
 
 pub static COMMAND: List = List;
 
@@ -92,13 +92,11 @@ impl CommandHandler for List {
         stdout: &mut dyn Write,
     ) -> Result<()> {
         if matches.get_flag(Self::DETAIL) {
-            let json_result = client.list_package_info(Vec::new()).await?;
-            let packages = JsonResult::<Vec<PackageInfo>>::parse_response(&json_result)?;
-            write_detail_list(stdout, &packages).context("Failed to write detail list")
+            let response = client.list_package_info(Vec::new()).await?;
+            write_detail_list(stdout, &response.packages).context("Failed to write detail list")
         } else {
-            let json_result = client.list_packages().await?;
-            let packages = JsonResult::<Vec<PackageStatusEntry>>::parse_response(&json_result)?;
-            write_table_list(stdout, &packages).context("Failed to write package list")
+            let response = client.list_packages().await?;
+            write_table_list(stdout, &response.entries).context("Failed to write package list")
         }
     }
 }
@@ -115,11 +113,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_list_empty() {
-        let empty_data: Vec<libssam::PackageStatusEntry> = vec![];
-        let json_result = libssam::JsonResult::success(empty_data);
-
         let mut client = MockClient {
-            list_packages_result: Some(Ok(json_result)),
+            list_packages_result: Some(Ok(libssam::ListPackagesResponse { entries: vec![] })),
             ..MockClient::new_success()
         };
 
@@ -167,10 +162,8 @@ mod tests {
                 status: "stopped".to_owned(),
             },
         ];
-        let json_result = libssam::JsonResult::success(test_data);
-
         let mut client = MockClient {
-            list_packages_result: Some(Ok(json_result)),
+            list_packages_result: Some(Ok(libssam::ListPackagesResponse { entries: test_data })),
             ..MockClient::new_success()
         };
         let handler = List;
@@ -201,11 +194,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_list_detail_empty() {
-        let empty_data: Vec<libssam::PackageInfo> = vec![];
-        let json_result = libssam::JsonResult::success(empty_data);
-
         let mut client = MockClient {
-            list_package_info_result: Some(Ok(json_result)),
+            list_package_info_result: Some(Ok(libssam::ListPackageInfoResponse {
+                packages: vec![],
+            })),
             ..MockClient::new_success()
         };
 

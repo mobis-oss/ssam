@@ -3,14 +3,13 @@
 
 use std::io::Write;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgMatches, Command};
-use libssam::remocon_schema::TimelineEventKind;
+use libssam::remocon::TimelineEventKind;
 use tonic::async_trait;
 
 use crate::client::Client;
 use crate::commands::CommandHandler;
-use libssam::{JsonResult, TimelineResponse};
 
 pub static COMMAND: TimelineInfo = TimelineInfo;
 
@@ -37,18 +36,22 @@ impl CommandHandler for TimelineInfo {
         client: &mut dyn Client,
         stdout: &mut dyn Write,
     ) -> Result<()> {
-        let json_result = client.get_timeline_info().await?;
-        let timeline_data = JsonResult::<TimelineResponse>::parse_response(&json_result)?;
+        let timeline_data = client.get_timeline_info().await?;
 
         writeln!(stdout, "Timeline Information:")?;
 
-        let uptime = timeline_data.ssamd_uptime;
+        let uptime: std::time::Duration = timeline_data
+            .ssamd_uptime
+            .context("Timeline response missing ssamd_uptime")?
+            .try_into()
+            .context("Invalid ssamd_uptime duration")?;
         writeln!(stdout, "SSAMD started: {uptime:?} since system booted")?;
 
         for event in &timeline_data.events {
-            let kind = match &event.kind {
-                TimelineEventKind::Started => "started",
-                TimelineEventKind::Completed => "completed",
+            let kind = match TimelineEventKind::try_from(event.kind) {
+                Ok(TimelineEventKind::Started) => "started",
+                Ok(TimelineEventKind::Completed) => "completed",
+                Ok(TimelineEventKind::Unspecified) | Err(_) => "unknown",
             };
             let duration_ms = event.duration_ns / 1_000_000;
             writeln!(
@@ -84,8 +87,15 @@ mod tests {
             .unwrap();
         let result = String::from_utf8(stdout).unwrap();
 
-        assert!(result.contains("Timeline Information"));
-        assert!(result.contains("SSAMD started"));
+        assert_eq!(
+            result,
+            concat!(
+                "Timeline Information:\n",
+                "SSAMD started: 42s since system booted\n",
+                "test-pkg (Parse): completed at 1000ms\n",
+                "unknown-pkg (Unknown): unknown at 0ms\n",
+            )
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

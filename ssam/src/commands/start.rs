@@ -12,7 +12,6 @@ use crate::commands::{
     ALL_ARG, CommandHandler, PACKAGE_NAMES_ARG, dedup_names, multi_package_command,
     write_package_op_results,
 };
-use libssam::{JsonResult, PackageActionResult};
 
 pub static COMMAND: Start = Start;
 
@@ -51,9 +50,7 @@ impl CommandHandler for Start {
         } else {
             writeln!(stdout, "Starting package(s): {}", names.join(", "))?;
         }
-        let json_result = client.start_package(names).await?;
-        let results: Vec<PackageActionResult> =
-            JsonResult::<Vec<PackageActionResult>>::parse_response(&json_result)?;
+        let results = client.start_package(names).await?.results;
         if results.is_empty() {
             writeln!(stdout, "  No packages to start")?;
             return Ok(());
