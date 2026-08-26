@@ -163,7 +163,7 @@ manager (systemd) and the *OCI Runtime* (crun) to run the container.
 ## Package state machine
 
 `TransitionManager` drives each package's lifecycle state machine.
-The current state per package can be queried via the [`ListPackagesStatus`](../reference/remocon-rpc.md#listpackagesstatus) RPC (or `ssam list`).
+The current state per package can be queried via the [`ListPackages`](../reference/remocon-rpc.md#listpackages) RPC (or `ssam list`).
 
 | State | Meaning |
 | --- | --- |

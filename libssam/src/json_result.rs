@@ -126,7 +126,7 @@ impl<T: Serialize> JsonResult<T> {
     }
 }
 
-/// Package status entry for `ListPackagesStatus` response.
+/// Package status entry for `ListPackages` response.
 ///
 /// Re-exported from generated schema types to maintain API compatibility.
 pub type PackageStatusEntry = crate::remocon_schema::PackageStatusEntry;
@@ -136,18 +136,22 @@ pub type PackageStatusEntry = crate::remocon_schema::PackageStatusEntry;
 /// Re-exported from generated schema types as `TimelineData` to maintain API compatibility.
 pub type TimelineResponse = crate::remocon_schema::TimelineData;
 
-/// Package info response for `GetPackageInfo` RPC.
-pub type PackageInfoResponse = crate::remocon_schema::PackageInfoResponse;
+/// Package information item returned by the `ListPackageInfo` RPC.
+pub type PackageInfo = crate::remocon_schema::PackageInfo;
+
+pub type PackageData = crate::remocon_schema::PackageData;
 
 pub type InstallResponse = crate::remocon_schema::InstallResponse;
 
-pub type InspectLocalPackageResponse = crate::remocon_schema::InspectLocalPackageResponse;
+pub type PackageInfoFromFile = crate::remocon_schema::PackageInfoFromFile;
 
-pub type PackageOpResult = crate::remocon_schema::PackageOpResult;
+pub type ListPackageInfoFromFilesResponse = Vec<PackageInfoFromFile>;
+
+pub type PackageActionResult = crate::remocon_schema::PackageActionResult;
 
 #[must_use]
-pub fn serialize_metadata(metadata: &PackageMetadata) -> crate::remocon_schema::PackageInfo {
-    crate::remocon_schema::PackageInfo {
+pub fn serialize_metadata(metadata: &PackageMetadata) -> PackageData {
+    PackageData {
         package_name: metadata.get_package_name().to_owned(),
         version: metadata.get_package_version().to_owned(),
         description: metadata.package.description.clone(),
@@ -162,11 +166,21 @@ impl From<&PackageMetadata> for InstallResponse {
     }
 }
 
-impl From<PackageInfoResult> for PackageInfoResponse {
+impl From<PackageInfoResult> for PackageInfo {
     fn from(result: PackageInfoResult) -> Self {
+        let base = Self {
+            success: true,
+            name: String::new(),
+            status: String::new(),
+            metadata: None,
+            quota: None,
+            package_path: String::new(),
+            error_summary: None,
+            error_details: None,
+        };
+
         match result {
             PackageInfoResult::Normal(info) => Self {
-                broken: false,
                 name: info.package_name,
                 status: info.package_status,
                 metadata: Some(serialize_metadata(&info.package_metadata)),
@@ -175,18 +189,23 @@ impl From<PackageInfoResult> for PackageInfoResponse {
                     limit: info.quota_info.limit,
                 }),
                 package_path: info.package_path,
-                error_summary: None,
-                error_details: None,
+                ..base
             },
             PackageInfoResult::Broken { filename, info } => Self {
-                broken: true,
                 name: filename,
-                status: "Broken".to_string(),
-                metadata: None,
-                quota: None,
+                status: "Broken".to_owned(),
                 package_path: info.package_path,
                 error_summary: Some(info.broken_info.summary),
                 error_details: Some(info.broken_info.details),
+                ..base
+            },
+            PackageInfoResult::NotFound { package_name } => Self {
+                success: false,
+                name: package_name.clone(),
+                status: "NotFound".to_owned(),
+                package_path: String::new(),
+                error_summary: Some(format!("Package not found: {package_name}")),
+                ..base
             },
         }
     }
@@ -195,6 +214,7 @@ impl From<PackageInfoResult> for PackageInfoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remocon_schema::JSON_RESULT_SCHEMA_VERSION;
 
     fn build_test_metadata(name: &str, version: &str) -> PackageMetadata {
         PackageMetadata::new(
@@ -250,33 +270,41 @@ mod tests {
 
     #[test]
     fn test_json_result_rejects_unsupported_schema_version() {
-        let json_str = r#"{"schema_version":"3","success":false,"reason":"test"}"#;
-        let result = JsonResult::<()>::parse_response(json_str);
+        let unsupported_version = format!("{JSON_RESULT_SCHEMA_VERSION}-unsupported");
+        let json_str = format!(
+            r#"{{"schema_version":"{unsupported_version}","success":false,"reason":"test"}}"#
+        );
+        let result = JsonResult::<()>::parse_response(&json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("Unsupported schema version"));
-        assert!(err_msg.contains("expected '2'"));
-        assert!(err_msg.contains("got '3'"));
+        assert!(err_msg.contains(&format!("expected '{JSON_RESULT_SCHEMA_VERSION}'")));
+        assert!(err_msg.contains(&format!("got '{unsupported_version}'")));
     }
 
     #[test]
     fn test_json_result_accepts_valid_schema_version() {
-        let json_str = r#"{"schema_version":"2","success":true,"data":"ok"}"#;
-        let result = JsonResult::<String>::parse_response(json_str);
+        let json_str = format!(
+            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":true,"data":"ok"}}"#
+        );
+        let result = JsonResult::<String>::parse_response(&json_str);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_parse_response_action_success() {
-        let json_str = r#"{"schema_version":"2","success":true}"#;
-        let result = JsonResult::<()>::parse_response(json_str);
+        let json_str =
+            format!(r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":true}}"#);
+        let result = JsonResult::<()>::parse_response(&json_str);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_parse_response_action_failure_with_reason() {
-        let json_str = r#"{"schema_version":"2","success":false,"reason":"Package not found"}"#;
-        let result = JsonResult::<()>::parse_response(json_str);
+        let json_str = format!(
+            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":false,"reason":"Package not found"}}"#
+        );
+        let result = JsonResult::<()>::parse_response(&json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("Package not found"));
@@ -284,8 +312,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_action_unsupported_version() {
-        let json_str = r#"{"schema_version":"3","success":true}"#;
-        let result = JsonResult::<()>::parse_response(json_str);
+        let unsupported_version = format!("{JSON_RESULT_SCHEMA_VERSION}-unsupported");
+        let json_str = format!(r#"{{"schema_version":"{unsupported_version}","success":true}}"#);
+        let result = JsonResult::<()>::parse_response(&json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("Unsupported schema version"));
@@ -293,15 +322,19 @@ mod tests {
 
     #[test]
     fn test_parse_response_success() {
-        let json_str = r#"{"schema_version":"2","success":true,"data":"hello"}"#;
-        let result = JsonResult::<String>::parse_response(json_str);
+        let json_str = format!(
+            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":true,"data":"hello"}}"#
+        );
+        let result = JsonResult::<String>::parse_response(&json_str);
         assert_eq!(result.unwrap(), "hello");
     }
 
     #[test]
     fn test_parse_response_failure() {
-        let json_str = r#"{"schema_version":"2","success":false,"reason":"not found"}"#;
-        let result = JsonResult::<String>::parse_response(json_str);
+        let json_str = format!(
+            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":false,"reason":"not found"}}"#
+        );
+        let result = JsonResult::<String>::parse_response(&json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("not found"));
@@ -309,8 +342,9 @@ mod tests {
 
     #[test]
     fn test_parse_response_missing_data() {
-        let json_str = r#"{"schema_version":"2","success":true}"#;
-        let result = JsonResult::<String>::parse_response(json_str);
+        let json_str =
+            format!(r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":true}}"#);
+        let result = JsonResult::<String>::parse_response(&json_str);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("Missing data field"));
@@ -401,8 +435,10 @@ mod tests {
 
     #[test]
     fn test_parse_install_response_missing_metadata() {
-        let json = r#"{"schema_version":"2","success":true,"data":{}}"#;
-        let result = JsonResult::<InstallResponse>::parse_response(json);
+        let json = format!(
+            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":true,"data":{{}}}}"#
+        );
+        let result = JsonResult::<InstallResponse>::parse_response(&json);
 
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("Failed to parse JSON response"));
@@ -410,16 +446,18 @@ mod tests {
 
     #[test]
     fn test_parse_install_response_failure() {
-        let json = r#"{"schema_version":"2","success":false,"reason":"install failed"}"#;
-        let result = JsonResult::<InstallResponse>::parse_response(json);
+        let json = format!(
+            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":false,"reason":"install failed"}}"#
+        );
+        let result = JsonResult::<InstallResponse>::parse_response(&json);
 
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("install failed"));
     }
 
     #[test]
-    fn test_package_info_response_normal_variant() {
-        let response: PackageInfoResponse =
+    fn test_package_info_normal_variant() {
+        let response: PackageInfo =
             PackageInfoResult::Normal(crate::ssam_package::ssam_pkg_info::PackageInfo {
                 package_name: "test-pkg".to_string(),
                 package_path: "/packages/test-pkg.ssam".to_string(),
@@ -432,8 +470,8 @@ mod tests {
             })
             .into();
 
-        assert!(!response.broken);
         assert_eq!(response.name, "test-pkg");
+        assert!(response.success);
         assert_eq!(response.status, "Running");
         assert!(response.metadata.is_some());
         assert!(response.quota.is_some());
@@ -444,13 +482,13 @@ mod tests {
         let json_str = serde_json::to_string(&response).unwrap();
         let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(json_value["package_path"], "/packages/test-pkg.ssam");
-        let deserialized: PackageInfoResponse = serde_json::from_str(&json_str).unwrap();
+        let deserialized: PackageInfo = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(response, deserialized);
     }
 
     #[test]
-    fn test_package_info_response_broken_variant() {
+    fn test_package_info_broken_variant() {
         let broken_info = crate::ssam_package::ssam_pkg_info::BrokenReason::new(
             "Parse error",
             "Failed to parse package.toml",
@@ -462,10 +500,10 @@ mod tests {
                 broken_info,
             },
         };
-        let response: PackageInfoResponse = result.into();
+        let response: PackageInfo = result.into();
 
-        assert!(response.broken);
         assert_eq!(response.name, "broken-pkg");
+        assert!(response.success);
         assert_eq!(response.status, "Broken");
         assert!(response.metadata.is_none());
         assert!(response.quota.is_none());
@@ -473,15 +511,31 @@ mod tests {
         assert!(response.error_summary.is_some());
         assert!(response.error_details.is_some());
 
-        let json_str = r#"{"broken":true,"name":"broken-pkg","status":"Broken","package_path":"/packages/broken-pkg.ssam","error_summary":"Parse error","error_details":"Failed to parse package.toml"}"#;
-        let deserialized: PackageInfoResponse = serde_json::from_str(json_str).unwrap();
+        let json_str = r#"{"success":true,"status":"Broken","name":"broken-pkg","package_path":"/packages/broken-pkg.ssam","error_summary":"Parse error","error_details":"Failed to parse package.toml"}"#;
+        let deserialized: PackageInfo = serde_json::from_str(json_str).unwrap();
 
         assert_eq!(deserialized.package_path, "/packages/broken-pkg.ssam");
         assert_eq!(deserialized, response);
     }
 
     #[test]
-    fn test_list_packages_status_response() {
+    fn test_package_info_not_found_variant() {
+        let response: PackageInfo = PackageInfoResult::NotFound {
+            package_name: "missing-pkg".to_string(),
+        }
+        .into();
+
+        assert!(!response.success);
+        assert_eq!(response.status, "NotFound");
+        assert_eq!(response.name, "missing-pkg");
+        assert!(response.metadata.is_none());
+        assert!(response.quota.is_none());
+        assert!(response.error_summary.is_some());
+        assert!(response.error_details.is_none());
+    }
+
+    #[test]
+    fn test_list_packages_response() {
         let entries = vec![
             PackageStatusEntry {
                 package_name: "Package1".to_string(),

@@ -116,6 +116,7 @@ mod tests {
     use super::*;
     use crate::client::MockClient;
     use crate::commands::CommandHandler;
+    use libssam::remocon_schema::JSON_RESULT_SCHEMA_VERSION;
     use std::fs;
     use tempfile::TempDir;
 
@@ -191,9 +192,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_install_missing_metadata_error() {
         let mut client = MockClient::new_success();
-        client.install_package_result = Some(Ok(
-            r#"{"schema_version":"2","success":true,"data":{}}"#.to_string(),
-        ));
+        client.install_package_result = Some(Ok(format!(
+            r#"{{"schema_version":"{JSON_RESULT_SCHEMA_VERSION}","success":true,"data":{{}}}}"#
+        )));
 
         let handler = Install;
         let cmd = handler.command();

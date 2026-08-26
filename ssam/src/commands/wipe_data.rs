@@ -12,7 +12,7 @@ use crate::commands::{
     ALL_ARG, CommandHandler, PACKAGE_NAMES_ARG, dedup_names, multi_package_command,
     write_package_op_results,
 };
-use libssam::{JsonResult, PackageOpResult};
+use libssam::{JsonResult, PackageActionResult};
 
 pub static COMMAND: WipeData = WipeData;
 
@@ -56,8 +56,8 @@ impl CommandHandler for WipeData {
             writeln!(stdout, "Wiping data for package(s): {}", names.join(", "))?;
         }
         let json_result = client.wipe_package_data(names).await?;
-        let results: Vec<PackageOpResult> =
-            JsonResult::<Vec<PackageOpResult>>::parse_response(&json_result)?;
+        let results: Vec<PackageActionResult> =
+            JsonResult::<Vec<PackageActionResult>>::parse_response(&json_result)?;
         if results.is_empty() {
             writeln!(stdout, "  No packages to wipe")?;
             return Ok(());
@@ -137,12 +137,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_wipe_data_multiple_packages() {
         let results = vec![
-            PackageOpResult {
+            PackageActionResult {
                 package_name: "pkg-a".to_owned(),
                 success: true,
                 message: None,
             },
-            PackageOpResult {
+            PackageActionResult {
                 package_name: "pkg-b".to_owned(),
                 success: true,
                 message: None,
@@ -169,12 +169,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_wipe_data_partial_failure() {
         let results = vec![
-            PackageOpResult {
+            PackageActionResult {
                 package_name: "ok-pkg".to_owned(),
                 success: true,
                 message: None,
             },
-            PackageOpResult {
+            PackageActionResult {
                 package_name: "bad-pkg".to_owned(),
                 success: false,
                 message: Some("stop it before wiping data".to_owned()),

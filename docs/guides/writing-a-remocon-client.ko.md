@@ -89,13 +89,15 @@ let mut client = RemoconClient::new(channel);
 method를 고르고 그
 [request message](../reference/remocon-rpc.ko.md#request-messages)를
 채우세요. 예를 들어
-[`GetPackageInfo`](../reference/remocon-rpc.ko.md#getpackageinfo)는
-[`PackageInformationRequest`](../reference/remocon-rpc.ko.md#packageinformationrequest)를
+[`ListPackageInfo`](../reference/remocon-rpc.ko.md#listpackageinfo)는
+[`ListPackageInfoRequest`](../reference/remocon-rpc.ko.md#listpackageinforequest)를
 받습니다:
 
 ```rust
-let request = PackageInformationRequest { package_name: "navi".to_string() };
-let response = client.get_package_info(request).await?;
+let request = ListPackageInfoRequest {
+    package_names: vec!["navi".to_string()],
+};
+let response = client.list_package_info(request).await?;
 ```
 
 ---
@@ -116,21 +118,33 @@ let response = client.get_package_info(request).await?;
   참고하세요.
 - Response message는 다음과 같은 순서로 처리해주세요.
   1. `schema_version` 부터 확인하세요. 모르는 버전이면 `data` 의 형태를 추측하지
-     말고 거부하세요 — 하위 호환을 위해 `schema_version` 이 없으면 현재
-     버전으로 간주합니다.
+     말고 거부하세요.
   2. `success` 를 확인하세요. 실패면 `reason` 을 읽고, 성공이면 `data` 를 해당
      method의
      [response data payload](../reference/remocon-rpc.ko.md#response-data-payload)로
      디코딩하세요.
 
-예를 들어, `GetPackageInfo` method에 대한 response는 다음과 같이 처리해주세요:
+예를 들어, `ListPackageInfo` method에 대한 response는 다음과 같이 처리해주세요:
 
 ```rust
+#[derive(serde::Deserialize)]
+struct PackageInfo {
+    success: bool,
+    name: String,
+    status: String,
+    package_path: String,
+}
+
 let json_result = response.into_inner().result;
 let parsed: serde_json::Value = serde_json::from_str(&json_result)?;
 if parsed["success"] == true {
-    let data = &parsed["data"]; // packageInfoResponse
-    let broken = &data["broken"];
+    let packages: Vec<PackageInfo> = serde_json::from_value(parsed["data"].clone())?;
+    for package in packages {
+        println!(
+            "{}: {} (success={}, path={})",
+            package.name, package.status, package.success, package.package_path
+        );
+    }
 } else {
     println!("failed: {}", parsed["reason"]);
 }
@@ -153,7 +167,7 @@ if parsed["success"] == true {
   빈 목록이 실수인지 의도한 것인지 method 자체는 판단할 수 없어 별도의 방어
   코드가 없으니, 빈 목록을 그대로 전달하기 전에 확인 절차나 안전장치를
   두는 걸 권장합니다.
-- 반환되는 [`packageOpResult`](../reference/remocon-rpc.ko.md#packageopresult)
+- 반환되는 [`packageActionResult`](../reference/remocon-rpc.ko.md#packageactionresult)
   배열은 패키지당 한 항목씩 담습니다. 응답 자체의 `success` 가 `true` 여도
   개별 항목은 실패했을 수 있으므로, 각 항목을 따로 확인해야 합니다.
 

@@ -84,6 +84,8 @@ pub enum PackageInfoResult {
         filename: String,
         info: BrokenPackageInfo,
     },
+    #[strum(to_string = "Package not found: {package_name}")]
+    NotFound { package_name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -87,12 +87,14 @@ let mut client = RemoconClient::new(channel);
 Pick a method from the reference's
 [API at a Glance](../reference/remocon-rpc.md#api-at-a-glance) and build its
 [request message](../reference/remocon-rpc.md#request-messages). For example,
-[`GetPackageInfo`](../reference/remocon-rpc.md#getpackageinfo) takes a
-[`PackageInformationRequest`](../reference/remocon-rpc.md#packageinformationrequest):
+[`ListPackageInfo`](../reference/remocon-rpc.md#listpackageinfo) takes a
+[`ListPackageInfoRequest`](../reference/remocon-rpc.md#listpackageinforequest):
 
 ```rust
-let request = PackageInformationRequest { package_name: "navi".to_string() };
-let response = client.get_package_info(request).await?;
+let request = ListPackageInfoRequest {
+    package_names: vec!["navi".to_string()],
+};
+let response = client.list_package_info(request).await?;
 ```
 
 ---
@@ -112,20 +114,32 @@ let response = client.get_package_info(request).await?;
   the reference's [API at a Glance](../reference/remocon-rpc.md#api-at-a-glance).
 - Process the response message in the following order:
   1. Check `schema_version` first. Reject a version you don't recognize
-     rather than guess at the shape of `data` — a missing `schema_version`
-     is the current version, for backward compatibility.
+     rather than guess at the shape of `data`.
   2. Check `success`. On failure, read `reason`. On success, decode `data`
      as the method's
      [response data payload](../reference/remocon-rpc.md#response-data-payload).
 
-For example, handle the response for the `GetPackageInfo` method like this:
+For example, handle the response for the `ListPackageInfo` method like this:
 
 ```rust
+#[derive(serde::Deserialize)]
+struct PackageInfo {
+    success: bool,
+    name: String,
+    status: String,
+    package_path: String,
+}
+
 let json_result = response.into_inner().result;
 let parsed: serde_json::Value = serde_json::from_str(&json_result)?;
 if parsed["success"] == true {
-    let data = &parsed["data"]; // packageInfoResponse
-    let broken = &data["broken"];
+    let packages: Vec<PackageInfo> = serde_json::from_value(parsed["data"].clone())?;
+    for package in packages {
+        println!(
+            "{}: {} (success={}, path={})",
+            package.name, package.status, package.success, package.package_path
+        );
+    }
 } else {
     println!("failed: {}", parsed["reason"]);
 }
@@ -149,7 +163,7 @@ Because they return results this way, watch out for two things:
   itself can't tell whether an empty list was accidental or intentional, so
   there's no built-in safeguard — add your own confirmation or safety guard
   before forwarding an empty list.
-- The returned [`packageOpResult`](../reference/remocon-rpc.md#packageopresult)
+- The returned [`packageActionResult`](../reference/remocon-rpc.md#packageactionresult)
   array has one entry per package. The response's own `success` can be
   `true` even when individual entries failed, so check each entry
   separately.

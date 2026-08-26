@@ -6,7 +6,7 @@
   "$defs": {
     "schemaVersion": {
       "type": "string",
-      "const": "2",
+      "const": "3",
       "description": "Schema version for all RPC responses"
     },
     "duration": {
@@ -119,7 +119,7 @@
       ],
       "additionalProperties": false
     },
-    "packageInfo": {
+    "packageData": {
       "type": "object",
       "description": "Package metadata (essential fields only)",
       "properties": {
@@ -139,12 +139,13 @@
         "description"
       ]
     },
-    "packageInfoResponse": {
+    "packageInfo": {
       "type": "object",
-      "description": "Package info response (unified normal and broken)",
+      "description": "Package info response with a package status",
       "properties": {
-        "broken": {
-          "type": "boolean"
+        "success": {
+          "type": "boolean",
+          "description": "Whether the requested installed package was found and its information was returned"
         },
         "name": {
           "type": "string"
@@ -155,7 +156,7 @@
         "metadata": {
           "oneOf": [
             {
-              "$ref": "#/$defs/packageInfo"
+              "$ref": "#/$defs/packageData"
             },
             {
               "type": "null"
@@ -197,14 +198,14 @@
         }
       },
       "required": [
-        "broken",
+        "success",
         "name",
         "status",
         "package_path"
       ],
       "additionalProperties": false
     },
-    "packageOpResult": {
+    "packageActionResult": {
       "type": "object",
       "required": ["package_name", "success"],
       "properties": {
@@ -219,7 +220,7 @@
       "description": "Install response payload with installed package metadata",
       "properties": {
         "metadata": {
-          "$ref": "#/$defs/packageInfo"
+          "$ref": "#/$defs/packageData"
         }
       },
       "required": [
@@ -310,28 +311,7 @@
         }
       ]
     },
-    "pkg-info": {
-      "oneOf": [
-        {
-          "allOf": [
-            {
-              "$ref": "#/$defs/jsonResultSuccess"
-            },
-            {
-              "properties": {
-                "data": {
-                  "$ref": "#/$defs/packageInfoResponse"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "$ref": "#/$defs/jsonResultFailure"
-        }
-      ]
-    },
-    "all-pkg-info": {
+    "list-package-info": {
       "oneOf": [
         {
           "allOf": [
@@ -343,7 +323,7 @@
                 "data": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/$defs/packageInfoResponse"
+                    "$ref": "#/$defs/packageInfo"
                   }
                 }
               }
@@ -389,7 +369,7 @@
                 "data": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/$defs/packageOpResult"
+                    "$ref": "#/$defs/packageActionResult"
                   }
                 }
               }
@@ -414,7 +394,7 @@
                 "data": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/$defs/packageOpResult"
+                    "$ref": "#/$defs/packageActionResult"
                   }
                 }
               }
@@ -470,7 +450,7 @@
                 "data": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/$defs/packageOpResult"
+                    "$ref": "#/$defs/packageActionResult"
                   }
                 }
               }
@@ -482,23 +462,53 @@
         }
       ]
     },
-    "inspectLocalPackageResponse": {
+    "packageInfoFromFile": {
       "type": "object",
-      "description": "Inspect local package file response (no status/quota)",
+      "description": "Package info read from a package file",
       "properties": {
+        "success": {
+          "type": "boolean"
+        },
         "metadata": {
-          "$ref": "#/$defs/packageInfo"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/packageData"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "package_path": {
           "type": "string"
+        },
+        "error_summary": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_details": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
-        "metadata",
+        "success",
         "package_path"
       ]
     },
-    "inspect-local-pkg": {
+    "list-package-info-from-files": {
       "oneOf": [
         {
           "allOf": [
@@ -508,7 +518,10 @@
             {
               "properties": {
                 "data": {
-                  "$ref": "#/$defs/inspectLocalPackageResponse"
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/packageInfoFromFile"
+                  }
                 }
               }
             }
@@ -528,11 +541,8 @@
         "list": {
           "$ref": "#/$defs/list"
         },
-        "pkg-info": {
-          "$ref": "#/$defs/pkg-info"
-        },
-        "all-pkg-info": {
-          "$ref": "#/$defs/all-pkg-info"
+        "list-package-info": {
+          "$ref": "#/$defs/list-package-info"
         },
         "timeline-info": {
           "$ref": "#/$defs/timeline-info"
@@ -552,8 +562,8 @@
         "wipe-data": {
           "$ref": "#/$defs/wipe-data"
         },
-        "inspect-local-pkg": {
-          "$ref": "#/$defs/inspect-local-pkg"
+        "list-package-info-from-files": {
+          "$ref": "#/$defs/list-package-info-from-files"
         }
       }
     }

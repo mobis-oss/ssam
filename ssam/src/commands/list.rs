@@ -9,7 +9,7 @@ use tonic::async_trait;
 
 use crate::client::Client;
 use crate::commands::{CommandHandler, write_package_detail};
-use libssam::{JsonResult, PackageInfoResponse, PackageStatusEntry};
+use libssam::{JsonResult, PackageInfo, PackageStatusEntry};
 
 pub static COMMAND: List = List;
 
@@ -25,7 +25,7 @@ fn get_terminal_width() -> usize {
     term_size::dimensions().map_or(80, |(w, _)| w)
 }
 
-fn write_detail_list(stdout: &mut dyn Write, packages: &[PackageInfoResponse]) -> io::Result<()> {
+fn write_detail_list(stdout: &mut dyn Write, packages: &[PackageInfo]) -> io::Result<()> {
     if packages.is_empty() {
         return writeln!(stdout, "No packages found");
     }
@@ -92,11 +92,11 @@ impl CommandHandler for List {
         stdout: &mut dyn Write,
     ) -> Result<()> {
         if matches.get_flag(Self::DETAIL) {
-            let json_result = client.get_all_package_info().await?;
-            let packages = JsonResult::<Vec<PackageInfoResponse>>::parse_response(&json_result)?;
+            let json_result = client.list_package_info(Vec::new()).await?;
+            let packages = JsonResult::<Vec<PackageInfo>>::parse_response(&json_result)?;
             write_detail_list(stdout, &packages).context("Failed to write detail list")
         } else {
-            let json_result = client.list_packages_status().await?;
+            let json_result = client.list_packages().await?;
             let packages = JsonResult::<Vec<PackageStatusEntry>>::parse_response(&json_result)?;
             write_table_list(stdout, &packages).context("Failed to write package list")
         }
@@ -201,11 +201,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_list_detail_empty() {
-        let empty_data: Vec<libssam::PackageInfoResponse> = vec![];
+        let empty_data: Vec<libssam::PackageInfo> = vec![];
         let json_result = libssam::JsonResult::success(empty_data);
 
         let mut client = MockClient {
-            get_all_package_info_result: Some(Ok(json_result)),
+            list_package_info_result: Some(Ok(json_result)),
             ..MockClient::new_success()
         };
 
@@ -248,7 +248,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_list_detail_error() {
-        let mut client = MockClient::new_success().with_all_pkg_info_error();
+        let mut client = MockClient::new_success().with_pkg_info_error();
         let handler = List;
         let matches = handler.command().get_matches_from(vec!["list", "--detail"]);
         let mut stdout = Vec::new();

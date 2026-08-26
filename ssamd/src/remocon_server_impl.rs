@@ -12,16 +12,16 @@ use crate::package::PackageStatus as InternalPackageStatus;
 use crate::utils::ellipsis;
 use anyhow::Context as _;
 use libssam::{
-    InspectLocalPackageResponse, InstallResponse, JsonResult, PackageInfoResponse, PackageOpResult,
+    InstallResponse, JsonResult, PackageActionResult, PackageInfo, PackageInfoFromFile,
     PackageStatusEntry, TimelineResponse,
     json_result::serialize_metadata,
     remocon::{
-        AllPackageInformationResponse, InspectLocalPackageRequest,
-        InspectLocalPackageResponse as InspectLocalPackageProtoResponse, InstallPackageRequest,
-        InstallPackageResponse, ListPackagesStatusResponse, PackageInformationRequest,
-        PackageInformationResponse, RemovePackageRequest, RemovePackageResponse,
-        StartPackageRequest, StartPackageResponse, StopPackageRequest, StopPackageResponse,
-        TimeLineInformationResponse, WipePackageDataRequest, WipePackageDataResponse,
+        GetTimelineInfoResponse, InstallPackageRequest, InstallPackageResponse,
+        ListPackageInfoFromFilesRequest,
+        ListPackageInfoFromFilesResponse as ListPackageInfoFromFilesProtoResponse,
+        ListPackageInfoRequest, ListPackageInfoResponse, ListPackagesResponse,
+        RemovePackageRequest, RemovePackageResponse, StartPackageRequest, StartPackageResponse,
+        StopPackageRequest, StopPackageResponse, WipePackageDataRequest, WipePackageDataResponse,
         remocon_server::Remocon,
     },
 };
@@ -85,18 +85,42 @@ impl RemoconImpl {
     }
 }
 
-fn into_package_op_result(name: String, outcome: anyhow::Result<()>) -> PackageOpResult {
+fn into_package_op_result(name: String, outcome: anyhow::Result<()>) -> PackageActionResult {
     match outcome {
-        Ok(()) => PackageOpResult {
+        Ok(()) => PackageActionResult {
             package_name: name,
             success: true,
             message: None,
         },
-        Err(e) => PackageOpResult {
+        Err(e) => PackageActionResult {
             package_name: name,
             success: false,
             message: Some(format!("{e}")),
         },
+    }
+}
+
+fn package_info_failure(name: String, error: &anyhow::Error) -> PackageInfo {
+    let error_summary = error.to_string();
+    PackageInfo {
+        success: false,
+        name,
+        status: String::new(),
+        metadata: None,
+        quota: None,
+        package_path: String::new(),
+        error_summary: Some(error_summary),
+        error_details: Some(format!("{error:?}")),
+    }
+}
+
+fn package_info_from_file_failure(path: &Path, error: &anyhow::Error) -> PackageInfoFromFile {
+    PackageInfoFromFile {
+        success: false,
+        metadata: None,
+        package_path: path.to_string_lossy().into_owned(),
+        error_summary: Some(error.to_string()),
+        error_details: Some(format!("{error:?}")),
     }
 }
 
@@ -236,10 +260,10 @@ impl Remocon for RemoconImpl {
         }))
     }
 
-    async fn list_packages_status(
+    async fn list_packages(
         &self,
         _request: Request<()>,
-    ) -> Result<Response<ListPackagesStatusResponse>, Status> {
+    ) -> Result<Response<ListPackagesResponse>, Status> {
         log::debug!("Received request to list packages");
         let status = self.package_manager.get_packages_status().await;
 
@@ -270,13 +294,13 @@ impl Remocon for RemoconImpl {
             },
         );
 
-        Ok(Response::new(ListPackagesStatusResponse { result }))
+        Ok(Response::new(ListPackagesResponse { result }))
     }
 
     async fn get_timeline_info(
         &self,
         _request: Request<()>,
-    ) -> Result<Response<TimeLineInformationResponse>, Status> {
+    ) -> Result<Response<GetTimelineInfoResponse>, Status> {
         log::debug!("Received request to get timeline info");
         let raw = ssam_log::get_timelines();
         let mut dropped = 0usize;
@@ -299,122 +323,122 @@ impl Remocon for RemoconImpl {
         };
         let result = JsonResult::success(response);
 
-        Ok(Response::new(TimeLineInformationResponse { result }))
+        Ok(Response::new(GetTimelineInfoResponse { result }))
     }
 
-    async fn get_package_info(
+    async fn list_package_info(
         &self,
-        request: Request<PackageInformationRequest>,
-    ) -> Result<Response<PackageInformationResponse>, Status> {
+        request: Request<ListPackageInfoRequest>,
+    ) -> Result<Response<ListPackageInfoResponse>, Status> {
         log::debug!("Received request to get package info");
-        let package_name = request.get_ref().package_name.clone();
-        let package_info = self.package_manager.get_package_info(&package_name).await;
+        let package_names = request.into_inner().package_names;
+        let list_all = package_names.is_empty();
+        let package_names = package_names
+            .into_iter()
+            .filter(|name| !name.trim().is_empty())
+            .collect::<Vec<_>>();
+        let package_infos: Result<Vec<PackageInfo>, String> = if list_all {
+            self.package_manager
+                .get_all_package_info()
+                .await
+                .map(|infos| infos.into_iter().map(Into::into).collect())
+                .map_err(|e| {
+                    log::error!("Failed to get all package info: {e:?}");
+                    "Failed to get package info".to_owned()
+                })
+        } else {
+            let infos = futures_util::stream::iter(package_names)
+                .then(|package_name| async move {
+                    match self.package_manager.get_package_info(&package_name).await {
+                        Ok(info) => info.into(),
+                        Err(e) => {
+                            log::error!("Failed to get package info for {package_name}: {e:?}");
+                            package_info_failure(package_name, &e)
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .await;
+            Ok(infos)
+        };
 
-        let result = into_json_result(
-            package_info,
-            |info| {
-                let response: PackageInfoResponse = info.into();
-                JsonResult::success(response)
-            },
-            |e| {
-                log::error!("Failed to get package info for {package_name}: {e:?}");
-                JsonResult::<PackageInfoResponse>::failure(format!(
-                    "Failed to get package info: {package_name}"
-                ))
-            },
-        );
+        let result = match package_infos {
+            Ok(infos) => JsonResult::success(infos),
+            Err(reason) => JsonResult::<Vec<PackageInfo>>::failure(reason),
+        };
 
-        Ok(Response::new(PackageInformationResponse { result }))
+        Ok(Response::new(ListPackageInfoResponse { result }))
     }
 
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
     #[allow(clippy::unnecessary_debug_formatting)]
-    async fn inspect_local_package(
+    async fn list_package_info_from_files(
         &self,
-        request: Request<InspectLocalPackageRequest>,
-    ) -> Result<Response<InspectLocalPackageProtoResponse>, Status> {
-        log::debug!("Received request to inspect local package");
-        let package_path = PathBuf::from(request.get_ref().package_path.clone());
+        request: Request<ListPackageInfoFromFilesRequest>,
+    ) -> Result<Response<ListPackageInfoFromFilesProtoResponse>, Status> {
+        log::debug!("Received request to get package info from files");
+        let package_paths = request.into_inner().package_paths;
+        let package_infos = futures_util::stream::iter(package_paths)
+            .then(|package_path| async move {
+                let package_path = PathBuf::from(package_path);
+                if !package_path.is_absolute() {
+                    let error = anyhow::anyhow!("Package path must be absolute: {package_path:?}");
+                    log::error!("{error}");
+                    return package_info_from_file_failure(&package_path, &error);
+                }
 
-        if !package_path.is_absolute() {
-            let result = JsonResult::<InspectLocalPackageResponse>::failure(format!(
-                "Package path must be absolute: {package_path:?}"
-            ));
-            return Ok(Response::new(InspectLocalPackageProtoResponse { result }));
-        }
+                let has_package_ext = crate::package_manager::parser::has_package_extension(
+                    &package_path,
+                    self.config.packages_ext(),
+                );
+                if let Ok(meta) = tokio::fs::metadata(&package_path).await
+                    && (!meta.is_file() || !has_package_ext)
+                {
+                    let error = anyhow::anyhow!(
+                        "Package path is not a valid package file: {package_path:?}"
+                    );
+                    log::error!("{error}");
+                    return package_info_from_file_failure(&package_path, &error);
+                }
 
-        // Accept regular files with the expected package extension only — a
-        // mismatched extension can never install, so reject it here too.
-        let has_package_ext = crate::package_manager::parser::has_package_extension(
-            &package_path,
-            self.config.packages_ext(),
-        );
-        if let Ok(meta) = tokio::fs::metadata(&package_path).await
-            && (!meta.is_file() || !has_package_ext)
-        {
-            let result = JsonResult::<InspectLocalPackageResponse>::failure(format!(
-                "Package path is not a valid package file: {package_path:?}"
-            ));
-            return Ok(Response::new(InspectLocalPackageProtoResponse { result }));
-        }
+                let pkg_path = package_path.clone();
+                let public_key_path = self.config.public_key_file_path().to_owned();
+                let package_file = tokio::task::spawn_blocking(move || {
+                    crate::package_manager::parser::parse_package_file(
+                        pkg_path,
+                        Path::new(&public_key_path),
+                    )
+                    .and_then(|r| r.package_file)
+                })
+                .await
+                .context("list_package_info_from_files task panicked")
+                .and_then(|r| r);
 
-        let pkg_path = package_path.clone();
-        let public_key_path = self.config.public_key_file_path().to_owned();
-        let result = tokio::task::spawn_blocking(move || {
-            crate::package_manager::parser::parse_package_file(
-                pkg_path,
-                Path::new(&public_key_path),
-            )
-            .and_then(|r| r.package_file)
-        })
-        .await
-        .context("inspect_local_package task panicked")
-        .and_then(|r| r);
+                match package_file {
+                    Ok(package_file) => PackageInfoFromFile {
+                        success: true,
+                        metadata: Some(serialize_metadata(package_file.metadata())),
+                        package_path: package_path.to_string_lossy().into_owned(),
+                        error_summary: None,
+                        error_details: None,
+                    },
+                    Err(e) => {
+                        log::error!("Failed to get package info from file {package_path:?}: {e:?}");
+                        let error = e.context(format!(
+                            "Failed to get package info from file {package_path:?}"
+                        ));
+                        package_info_from_file_failure(&package_path, &error)
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
 
-        let result_json = into_json_result(
-            result,
-            |package_file| {
-                let metadata = package_file.metadata();
-                let package_path = package_path.to_string_lossy().into_owned();
-                let response = InspectLocalPackageResponse {
-                    metadata: serialize_metadata(metadata),
-                    package_path,
-                };
-                JsonResult::success(response)
-            },
-            |e| {
-                log::error!("Failed to inspect local package {package_path:?}: {e:?}");
-                JsonResult::<InspectLocalPackageResponse>::failure(format!(
-                    "Failed to inspect local package: {package_path:?}"
-                ))
-            },
-        );
+        let result_json = JsonResult::success(package_infos);
 
-        Ok(Response::new(InspectLocalPackageProtoResponse {
+        Ok(Response::new(ListPackageInfoFromFilesProtoResponse {
             result: result_json,
         }))
-    }
-
-    async fn get_all_package_info(
-        &self,
-        _request: Request<()>,
-    ) -> Result<Response<AllPackageInformationResponse>, Status> {
-        log::debug!("Received request to get all package info");
-        let all_info = self.package_manager.get_all_package_info().await;
-
-        let result = into_json_result(
-            all_info,
-            |infos| {
-                let entries: Vec<PackageInfoResponse> = infos.into_iter().map(Into::into).collect();
-                JsonResult::success(entries)
-            },
-            |e| {
-                log::error!("Failed to get all package info: {e:?}");
-                JsonResult::<Vec<PackageInfoResponse>>::failure("Failed to get all package info")
-            },
-        );
-
-        Ok(Response::new(AllPackageInformationResponse { result }))
     }
 }
 
@@ -427,7 +451,8 @@ pub(crate) mod tests {
     use async_trait::async_trait;
     use libssam::ssam_package::PackageFsVerityInfo;
     use libssam::ssam_package::ssam_pkg_info::{
-        BrokenPackageInfo, BrokenReason, PackageInfo, PackageInfoResult, QuotaInformation,
+        BrokenPackageInfo, BrokenReason, PackageInfo as PackageStateInfo, PackageInfoResult,
+        QuotaInformation,
     };
     use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
     use libssam::superblock::FsType;
@@ -441,7 +466,7 @@ pub(crate) mod tests {
     #[derive(Debug, Clone)]
     pub(crate) struct MockPackageManagerService {
         pub packages: Arc<Mutex<HashMap<String, PackageStatusEnum>>>,
-        pub package_infos: Arc<Mutex<HashMap<String, PackageInfo>>>,
+        pub package_infos: Arc<Mutex<HashMap<String, PackageStateInfo>>>,
         pub install_results: InstallResultMap,
         pub remove_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
         pub wipe_data_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
@@ -535,7 +560,7 @@ pub(crate) mod tests {
             *self.all_package_info_error.lock().unwrap() = Some(error);
         }
 
-        pub fn set_package_info(&self, package_name: String, package_info: PackageInfo) {
+        pub fn set_package_info(&self, package_name: String, package_info: PackageStateInfo) {
             self.package_infos
                 .lock()
                 .unwrap()
@@ -772,7 +797,7 @@ pub(crate) mod tests {
                     limit: 1024,
                 };
 
-                Ok(PackageInfoResult::Normal(PackageInfo {
+                Ok(PackageInfoResult::Normal(PackageStateInfo {
                     package_metadata,
                     package_status: status.to_string(),
                     package_path: format!("/mock/packages/{package_name}.ssam"),
@@ -780,7 +805,9 @@ pub(crate) mod tests {
                     quota_info,
                 }))
             } else {
-                Err(anyhow::anyhow!("Package not found: {package_name}"))
+                Ok(PackageInfoResult::NotFound {
+                    package_name: package_name.to_owned(),
+                })
             }
         }
 
@@ -822,7 +849,7 @@ pub(crate) mod tests {
                     limit: 1024,
                 };
 
-                results.push(PackageInfoResult::Normal(PackageInfo {
+                results.push(PackageInfoResult::Normal(PackageStateInfo {
                     package_metadata,
                     package_status: status.to_string(),
                     package_path: format!("/mock/packages/{package_name}.ssam"),
@@ -855,6 +882,14 @@ pub(crate) mod tests {
         }
     }
 
+    fn first_package_info(json_result: &str) -> PackageInfo {
+        parse_json_result::<Vec<PackageInfo>>(json_result)
+            .expect("package info data should be present")
+            .into_iter()
+            .next()
+            .expect("package info data should not be empty")
+    }
+
     fn check_json_success(json_result: &str) -> bool {
         serde_json::from_str::<serde_json::Value>(json_result)
             .ok()
@@ -884,7 +919,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(ops[0].success);
         assert_eq!(ops[0].package_name, "test-package");
@@ -907,7 +942,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(!ops[0].success);
         assert_eq!(ops[0].package_name, "test-package");
@@ -931,7 +966,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 2);
         assert!(ops.iter().all(|op| op.success));
         let names: Vec<&str> = ops.iter().map(|op| op.package_name.as_str()).collect();
@@ -1005,7 +1040,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 2);
         assert!(ops.iter().all(|op| op.success));
         let names: Vec<&str> = ops.iter().map(|op| op.package_name.as_str()).collect();
@@ -1032,7 +1067,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].package_name, "pkg-a");
         assert!(ops[0].success);
@@ -1072,7 +1107,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(!ops[0].success);
         assert!(
@@ -1106,7 +1141,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(!ops[0].success);
         assert!(
@@ -1132,7 +1167,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(ops[0].success);
         assert!(
@@ -1159,7 +1194,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 2);
         assert!(ops.iter().all(|op| op.success));
         let names: Vec<&str> = ops.iter().map(|op| op.package_name.as_str()).collect();
@@ -1378,29 +1413,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_inspect_local_package_nonexistent_file() {
+    async fn test_list_package_info_from_files_nonexistent_file() {
         let (remocon, _mock_manager) = create_test_remocon();
 
-        let request = Request::new(InspectLocalPackageRequest {
-            package_path: "/nonexistent/path/package.ssam".to_string(),
+        let request = Request::new(ListPackageInfoFromFilesRequest {
+            package_paths: vec!["/nonexistent/path/package.ssam".to_string()],
         });
 
-        let response = remocon.inspect_local_package(request).await;
-        assert!(response.is_ok());
-
-        let json_result = &response.unwrap().into_inner().result;
-        assert!(!check_json_success(json_result));
-        let reason = get_json_reason(json_result);
-        assert!(reason.is_some());
+        let response = remocon.list_package_info_from_files(request).await;
+        let response = response.expect("response should be Ok").into_inner();
+        let json_result = &response.result;
+        assert!(check_json_success(json_result));
+        let infos: Vec<PackageInfoFromFile> = parse_json_result(json_result).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(!infos[0].success);
+        assert_eq!(infos[0].package_path, "/nonexistent/path/package.ssam");
         assert!(
-            reason.as_ref().unwrap().contains("Failed to inspect"),
-            "expected 'Failed to inspect' in reason, got: {}",
-            reason.unwrap()
+            infos[0]
+                .error_summary
+                .as_ref()
+                .unwrap()
+                .contains("Failed to get package info from file"),
+            "expected 'Failed to get package info from file' in reason, got: {}",
+            infos[0].error_summary.as_deref().unwrap()
         );
     }
 
     #[tokio::test]
-    async fn test_inspect_local_package_invalid_file() {
+    async fn test_list_package_info_from_files_invalid_file() {
         let (remocon, _mock_manager) = create_test_remocon();
 
         let tmp = tempfile::Builder::new()
@@ -1410,21 +1450,26 @@ pub(crate) mod tests {
         std::fs::write(tmp.path(), b"not a valid ssam package")
             .expect("temp file write should succeed");
 
-        let request = Request::new(InspectLocalPackageRequest {
-            package_path: tmp.path().to_str().unwrap().to_string(),
+        let request = Request::new(ListPackageInfoFromFilesRequest {
+            package_paths: vec![tmp.path().to_str().unwrap().to_string()],
         });
 
-        let response = remocon.inspect_local_package(request).await;
-        assert!(response.is_ok());
-
-        let json_result = &response.unwrap().into_inner().result;
-        assert!(!check_json_success(json_result));
-        let reason = get_json_reason(json_result);
-        assert!(reason.is_some());
+        let response = remocon.list_package_info_from_files(request).await;
+        let response = response.expect("response should be Ok").into_inner();
+        let json_result = &response.result;
+        assert!(check_json_success(json_result));
+        let infos: Vec<PackageInfoFromFile> = parse_json_result(json_result).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(!infos[0].success);
+        assert_eq!(
+            infos[0].package_path,
+            tmp.path().to_str().unwrap().to_owned()
+        );
+        assert!(infos[0].error_summary.is_some());
     }
 
     #[tokio::test]
-    async fn test_inspect_local_package_rejects_wrong_extension() {
+    async fn test_list_package_info_from_files_rejects_wrong_extension() {
         let (remocon, _mock_manager) = create_test_remocon();
 
         let tmp = tempfile::Builder::new()
@@ -1434,30 +1479,30 @@ pub(crate) mod tests {
         std::fs::write(tmp.path(), b"not a valid ssam package")
             .expect("temp file write should succeed");
 
-        let request = Request::new(InspectLocalPackageRequest {
-            package_path: tmp.path().to_str().unwrap().to_string(),
+        let request = Request::new(ListPackageInfoFromFilesRequest {
+            package_paths: vec![tmp.path().to_str().unwrap().to_string()],
         });
 
         let response = remocon
-            .inspect_local_package(request)
+            .list_package_info_from_files(request)
             .await
             .expect("response should be Ok");
 
         let json_result = &response.into_inner().result;
-        assert!(!check_json_success(json_result));
-        let reason = get_json_reason(json_result);
+        assert!(check_json_success(json_result));
+        let infos: Vec<PackageInfoFromFile> = parse_json_result(json_result).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(!infos[0].success);
+        let reason = infos[0].error_summary.as_deref();
         assert!(
-            reason
-                .as_ref()
-                .unwrap()
-                .contains("is not a valid package file"),
+            reason.unwrap().contains("is not a valid package file"),
             "expected 'is not a valid package file' in reason, got: {}",
             reason.unwrap()
         );
     }
 
     #[tokio::test]
-    async fn test_inspect_local_package_rejects_fifo() {
+    async fn test_list_package_info_from_files_rejects_fifo() {
         let (remocon, _mock_manager) = create_test_remocon();
 
         let temp_dir = tempfile::tempdir().expect("temp dir creation should succeed");
@@ -1469,71 +1514,88 @@ pub(crate) mod tests {
         )
         .expect("mkfifo should succeed");
 
-        let request = Request::new(InspectLocalPackageRequest {
-            package_path: fifo_path.to_str().unwrap().to_string(),
+        let request = Request::new(ListPackageInfoFromFilesRequest {
+            package_paths: vec![fifo_path.to_str().unwrap().to_string()],
         });
 
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            remocon.inspect_local_package(request),
+            remocon.list_package_info_from_files(request),
         )
         .await
-        .expect("inspect_local_package should return immediately, not block")
+        .expect("list_package_info_from_files should return immediately, not block")
         .expect("response should be Ok");
 
         let json_result = &response.into_inner().result;
-        assert!(!check_json_success(json_result));
-        let reason = get_json_reason(json_result);
+        assert!(check_json_success(json_result));
+        let infos: Vec<PackageInfoFromFile> = parse_json_result(json_result).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(!infos[0].success);
+        let reason = infos[0].error_summary.as_deref();
         assert!(
-            reason
-                .as_ref()
-                .unwrap()
-                .contains("is not a valid package file"),
+            reason.unwrap().contains("is not a valid package file"),
             "expected 'is not a valid package file' in reason, got: {}",
             reason.unwrap()
         );
     }
 
     #[tokio::test]
-    async fn test_inspect_local_package_rejects_relative_path() {
+    async fn test_list_package_info_from_files_rejects_relative_path() {
         let (remocon, _mock_manager) = create_test_remocon();
 
-        let request = Request::new(InspectLocalPackageRequest {
-            package_path: "relative/path/package.ssam".to_string(),
+        let request = Request::new(ListPackageInfoFromFilesRequest {
+            package_paths: vec!["relative/path/package.ssam".to_string()],
         });
 
-        let response = remocon.inspect_local_package(request).await;
-        assert!(response.is_ok());
-
-        let json_result = &response.unwrap().into_inner().result;
-        assert!(!check_json_success(json_result));
-        let reason = get_json_reason(json_result);
+        let response = remocon.list_package_info_from_files(request).await;
+        let response = response.expect("response should be Ok").into_inner();
+        let json_result = &response.result;
+        assert!(check_json_success(json_result));
+        let infos: Vec<PackageInfoFromFile> = parse_json_result(json_result).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(!infos[0].success);
+        let reason = infos[0].error_summary.as_deref();
         assert!(
-            reason
-                .as_ref()
-                .unwrap()
-                .contains("Package path must be absolute"),
+            reason.unwrap().contains("Package path must be absolute"),
             "expected 'Package path must be absolute' in reason, got: {}",
             reason.unwrap()
         );
     }
 
     #[tokio::test]
-    async fn test_get_all_package_info_empty() {
+    async fn test_list_package_info_from_files_empty() {
         let (remocon, _mock_manager) = create_test_remocon();
 
-        let request = Request::new(());
-        let response = remocon.get_all_package_info(request).await;
+        let request = Request::new(ListPackageInfoFromFilesRequest {
+            package_paths: vec![],
+        });
+        let response = remocon
+            .list_package_info_from_files(request)
+            .await
+            .expect("empty file list should succeed");
+        let json_result = &response.into_inner().result;
+        let infos: Vec<libssam::PackageInfoFromFile> = parse_json_result(json_result).unwrap();
+        assert!(infos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_package_info_empty_names() {
+        let (remocon, _mock_manager) = create_test_remocon();
+
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec![],
+        });
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let packages: Vec<PackageInfoResponse> = parse_json_result(json_result).unwrap();
+        let packages: Vec<PackageInfo> = parse_json_result(json_result).unwrap();
         assert!(packages.is_empty());
     }
 
     #[tokio::test]
-    async fn test_get_all_package_info_mixed_states() {
+    async fn test_list_package_info_empty_names_mixed_states() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package("ready-pkg".to_string(), PackageStatusEnum::Ready);
@@ -1546,36 +1608,39 @@ pub(crate) mod tests {
             PackageStatusEnum::Broken(BrokenReason::new("broken-pkg", "parse failure")),
         );
 
-        let request = Request::new(());
-        let response = remocon.get_all_package_info(request).await;
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec![],
+        });
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let packages: Vec<PackageInfoResponse> = parse_json_result(json_result).unwrap();
+        let packages: Vec<PackageInfo> = parse_json_result(json_result).unwrap();
         assert_eq!(packages.len(), 3);
 
-        let by_name: std::collections::HashMap<String, &PackageInfoResponse> =
+        let by_name: std::collections::HashMap<String, &PackageInfo> =
             packages.iter().map(|p| (p.name.clone(), p)).collect();
 
         let ready = by_name.get("ready-pkg").expect("ready-pkg should exist");
-        assert!(!ready.broken);
+        assert!(ready.success);
         assert_eq!(ready.status, "Ready");
 
         let running = by_name
             .get("running-pkg")
             .expect("running-pkg should exist");
-        assert!(!running.broken);
+        assert!(running.success);
         assert!(running.status.contains("Running"));
 
         let broken = by_name.get("broken-pkg").expect("broken-pkg should exist");
-        assert!(broken.broken);
+        assert!(broken.success);
+        assert_eq!(broken.status, "Broken");
         assert!(broken.error_summary.is_some());
         assert!(broken.error_details.is_some());
     }
 
     #[tokio::test]
-    async fn test_get_all_package_info_with_predefined_info() {
+    async fn test_list_package_info_empty_names_with_predefined_info() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package("custom-pkg".to_string(), PackageStatusEnum::Ready);
@@ -1616,7 +1681,7 @@ pub(crate) mod tests {
             },
         )
         .unwrap();
-        let custom_info = PackageInfo {
+        let custom_info = PackageStateInfo {
             package_metadata: metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/custom-pkg.ssam".to_string(),
@@ -1628,13 +1693,15 @@ pub(crate) mod tests {
         };
         mock_manager.set_package_info("custom-pkg".to_string(), custom_info);
 
-        let request = Request::new(());
-        let response = remocon.get_all_package_info(request).await;
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec![],
+        });
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let packages: Vec<PackageInfoResponse> = parse_json_result(json_result).unwrap();
+        let packages: Vec<PackageInfo> = parse_json_result(json_result).unwrap();
         assert_eq!(packages.len(), 1);
 
         let pkg = &packages[0];
@@ -1644,20 +1711,22 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_all_package_info_failure() {
+    async fn test_list_package_info_empty_names_failure() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.set_all_package_info_error("Package info retrieval failed".to_string());
 
-        let request = Request::new(());
-        let response = remocon.get_all_package_info(request).await;
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec![],
+        });
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let result = &response.unwrap().into_inner().result;
         assert!(!check_json_success(result));
         let reason = get_json_reason(result);
         assert!(reason.is_some());
-        assert!(reason.unwrap().contains("Failed to get all package info"));
+        assert!(reason.unwrap().contains("Failed to get package info"));
     }
 
     #[tokio::test]
@@ -1711,7 +1780,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_packages_status_mixed_states() {
+    async fn test_list_packages_mixed_states() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package(
@@ -1725,7 +1794,7 @@ pub(crate) mod tests {
         );
 
         let request = Request::new(());
-        let response = remocon.list_packages_status(request).await;
+        let response = remocon.list_packages(request).await;
 
         assert!(response.is_ok());
         let json_result = &response.unwrap().into_inner().result;
@@ -1832,7 +1901,7 @@ pub(crate) mod tests {
         assert!(start_response.is_ok());
 
         let status_request = Request::new(());
-        let status_response = remocon.list_packages_status(status_request).await;
+        let status_response = remocon.list_packages(status_request).await;
         assert!(status_response.is_ok());
 
         let json_result = &status_response.unwrap().into_inner().result;
@@ -1863,7 +1932,7 @@ pub(crate) mod tests {
         assert!(response.is_ok());
         let result = &response.unwrap().into_inner().result;
         assert!(check_json_success(result));
-        let ops: Vec<PackageOpResult> = parse_json_result(result).unwrap();
+        let ops: Vec<PackageActionResult> = parse_json_result(result).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(!ops[0].success);
     }
@@ -1885,7 +1954,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_package_info_with_predefined_info() {
+    async fn test_list_package_info_with_predefined_info() {
         let (remocon, mock_manager) = create_test_remocon();
 
         let package_config = libssam::config::PackageConfigSpec {
@@ -1924,7 +1993,7 @@ pub(crate) mod tests {
             },
         )
         .unwrap();
-        let package_info = PackageInfo {
+        let package_info = PackageStateInfo {
             package_metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/test-package.ssam".to_string(),
@@ -1937,17 +2006,17 @@ pub(crate) mod tests {
 
         mock_manager.set_package_info("test-package".to_string(), package_info.clone());
 
-        let request = Request::new(PackageInformationRequest {
-            package_name: "test-package".to_string(),
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec!["test-package".to_string()],
         });
 
-        let response = remocon.get_package_info(request).await;
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let package_info_response: PackageInfoResponse = parse_json_result(json_result).unwrap();
-        assert!(!package_info_response.broken);
+        let package_info_response = first_package_info(json_result);
+        assert!(package_info_response.success);
         assert_eq!(package_info_response.name, "test-package");
         assert_eq!(
             package_info_response.package_path,
@@ -1956,22 +2025,22 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_package_info_with_default_info() {
+    async fn test_list_package_info_with_default_info() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package("default-package".to_string(), PackageStatusEnum::Ready);
 
-        let request = Request::new(PackageInformationRequest {
-            package_name: "default-package".to_string(),
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec!["default-package".to_string()],
         });
 
-        let response = remocon.get_package_info(request).await;
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let package_info_response: PackageInfoResponse = parse_json_result(json_result).unwrap();
-        assert!(!package_info_response.broken);
+        let package_info_response = first_package_info(json_result);
+        assert!(package_info_response.success);
         assert_eq!(package_info_response.name, "default-package");
         assert_eq!(package_info_response.status, "Ready");
         assert_eq!(
@@ -1981,7 +2050,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_package_info_running_package() {
+    async fn test_list_package_info_running_package() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package(
@@ -1989,16 +2058,16 @@ pub(crate) mod tests {
             PackageStatusEnum::Running("running-package".to_string()),
         );
 
-        let request = Request::new(PackageInformationRequest {
-            package_name: "running-package".to_string(),
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec!["running-package".to_string()],
         });
 
-        let response = remocon.get_package_info(request).await;
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let package_info_response: PackageInfoResponse = parse_json_result(json_result).unwrap();
+        let package_info_response = first_package_info(json_result);
         assert_eq!(package_info_response.name, "running-package");
         assert_eq!(
             package_info_response.package_path,
@@ -2014,7 +2083,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_package_info_broken_package() {
+    async fn test_list_package_info_broken_package() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package(
@@ -2022,18 +2091,19 @@ pub(crate) mod tests {
             PackageStatusEnum::Broken(BrokenReason::new("broken-package", "detailed error")),
         );
 
-        let request = Request::new(PackageInformationRequest {
-            package_name: "broken-package".to_string(),
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec!["broken-package".to_string()],
         });
 
-        let response = remocon.get_package_info(request).await;
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let package_info_response: PackageInfoResponse = parse_json_result(json_result).unwrap();
+        let package_info_response = first_package_info(json_result);
         assert_eq!(package_info_response.name, "broken-package");
-        assert!(package_info_response.broken);
+        assert!(package_info_response.success);
+        assert_eq!(package_info_response.status, "Broken");
         assert_eq!(
             package_info_response.package_path,
             "/mock/packages/broken-package.ssam"
@@ -2043,45 +2113,86 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_package_info_package_not_found() {
+    async fn test_list_package_info_package_not_found() {
         let (remocon, _mock_manager) = create_test_remocon();
 
-        let request = Request::new(PackageInformationRequest {
-            package_name: "non-existent-package".to_string(),
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec!["non-existent-package".to_string()],
         });
 
-        let response = remocon.get_package_info(request).await;
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
         let json_result = &response.unwrap().into_inner().result;
-        assert!(!check_json_success(json_result));
+        assert!(check_json_success(json_result));
+        let package_info = first_package_info(json_result);
+        assert!(!package_info.success);
+        assert_eq!(package_info.status, "NotFound");
+        assert_eq!(package_info.name, "non-existent-package");
         assert!(
-            get_json_reason(json_result)
+            package_info
+                .error_summary
                 .unwrap()
-                .contains("Failed to get package info")
+                .contains("non-existent-package")
         );
     }
 
     #[tokio::test]
-    async fn test_get_package_info_empty_package_name() {
-        let (remocon, _mock_manager) = create_test_remocon();
+    async fn test_list_package_info_multiple_names_returns_each_result() {
+        let (remocon, mock_manager) = create_test_remocon();
 
-        let request = Request::new(PackageInformationRequest {
-            package_name: String::new(),
+        mock_manager.add_package("ready-package".to_string(), PackageStatusEnum::Ready);
+        mock_manager.add_package(
+            "broken-package".to_string(),
+            PackageStatusEnum::Broken(BrokenReason::new("broken-package", "parse failure")),
+        );
+
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec![
+                "ready-package".to_string(),
+                "broken-package".to_string(),
+                "missing-package".to_string(),
+            ],
         });
+        let response = remocon.list_package_info(request).await.unwrap();
+        let json_result = &response.into_inner().result;
 
-        let response = remocon.get_package_info(request).await;
-        assert!(response.is_ok());
-        let json_result = &response.unwrap().into_inner().result;
-        assert!(!check_json_success(json_result));
+        assert!(check_json_success(json_result));
+        let packages: Vec<PackageInfo> = parse_json_result(json_result).unwrap();
+        assert_eq!(packages.len(), 3);
+        assert_eq!(packages[0].name, "ready-package");
+        assert!(packages[0].success);
+        assert_eq!(packages[1].name, "broken-package");
+        assert!(packages[1].success);
+        assert_eq!(packages[1].status, "Broken");
+        assert_eq!(packages[2].name, "missing-package");
+        assert!(!packages[2].success);
+        assert_eq!(packages[2].status, "NotFound");
         assert!(
-            get_json_reason(json_result)
-                .unwrap()
-                .contains("Failed to get package info")
+            packages[2]
+                .error_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("missing-package"))
         );
     }
 
     #[tokio::test]
-    async fn test_get_package_info_multiple_packages() {
+    async fn test_list_package_info_empty_package_name() {
+        let (remocon, _mock_manager) = create_test_remocon();
+
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec![String::new(), "  ".to_string()],
+        });
+
+        let response = remocon.list_package_info(request).await;
+        assert!(response.is_ok());
+        let json_result = &response.unwrap().into_inner().result;
+        assert!(check_json_success(json_result));
+        let packages: Vec<PackageInfo> = parse_json_result(json_result).unwrap();
+        assert!(packages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_package_info_multiple_packages() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package("package1".to_string(), PackageStatusEnum::Ready);
@@ -2126,7 +2237,7 @@ pub(crate) mod tests {
             },
         )
         .unwrap();
-        let custom_info = PackageInfo {
+        let custom_info = PackageStateInfo {
             package_metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/package1.ssam".to_string(),
@@ -2138,26 +2249,22 @@ pub(crate) mod tests {
         };
         mock_manager.set_package_info("package1".to_string(), custom_info);
 
-        let request1 = Request::new(PackageInformationRequest {
-            package_name: "package1".to_string(),
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec!["package1".to_string(), "package2".to_string()],
         });
-        let response1 = remocon.get_package_info(request1).await;
-        assert!(response1.is_ok());
-        let json_result1 = &response1.unwrap().into_inner().result;
-        assert!(check_json_success(json_result1));
-        let package_info1: PackageInfoResponse = parse_json_result(json_result1).unwrap();
+        let response = remocon.list_package_info(request).await;
+        assert!(response.is_ok());
+        let json_result = &response.unwrap().into_inner().result;
+        assert!(check_json_success(json_result));
+        let packages: Vec<PackageInfo> = parse_json_result(json_result).unwrap();
+        assert_eq!(packages.len(), 2);
+
+        let package_info1 = &packages[0];
         assert_eq!(package_info1.name, "package1");
         assert_eq!(package_info1.package_path, "/mock/packages/package1.ssam");
         assert_eq!(package_info1.quota.as_ref().map(|q| q.limit), Some(512));
 
-        let request2 = Request::new(PackageInformationRequest {
-            package_name: "package2".to_string(),
-        });
-        let response2 = remocon.get_package_info(request2).await;
-        assert!(response2.is_ok());
-        let json_result2 = &response2.unwrap().into_inner().result;
-        assert!(check_json_success(json_result2));
-        let package_info2: PackageInfoResponse = parse_json_result(json_result2).unwrap();
+        let package_info2 = &packages[1];
         assert_eq!(package_info2.name, "package2");
         assert_eq!(package_info2.package_path, "/mock/packages/package2.ssam");
         assert!(package_info2.status.contains("Running"));
@@ -2165,7 +2272,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_package_info_config_serialization() {
+    async fn test_list_package_info_config_serialization() {
         let (remocon, mock_manager) = create_test_remocon();
 
         let complex_config = libssam::config::PackageConfigSpec {
@@ -2204,7 +2311,7 @@ pub(crate) mod tests {
             },
         )
         .unwrap();
-        let complex_info = PackageInfo {
+        let complex_info = PackageStateInfo {
             package_metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/complex-package.ssam".to_string(),
@@ -2217,16 +2324,16 @@ pub(crate) mod tests {
 
         mock_manager.set_package_info("complex-package".to_string(), complex_info);
 
-        let request = Request::new(PackageInformationRequest {
-            package_name: "complex-package".to_string(),
+        let request = Request::new(ListPackageInfoRequest {
+            package_names: vec!["complex-package".to_string()],
         });
 
-        let response = remocon.get_package_info(request).await;
+        let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
 
         let json_result = &response.unwrap().into_inner().result;
         assert!(check_json_success(json_result));
-        let package_info_response: PackageInfoResponse = parse_json_result(json_result).unwrap();
+        let package_info_response = first_package_info(json_result);
 
         assert!(package_info_response.metadata.is_some());
         assert_eq!(
@@ -2247,27 +2354,27 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_package_info_concurrent_access() {
+    async fn test_list_package_info_concurrent_access() {
         let (remocon, mock_manager) = create_test_remocon();
 
         mock_manager.add_package("concurrent1".to_string(), PackageStatusEnum::Ready);
         mock_manager.add_package("concurrent2".to_string(), PackageStatusEnum::Ready);
         mock_manager.add_package("concurrent3".to_string(), PackageStatusEnum::Ready);
 
-        let request1 = Request::new(PackageInformationRequest {
-            package_name: "concurrent1".to_string(),
+        let request1 = Request::new(ListPackageInfoRequest {
+            package_names: vec!["concurrent1".to_string()],
         });
-        let request2 = Request::new(PackageInformationRequest {
-            package_name: "concurrent2".to_string(),
+        let request2 = Request::new(ListPackageInfoRequest {
+            package_names: vec!["concurrent2".to_string()],
         });
-        let request3 = Request::new(PackageInformationRequest {
-            package_name: "concurrent3".to_string(),
+        let request3 = Request::new(ListPackageInfoRequest {
+            package_names: vec!["concurrent3".to_string()],
         });
 
         let (response1, response2, response3) = tokio::join!(
-            remocon.get_package_info(request1),
-            remocon.get_package_info(request2),
-            remocon.get_package_info(request3),
+            remocon.list_package_info(request1),
+            remocon.list_package_info(request2),
+            remocon.list_package_info(request3),
         );
 
         assert!(response1.is_ok());
@@ -2282,9 +2389,9 @@ pub(crate) mod tests {
         assert!(check_json_success(json_result2));
         assert!(check_json_success(json_result3));
 
-        let package_info1: PackageInfoResponse = parse_json_result(json_result1).unwrap();
-        let package_info2: PackageInfoResponse = parse_json_result(json_result2).unwrap();
-        let package_info3: PackageInfoResponse = parse_json_result(json_result3).unwrap();
+        let package_info1 = first_package_info(json_result1);
+        let package_info2 = first_package_info(json_result2);
+        let package_info3 = first_package_info(json_result3);
 
         assert_eq!(package_info1.name, "concurrent1");
         assert_eq!(package_info2.name, "concurrent2");

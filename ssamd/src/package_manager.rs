@@ -883,7 +883,7 @@ impl PackageManagerActor {
                     filename: package_name.clone(),
                     info,
                 })
-                .ok_or_else(|| anyhow::anyhow!("Package not found: {package_name}"))
+                .map_or_else(|| Ok(PackageInfoResult::NotFound { package_name }), Ok)
         }
     }
 
@@ -1422,7 +1422,11 @@ mod tests {
         async fn test_get_package_info_not_found() {
             let (pm, _b, _d) = setup_package_manager().await;
             let result = pm.get_package_info("nonexistent").await;
-            assert!(result.is_err());
+            assert!(matches!(
+                result,
+                Ok(PackageInfoResult::NotFound { package_name })
+                    if package_name == "nonexistent"
+            ));
         }
 
         #[tokio::test]

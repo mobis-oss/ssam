@@ -39,8 +39,8 @@ message WipePackageDataResponse {
     string result = 1;
 }
 
-message PackageInformationRequest {
-    string package_name = 1;
+message ListPackageInfoRequest {
+    repeated string package_names = 1;
 }
 
 message StartPackageResponse {
@@ -59,27 +59,23 @@ message RemovePackageResponse {
     string result = 1;
 }
 
-message ListPackagesStatusResponse {
+message ListPackagesResponse {
     string result = 1;
 }
 
-message TimeLineInformationResponse {
+message GetTimelineInfoResponse {
     string result = 1;
 }
 
-message PackageInformationResponse {
+message ListPackageInfoResponse {
     string result = 1;
 }
 
-message InspectLocalPackageRequest {
-    string package_path = 1;
+message ListPackageInfoFromFilesRequest {
+    repeated string package_paths = 1;
 }
 
-message InspectLocalPackageResponse {
-    string result = 1;
-}
-
-message AllPackageInformationResponse {
+message ListPackageInfoFromFilesResponse {
     string result = 1;
 }
 
@@ -89,9 +85,8 @@ service Remocon {
     rpc InstallPackage(InstallPackageRequest) returns (InstallPackageResponse);
     rpc RemovePackage(RemovePackageRequest) returns (RemovePackageResponse);
     rpc WipePackageData(WipePackageDataRequest) returns (WipePackageDataResponse);
-    rpc ListPackagesStatus(google.protobuf.Empty) returns (ListPackagesStatusResponse);
-    rpc GetTimelineInfo(google.protobuf.Empty) returns (TimeLineInformationResponse);
-    rpc GetPackageInfo(PackageInformationRequest) returns (PackageInformationResponse);
-    rpc InspectLocalPackage(InspectLocalPackageRequest) returns (InspectLocalPackageResponse);
-    rpc GetAllPackageInfo(google.protobuf.Empty) returns (AllPackageInformationResponse);
+    rpc ListPackages(google.protobuf.Empty) returns (ListPackagesResponse);
+    rpc GetTimelineInfo(google.protobuf.Empty) returns (GetTimelineInfoResponse);
+    rpc ListPackageInfo(ListPackageInfoRequest) returns (ListPackageInfoResponse);
+    rpc ListPackageInfoFromFiles(ListPackageInfoFromFilesRequest) returns (ListPackageInfoFromFilesResponse);
 }

@@ -158,7 +158,7 @@ flowchart LR
 ## Package state machine
 
 각 패키지는 `TransitionManager` 가 구동하는 생명주기 상태 머신으로 관리됩니다. 패키지별 현재 상태는
-[`ListPackagesStatus`](../reference/remocon-rpc.ko.md#listpackagesstatus) RPC (혹은 `ssam list`)로 조회할 수 있습니다.
+[`ListPackages`](../reference/remocon-rpc.ko.md#listpackages) RPC (혹은 `ssam list`)로 조회할 수 있습니다.
 
 | 상태 | 의미 |
 | --- | --- |

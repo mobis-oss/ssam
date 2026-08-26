@@ -17,8 +17,8 @@ pub mod stop;
 pub mod timeline_info;
 pub mod wipe_data;
 
-use libssam::PackageInfoResponse;
-use libssam::PackageOpResult;
+use libssam::PackageActionResult;
+use libssam::PackageInfo;
 
 use crate::client::Client;
 
@@ -59,7 +59,7 @@ pub(crate) fn multi_package_command(
 }
 
 pub(crate) fn write_package_op_results(
-    results: &[PackageOpResult],
+    results: &[PackageActionResult],
     stdout: &mut dyn Write,
 ) -> io::Result<bool> {
     let mut all_success = true;
@@ -79,19 +79,19 @@ pub(crate) fn write_package_op_results(
     Ok(all_success)
 }
 
-/// Render the detail section of a `PackageInfoResponse` to the given writer.
+/// Render the detail section of a `PackageInfo` to the given writer.
 ///
 /// Shared by `list --detail` and `pkg-info` to avoid duplicating the
 /// formatting logic in two places.
-pub(crate) fn write_package_detail(
-    stdout: &mut dyn Write,
-    info: &PackageInfoResponse,
-) -> io::Result<()> {
+pub(crate) fn write_package_detail(stdout: &mut dyn Write, info: &PackageInfo) -> io::Result<()> {
     writeln!(stdout, "Info:")?;
-    writeln!(stdout, "    Path: {}", info.package_path)?;
     writeln!(stdout, "    Status: {}", info.status)?;
 
-    if info.broken {
+    if info.success {
+        writeln!(stdout, "    Path: {}", info.package_path)?;
+    }
+
+    if !info.success || info.metadata.is_none() {
         writeln!(stdout, "    Name: {}", info.name)?;
         if let Some(summary) = &info.error_summary {
             writeln!(stdout, "    Error Summary: {summary}")?;
@@ -99,19 +99,20 @@ pub(crate) fn write_package_detail(
         if let Some(details) = &info.error_details {
             writeln!(stdout, "    Error Details: {details}")?;
         }
-    } else {
-        if let Some(metadata) = &info.metadata {
-            writeln!(stdout, "    Version: {}", metadata.version)?;
-            writeln!(stdout, "    Name: {}", metadata.package_name)?;
-            writeln!(stdout, "    Description: {}", metadata.description)?;
-        }
+        return Ok(());
+    }
 
-        if let Some(quota) = &info.quota {
-            writeln!(stdout)?;
-            writeln!(stdout, "Quota:")?;
-            writeln!(stdout, "    Enabled: {}", quota.enabled)?;
-            writeln!(stdout, "    Limit: {} MB", quota.limit)?;
-        }
+    if let Some(metadata) = &info.metadata {
+        writeln!(stdout, "    Version: {}", metadata.version)?;
+        writeln!(stdout, "    Name: {}", metadata.package_name)?;
+        writeln!(stdout, "    Description: {}", metadata.description)?;
+    }
+
+    if let Some(quota) = &info.quota {
+        writeln!(stdout)?;
+        writeln!(stdout, "Quota:")?;
+        writeln!(stdout, "    Enabled: {}", quota.enabled)?;
+        writeln!(stdout, "    Limit: {} MB", quota.limit)?;
     }
 
     Ok(())

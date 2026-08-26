@@ -43,14 +43,13 @@ control packages.
 | --- | --- | --- | --- |
 | [`InstallPackage`](#installpackage) | [`InstallPackageRequest`](#installpackagerequest) | [`InstallPackageResponse`](#installpackageresponse) | [`installResponse`](#installresponse) |
 | [`RemovePackage`](#removepackage) | [`RemovePackageRequest`](#removepackagerequest) | [`RemovePackageResponse`](#removepackageresponse) | *(none)* |
-| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#startpackageresponse) | array of [`packageOpResult`](#packageopresult) |
-| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#stoppackageresponse) | array of [`packageOpResult`](#packageopresult) |
-| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#wipepackagedataresponse) | array of [`packageOpResult`](#packageopresult) |
-| [`ListPackagesStatus`](#listpackagesstatus) | `google.protobuf.Empty` | [`ListPackagesStatusResponse`](#listpackagesstatusresponse) | array of [`packageStatusEntry`](#packagestatusentry) |
-| [`GetPackageInfo`](#getpackageinfo) | [`PackageInformationRequest`](#packageinformationrequest) | [`PackageInformationResponse`](#packageinformationresponse) | [`packageInfoResponse`](#packageinforesponse) |
-| [`GetAllPackageInfo`](#getallpackageinfo) | `google.protobuf.Empty` | [`AllPackageInformationResponse`](#allpackageinformationresponse) | array of [`packageInfoResponse`](#packageinforesponse) |
-| [`InspectLocalPackage`](#inspectlocalpackage) | [`InspectLocalPackageRequest`](#inspectlocalpackagerequest) | [`InspectLocalPackageResponse`](#inspectlocalpackageresponse) | [`inspectLocalPackageResponse`](#inspectlocalpackageresponse-data-payload) |
-| [`GetTimelineInfo`](#gettimelineinfo) | `google.protobuf.Empty` | [`TimeLineInformationResponse`](#timelineinformationresponse) | [`timelineData`](#timelinedata) |
+| [`StartPackage`](#startpackage) | [`StartPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StartPackageResponse`](#startpackageresponse) | array of [`packageActionResult`](#packageactionresult) |
+| [`StopPackage`](#stoppackage) | [`StopPackageRequest`](#startpackagerequest--stoppackagerequest) | [`StopPackageResponse`](#stoppackageresponse) | array of [`packageActionResult`](#packageactionresult) |
+| [`WipePackageData`](#wipepackagedata) | [`WipePackageDataRequest`](#wipepackagedatarequest) | [`WipePackageDataResponse`](#wipepackagedataresponse) | array of [`packageActionResult`](#packageactionresult) |
+| [`ListPackages`](#listpackages) | `google.protobuf.Empty` | [`ListPackagesResponse`](#listpackagesresponse) | array of [`packageStatusEntry`](#packagestatusentry) |
+| [`ListPackageInfo`](#listpackageinfo) | [`ListPackageInfoRequest`](#listpackageinforequest) | [`ListPackageInfoResponse`](#listpackageinforesponse) | array of [`packageInfo`](#packageinfo) |
+| [`ListPackageInfoFromFiles`](#listpackageinfofromfiles) | [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest) | [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse) | array of [`packageInfoFromFile`](#packageinfofromfile-data-payload-item) |
+| [`GetTimelineInfo`](#gettimelineinfo) | `google.protobuf.Empty` | [`GetTimelineInfoResponse`](#gettimelineinforesponse) | [`timelineData`](#timelinedata) |
 
 ---
 
@@ -92,7 +91,7 @@ Start one or more packages.
 
 - **Request:** [`StartPackageRequest`](#startpackagerequest--stoppackagerequest)
 - **Response:** [`StartPackageResponse`](#startpackageresponse)
-- **Response data payload:** array of [`packageOpResult`](#packageopresult)
+- **Response data payload:** array of [`packageActionResult`](#packageactionresult)
 
 ### `StopPackage`
 
@@ -100,7 +99,7 @@ Stop one or more packages.
 
 - **Request:** [`StopPackageRequest`](#startpackagerequest--stoppackagerequest)
 - **Response:** [`StopPackageResponse`](#stoppackageresponse)
-- **Response data payload:** array of [`packageOpResult`](#packageopresult)
+- **Response data payload:** array of [`packageActionResult`](#packageactionresult)
 
 ### `WipePackageData`
 
@@ -108,53 +107,47 @@ Clear stored data for one or more packages.
 
 - **Request:** [`WipePackageDataRequest`](#wipepackagedatarequest)
 - **Response:** [`WipePackageDataResponse`](#wipepackagedataresponse)
-- **Response data payload:** array of [`packageOpResult`](#packageopresult)
+- **Response data payload:** array of [`packageActionResult`](#packageactionresult)
 
-### `ListPackagesStatus`
+### `ListPackages`
 
 List installed packages and their status.
 
 - **Request:** `google.protobuf.Empty`
-- **Response:** [`ListPackagesStatusResponse`](#listpackagesstatusresponse)
+- **Response:** [`ListPackagesResponse`](#listpackagesresponse)
 - **Response data payload:** array of [`packageStatusEntry`](#packagestatusentry)
 
-### `GetPackageInfo`
+### `ListPackageInfo`
 
-Details for one installed package.
+Details for one or more installed packages. An empty `package_names` list
+returns all installed packages; whitespace-only names are ignored.
 
-- **Request:** [`PackageInformationRequest`](#packageinformationrequest)
-- **Response:** [`PackageInformationResponse`](#packageinformationresponse)
-- **Response data payload:** [`packageInfoResponse`](#packageinforesponse)
+- **Request:** [`ListPackageInfoRequest`](#listpackageinforequest)
+- **Response:** [`ListPackageInfoResponse`](#listpackageinforesponse)
+- **Response data payload:** array of [`packageInfo`](#packageinfo)
 
-### `GetAllPackageInfo`
+### `ListPackageInfoFromFiles`
 
-Details for all installed packages.
+Details for package files that haven't been installed. One result is returned
+per requested path in input order.
 
-- **Request:** `google.protobuf.Empty`
-- **Response:** [`AllPackageInformationResponse`](#allpackageinformationresponse)
-- **Response data payload:** array of [`packageInfoResponse`](#packageinforesponse)
-
-### `InspectLocalPackage`
-
-Details for one package that hasn't been installed.
-
-- **Request:** [`InspectLocalPackageRequest`](#inspectlocalpackagerequest)
-- **Response:** [`InspectLocalPackageResponse`](#inspectlocalpackageresponse)
-- **Response data payload:** [`inspectLocalPackageResponse`](#inspectlocalpackageresponse-data-payload)
+- **Request:** [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest)
+- **Response:** [`ListPackageInfoFromFilesResponse`](#listpackageinfofromfilesresponse)
+- **Response data payload:** array of [`packageInfoFromFile`](#packageinfofromfile-data-payload-item)
 
 ### `GetTimelineInfo`
 
 Daemon timeline / uptime information.
 
 - **Request:** `google.protobuf.Empty`
-- **Response:** [`TimeLineInformationResponse`](#timelineinformationresponse)
+- **Response:** [`GetTimelineInfoResponse`](#gettimelineinforesponse)
 - **Response data payload:** [`timelineData`](#timelinedata)
 
 ---
 
 ## Request messages
 
-`ListPackagesStatus`, `GetAllPackageInfo`, and `GetTimelineInfo` take
+`ListPackages` and `GetTimelineInfo` take
 `google.protobuf.Empty` and have no request fields of their own — only the
 messages below do.
 
@@ -184,17 +177,17 @@ messages below do.
 | --- | --- | --- |
 | `package_names` | `repeated string` | One or more packages whose stored data to wipe. When the list is empty (`[]`), it targets all installed packages. |
 
-### `PackageInformationRequest`
+### `ListPackageInfoRequest`
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `package_name` | `string` | Name of the installed package to query |
+| `package_names` | `repeated string` | Names of the installed packages to query. An empty list means all installed packages |
 
-### `InspectLocalPackageRequest`
+### `ListPackageInfoFromFilesRequest`
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `package_path` | `string` | Path to an SSAM package file to query without installing |
+| `package_paths` | `repeated string` | Paths to SSAM package files to query without installing. An empty list returns an empty result |
 
 ---
 
@@ -216,7 +209,7 @@ failure, `reason` carries a human-readable message instead. `data` and
 
 | Field | Type | Presence | Meaning |
 | --- | --- | --- | --- |
-| `schema_version` | `string` | always | Response schema version. Current value is `"2"`. A missing `schema_version` is treated as the current version. |
+| `schema_version` | `string` | always | Response schema version. |
 | `success` | `bool` | always | `true` for a successful call, `false` for a failure. |
 | `data` | [resp data payload](#response-data-payload) | success only | Omitted when the operation returns no data (e.g. `RemovePackage`); see [API at a Glance](#api-at-a-glance) for the exact shape per RPC. |
 | `reason` | `string` | failure only | Human-readable failure message. |
@@ -247,39 +240,34 @@ shape; it is returned by its own method.
 ### `StartPackageResponse`
 
 - **Returned by:** [`StartPackage`](#startpackage)
-- **Response data payload:** array of [`packageOpResult`](#packageopresult)
+- **Response data payload:** array of [`packageActionResult`](#packageactionresult)
 
 ### `StopPackageResponse`
 
 - **Returned by:** [`StopPackage`](#stoppackage)
-- **Response data payload:** array of [`packageOpResult`](#packageopresult)
+- **Response data payload:** array of [`packageActionResult`](#packageactionresult)
 
 ### `WipePackageDataResponse`
 
 - **Returned by:** [`WipePackageData`](#wipepackagedata)
-- **Response data payload:** array of [`packageOpResult`](#packageopresult)
+- **Response data payload:** array of [`packageActionResult`](#packageactionresult)
 
-### `ListPackagesStatusResponse`
+### `ListPackagesResponse`
 
-- **Returned by:** [`ListPackagesStatus`](#listpackagesstatus)
+- **Returned by:** [`ListPackages`](#listpackages)
 - **Response data payload:** array of [`packageStatusEntry`](#packagestatusentry)
 
-### `PackageInformationResponse`
+### `ListPackageInfoResponse`
 
-- **Returned by:** [`GetPackageInfo`](#getpackageinfo)
-- **Response data payload:** [`packageInfoResponse`](#packageinforesponse)
+- **Returned by:** [`ListPackageInfo`](#listpackageinfo)
+- **Response data payload:** array of [`packageInfo`](#packageinfo)
 
-### `AllPackageInformationResponse`
+### `ListPackageInfoFromFilesResponse`
 
-- **Returned by:** [`GetAllPackageInfo`](#getallpackageinfo)
-- **Response data payload:** array of [`packageInfoResponse`](#packageinforesponse)
+- **Returned by:** [`ListPackageInfoFromFiles`](#listpackageinfofromfiles)
+- **Response data payload:** array of [`packageInfoFromFile`](#packageinfofromfile-data-payload-item)
 
-### `InspectLocalPackageResponse`
-
-- **Returned by:** [`InspectLocalPackage`](#inspectlocalpackage)
-- **Response data payload:** [`inspectLocalPackageResponse`](#inspectlocalpackageresponse-data-payload)
-
-### `TimeLineInformationResponse`
+### `GetTimelineInfoResponse`
 
 - **Returned by:** [`GetTimelineInfo`](#gettimelineinfo)
 - **Response data payload:** [`timelineData`](#timelinedata)
@@ -297,7 +285,7 @@ shape; it is returned by its own method.
 | `package_name` | `string` | Installed package name |
 | `status` | `string` | Package state (`Ready`, `Running`, `Broken`, …) — corresponds to the daemon's [package states](../architecture/execution.md#package-state-machine) |
 
-#### `packageInfo`
+#### `packageData`
 
 Essential package metadata.
 
@@ -307,21 +295,22 @@ Essential package metadata.
 | `version` | `string` | Package version |
 | `description` | `string` | Package description |
 
-#### `packageInfoResponse`
+#### `packageInfo`
 
-Returned by `GetPackageInfo` (one) and `GetAllPackageInfo` (array). Unifies the
-healthy and broken cases.
+Returned for each requested package by `ListPackageInfo`. `status` is the
+package's single status value. `success` indicates whether the requested
+installed package was found and its information was returned.
 
 | Field | Type | Presence | Meaning |
 | --- | --- | --- | --- |
-| `broken` | `bool` | always | Whether the package failed to load |
+| `success` | `bool` | always | Whether the requested installed package was found and its information was returned |
 | `name` | `string` | always | Package name |
-| `status` | `string` | always | Package state |
+| `status` | `string` | always | Package status (`Ready`, `Running`, `Broken`, or `NotFound`) |
 | `package_path` | `string` | always | On-device package path |
-| `metadata` | [`packageInfo`](#packageinfo) \| `null` | optional | Present for a healthy package |
+| `metadata` | [`packageData`](#packagedata) \| `null` | optional | Present for a healthy package |
 | `quota` | [`quotaInformation`](#quotainformation) \| `null` | optional | Data-quota limits, when known |
-| `error_summary` | `string` \| `null` | optional | Short error, for a broken package |
-| `error_details` | `string` \| `null` | optional | Detailed error, for a broken package |
+| `error_summary` | `string` \| `null` | optional | Display-level lookup or package-load error |
+| `error_details` | `string` \| `null` | optional | Optional diagnostic detail in debug format for Broken entries and lookup errors |
 
 #### `quotaInformation`
 
@@ -330,7 +319,7 @@ healthy and broken cases.
 | `enabled` | `bool` | Whether a data quota is enforced |
 | `limit` | `integer` | Quota limit in bytes (≥ 0) |
 
-#### `packageOpResult`
+#### `packageActionResult`
 
 Per-package outcome for the bulk operations (`StartPackage`, `StopPackage`,
 `WipePackageData`), which each return an **array** with one entry per package.
@@ -348,14 +337,17 @@ the response can report `true` while individual entries report `false`.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `metadata` | [`packageInfo`](#packageinfo) | Metadata of the newly installed package |
+| `metadata` | [`packageData`](#packagedata) | Metadata of the newly installed package |
 
-#### `inspectLocalPackageResponse` (data payload)
+#### `packageInfoFromFile` (data payload item)
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `metadata` | [`packageInfo`](#packageinfo) | Metadata read from the SSAM package file |
+| `success` | `bool` | Whether the package file was inspected successfully |
+| `metadata` | [`packageData`](#packagedata) \| `null` | Metadata read from the SSAM package file when the file is valid |
 | `package_path` | `string` | Path that was queried |
+| `error_summary` | `string` \| `null` | Display-level inspection error |
+| `error_details` | `string` \| `null` | Optional diagnostic detail in debug format |
 
 #### `timelineData`
 
@@ -386,15 +378,16 @@ Standard Rust `Duration` serialization.
 
 ## Examples
 
-`GetPackageInfo` — success. A complete response, with `data` fully
-populated:
+`ListPackageInfo` — success for one requested package. A complete response,
+with `data` fully populated:
 
 ```json
 {
   "schema_version": "2",
   "success": true,
-  "data": {
-    "broken": false,
+  "data": [
+    {
+    "success": true,
     "name": "navi",
     "status": "Running",
     "package_path": "/var/lib/ssam/packages/navi",
@@ -408,12 +401,13 @@ populated:
       "limit": 536870912
     },
     "error_summary": null,
-    "error_details": null
-  }
+      "error_details": null
+    }
+  ]
 }
 ```
 
-`ListPackagesStatus` — success:
+`ListPackages` — success:
 
 ```json
 {
@@ -437,10 +431,4 @@ populated:
     { "package_name": "cluster", "success": false, "message": "already running" }
   ]
 }
-```
-
-`GetPackageInfo` — failure:
-
-```json
-{ "schema_version": "2", "success": false, "reason": "Package 'navi' not found" }
 ```
