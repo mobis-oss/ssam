@@ -50,7 +50,6 @@ impl Daemon {
                 .context("Failed to load daemon configuration")?,
         );
 
-        let _ = package_manager::resolve_bundled_dir(config.bundled_packages_dir())?;
         Self::setup_runtime_environ(&config)?;
 
         if !package_cgroup_exists(config.packages_cgroup()) {
