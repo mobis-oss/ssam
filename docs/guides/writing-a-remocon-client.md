@@ -16,10 +16,11 @@ For the full protocol, see the
 1. [What you can build](#what-you-can-build)
 2. [Get the protocol](#get-the-protocol)
 3. [Connect to `ssamd`](#connect-to-ssamd)
-4. [Call a method](#call-a-method)
-5. [Parse the response](#parse-the-response)
-6. [Handle bulk per-package results](#handle-bulk-per-package-results)
-7. [Security considerations](#security-considerations)
+4. [Send API version metadata](#send-api-version-metadata)
+5. [Call a method](#call-a-method)
+6. [Parse the response](#parse-the-response)
+7. [Handle bulk per-package results](#handle-bulk-per-package-results)
+8. [Security considerations](#security-considerations)
 
 ---
 
@@ -82,18 +83,41 @@ let mut client = RemoconClient::new(channel);
 
 ---
 
+## Send API version metadata
+
+Every Remocon request must include the `x-ssam-api-version` metadata. Its value must
+match the `CURRENT` value defined in the `ApiVersion` enum in the proto file. Use the
+code-generated value for this enum rather than hardcoding its numeric value.
+
+Requests with missing or invalid `x-ssam-api-version` metadata are rejected with
+gRPC `FAILED_PRECONDITION` before the RPC handler runs.
+
+Headers rejected earlier while the client constructs metadata or by the HTTP/2
+transport, such as a value containing a newline or NUL byte, do not guarantee a
+`FAILED_PRECONDITION` status.
+
 ## Call a method
 
 Pick a method from the reference's
 [API at a Glance](../reference/remocon-rpc.md#api-at-a-glance) and build its
 [request message](../reference/remocon-rpc.md#request-messages). For example,
 [`ListPackageInfo`](../reference/remocon-rpc.md#listpackageinfo) takes a
-[`ListPackageInfoRequest`](../reference/remocon-rpc.md#listpackageinforequest):
+[`ListPackageInfoRequest`](../reference/remocon-rpc.md#listpackageinforequest).
+The `generated::remocon` module below is the stub module generated from the
+`ssamd.remocon` proto; replace the path if your generated module uses a
+different layout.
 
 ```rust
-let request = ListPackageInfoRequest {
+use generated::remocon::{ApiVersion, ListPackageInfoRequest};
+use tonic::{metadata::MetadataValue, Request};
+
+let mut request = Request::new(ListPackageInfoRequest {
     package_names: vec!["navi".to_string()],
-};
+});
+request.metadata_mut().insert(
+    "x-ssam-api-version",
+    MetadataValue::try_from((ApiVersion::Current as i32).to_string())?,
+);
 let response = client.list_package_info(request).await?;
 ```
 
@@ -132,9 +156,13 @@ Because they return results this way, watch out for two things:
 For example:
 
 ```rust
-let request = StopPackageRequest {
+let mut request = Request::new(StopPackageRequest {
     package_names: vec!["navi".to_string(), "cluster".to_string()],
-};
+});
+request.metadata_mut().insert(
+    "x-ssam-api-version",
+    MetadataValue::try_from((ApiVersion::Current as i32).to_string())?,
+);
 let response = client.stop_package(request).await?.into_inner();
 for entry in response.results {
     if !entry.success {

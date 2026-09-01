@@ -19,7 +19,7 @@ use cgroups_rs::fs::{cgroup::Cgroup, hierarchies};
 use futures_util::FutureExt;
 
 use once_cell::sync::Lazy;
-use remocon_server_impl::RemoconImpl;
+use remocon_server_impl::{RemoconImpl, validate_api_version};
 
 use std::{fs, net::Ipv4Addr, os::unix::fs::DirBuilderExt, path::Path, sync::Arc, time::Instant};
 use tokio::sync::oneshot;
@@ -70,7 +70,10 @@ impl Daemon {
         let package_manager: Arc<dyn PackageManagerService> =
             Arc::new(package_manager::PackageManager::new(actor_ref));
         let remocon_service = RemoconImpl::new(Arc::clone(&package_manager), Arc::clone(&config));
-        let server = libssam::remocon::remocon_server::RemoconServer::new(remocon_service);
+        let server = libssam::remocon::remocon_server::RemoconServer::with_interceptor(
+            remocon_service,
+            validate_api_version,
+        );
 
         let ipaddr = config.rpc_bind_ip().map_or_else(
             || {

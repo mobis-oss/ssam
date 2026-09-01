@@ -3,20 +3,21 @@
 
 use anyhow::{Context as _, Result};
 use std::net::Ipv4Addr;
-use tonic::Request;
 use tonic::transport::Channel;
 
 use libssam::remocon::remocon_client::RemoconClient;
 use libssam::remocon::{
-    InstallPackageRequest, InstallPackageResponse, ListPackageInfoFromFilesRequest,
-    ListPackageInfoFromFilesResponse, ListPackageInfoRequest, ListPackageInfoResponse,
-    ListPackagesResponse, RemovePackageRequest, StartPackageRequest, StartPackageResponse,
-    StopPackageRequest, StopPackageResponse, TimelineData, WipePackageDataRequest,
-    WipePackageDataResponse,
+    API_VERSION_METADATA_KEY, InstallPackageRequest, InstallPackageResponse,
+    ListPackageInfoFromFilesRequest, ListPackageInfoFromFilesResponse, ListPackageInfoRequest,
+    ListPackageInfoResponse, ListPackagesResponse, RemovePackageRequest, StartPackageRequest,
+    StartPackageResponse, StopPackageRequest, StopPackageResponse, TimelineData,
+    WipePackageDataRequest, WipePackageDataResponse, api_version_string,
 };
 
 #[cfg(test)]
 use libssam::remocon::InspectLocalPackageResult;
+use tonic::Request;
+use tonic::metadata::MetadataValue;
 
 #[tonic::async_trait]
 pub trait Client: Send {
@@ -50,6 +51,17 @@ pub struct GrpcClient {
     server_ip: Ipv4Addr,
 }
 
+fn build_remocon_request<T>(
+    message: T,
+) -> Result<Request<T>, tonic::metadata::errors::InvalidMetadataValue> {
+    let mut request = Request::new(message);
+    request.metadata_mut().insert(
+        API_VERSION_METADATA_KEY,
+        MetadataValue::try_from(api_version_string())?,
+    );
+    Ok(request)
+}
+
 impl GrpcClient {
     pub fn new(client: RemoconClient<Channel>, server_ip: Ipv4Addr) -> Self {
         Self {
@@ -66,18 +78,20 @@ impl Client for GrpcClient {
     }
 
     async fn list_packages(&mut self) -> Result<ListPackagesResponse> {
+        let request = build_remocon_request(()).context("Failed to create Remocon request")?;
         Ok(self
             .inner
-            .list_packages(Request::new(()))
+            .list_packages(request)
             .await
             .context("Daemon side error. list_packages has failed.")?
             .into_inner())
     }
 
     async fn start_package(&mut self, names: Vec<String>) -> Result<StartPackageResponse> {
-        let request = Request::new(StartPackageRequest {
+        let request = build_remocon_request(StartPackageRequest {
             package_names: names,
-        });
+        })
+        .context("Failed to create Remocon request")?;
         Ok(self
             .inner
             .start_package(request)
@@ -87,9 +101,10 @@ impl Client for GrpcClient {
     }
 
     async fn stop_package(&mut self, names: Vec<String>) -> Result<StopPackageResponse> {
-        let request = Request::new(StopPackageRequest {
+        let request = build_remocon_request(StopPackageRequest {
             package_names: names,
-        });
+        })
+        .context("Failed to create Remocon request")?;
         Ok(self
             .inner
             .stop_package(request)
@@ -104,11 +119,12 @@ impl Client for GrpcClient {
         downgrade: bool,
         remove_data: bool,
     ) -> Result<InstallPackageResponse> {
-        let request = Request::new(InstallPackageRequest {
+        let request = build_remocon_request(InstallPackageRequest {
             package_path: path.to_owned(),
             downgrade,
             remove_data,
-        });
+        })
+        .context("Failed to create Remocon request")?;
         Ok(self
             .inner
             .install_package(request)
@@ -118,9 +134,10 @@ impl Client for GrpcClient {
     }
 
     async fn remove_package(&mut self, name: &str) -> Result<()> {
-        let request = Request::new(RemovePackageRequest {
+        let request = build_remocon_request(RemovePackageRequest {
             package_name: name.to_owned(),
-        });
+        })
+        .context("Failed to create Remocon request")?;
         self.inner
             .remove_package(request)
             .await
@@ -130,9 +147,10 @@ impl Client for GrpcClient {
     }
 
     async fn wipe_package_data(&mut self, names: Vec<String>) -> Result<WipePackageDataResponse> {
-        let request = Request::new(WipePackageDataRequest {
+        let request = build_remocon_request(WipePackageDataRequest {
             package_names: names,
-        });
+        })
+        .context("Failed to create Remocon request")?;
         Ok(self
             .inner
             .wipe_package_data(request)
@@ -142,18 +160,20 @@ impl Client for GrpcClient {
     }
 
     async fn get_timeline_info(&mut self) -> Result<TimelineData> {
+        let request = build_remocon_request(()).context("Failed to create Remocon request")?;
         Ok(self
             .inner
-            .get_timeline_info(Request::new(()))
+            .get_timeline_info(request)
             .await
             .context("Daemon side error. get_timeline_info has failed.")?
             .into_inner())
     }
 
     async fn list_package_info(&mut self, names: Vec<String>) -> Result<ListPackageInfoResponse> {
-        let request = Request::new(ListPackageInfoRequest {
+        let request = build_remocon_request(ListPackageInfoRequest {
             package_names: names,
-        });
+        })
+        .context("Failed to create Remocon request")?;
         Ok(self
             .inner
             .list_package_info(request)
@@ -166,9 +186,10 @@ impl Client for GrpcClient {
         &mut self,
         paths: Vec<String>,
     ) -> Result<ListPackageInfoFromFilesResponse> {
-        let request = Request::new(ListPackageInfoFromFilesRequest {
+        let request = build_remocon_request(ListPackageInfoFromFilesRequest {
             package_paths: paths,
-        });
+        })
+        .context("Failed to create Remocon request")?;
         Ok(self
             .inner
             .list_package_info_from_files(request)
@@ -551,21 +572,39 @@ mod grpc_fake_server {
     use super::*;
     use libssam::remocon::remocon_server::{Remocon, RemoconServer};
     use libssam::remocon::*;
+    use libssam::remocon::{TimelineEvent, TimelineEventKind};
+    use libssam::{PackageActionResult, PackageStatusEntry};
     use std::net::SocketAddr;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
     use tonic::transport::Server;
     use tonic::{Request, Response, Status};
 
-    pub struct MockRemocon;
+    pub struct MockRemocon {
+        observed_api_versions: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl MockRemocon {
+        fn observe_api_version<T>(&self, request: &Request<T>) {
+            let values = request
+                .metadata()
+                .get_all(API_VERSION_METADATA_KEY)
+                .iter()
+                .map(|value| value.to_str().unwrap_or("<invalid>").to_owned())
+                .collect();
+            self.observed_api_versions.lock().unwrap().push(values);
+        }
+    }
 
     #[tonic::async_trait]
     impl Remocon for MockRemocon {
         async fn list_packages(
             &self,
-            _request: Request<()>,
+            request: Request<()>,
         ) -> Result<Response<ListPackagesResponse>, Status> {
-            use libssam::PackageStatusEntry;
+            self.observe_api_version(&request);
 
             Ok(Response::new(ListPackagesResponse {
                 entries: vec![PackageStatusEntry {
@@ -579,7 +618,7 @@ mod grpc_fake_server {
             &self,
             request: Request<StartPackageRequest>,
         ) -> Result<Response<StartPackageResponse>, Status> {
-            use libssam::PackageActionResult;
+            self.observe_api_version(&request);
 
             let names = &request.get_ref().package_names;
             let ops: Vec<PackageActionResult> = names
@@ -607,7 +646,7 @@ mod grpc_fake_server {
             &self,
             request: Request<StopPackageRequest>,
         ) -> Result<Response<StopPackageResponse>, Status> {
-            use libssam::PackageActionResult;
+            self.observe_api_version(&request);
 
             let names = &request.get_ref().package_names;
             let ops: Vec<PackageActionResult> = names
@@ -625,7 +664,7 @@ mod grpc_fake_server {
             &self,
             request: Request<InstallPackageRequest>,
         ) -> Result<Response<InstallPackageResponse>, Status> {
-            use std::path::Path;
+            self.observe_api_version(&request);
 
             let package_path = &request.get_ref().package_path;
             if package_path == "/error.ssam" {
@@ -684,8 +723,9 @@ mod grpc_fake_server {
 
         async fn remove_package(
             &self,
-            _request: Request<RemovePackageRequest>,
+            request: Request<RemovePackageRequest>,
         ) -> Result<Response<()>, Status> {
+            self.observe_api_version(&request);
             Ok(Response::new(()))
         }
 
@@ -693,7 +733,7 @@ mod grpc_fake_server {
             &self,
             request: Request<WipePackageDataRequest>,
         ) -> Result<Response<WipePackageDataResponse>, Status> {
-            use libssam::PackageActionResult;
+            self.observe_api_version(&request);
 
             let names = &request.get_ref().package_names;
             let ops: Vec<PackageActionResult> = names
@@ -709,9 +749,9 @@ mod grpc_fake_server {
 
         async fn get_timeline_info(
             &self,
-            _request: Request<()>,
+            request: Request<()>,
         ) -> Result<Response<TimelineData>, Status> {
-            use libssam::remocon::{TimelineEvent, TimelineEventKind};
+            self.observe_api_version(&request);
 
             let timeline_data = TimelineData {
                 events: vec![TimelineEvent {
@@ -733,6 +773,7 @@ mod grpc_fake_server {
             &self,
             request: Request<ListPackageInfoRequest>,
         ) -> Result<Response<ListPackageInfoResponse>, Status> {
+            self.observe_api_version(&request);
             let package_config = libssam::config::PackageConfigSpec {
                 package: libssam::config::Package {
                     name: "test-pkg".to_owned(),
@@ -817,8 +858,9 @@ mod grpc_fake_server {
 
         async fn list_package_info_from_files(
             &self,
-            _request: Request<ListPackageInfoFromFilesRequest>,
+            request: Request<ListPackageInfoFromFilesRequest>,
         ) -> Result<Response<ListPackageInfoFromFilesResponse>, Status> {
+            self.observe_api_version(&request);
             let package_config = libssam::config::PackageConfigSpec {
                 package: libssam::config::Package {
                     name: "test-pkg".to_owned(),
@@ -875,6 +917,16 @@ mod grpc_fake_server {
         oneshot::Sender<()>,
         JoinHandle<Result<(), tonic::transport::Error>>,
     ) {
+        let (addr, shutdown_tx, handle, _) = spawn_fake_server_with_observer().await;
+        (addr, shutdown_tx, handle)
+    }
+
+    pub async fn spawn_fake_server_with_observer() -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        JoinHandle<Result<(), tonic::transport::Error>>,
+        Arc<Mutex<Vec<Vec<String>>>>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("Failed to bind fake server");
@@ -883,24 +935,28 @@ mod grpc_fake_server {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let observed_api_versions = Arc::new(Mutex::new(Vec::new()));
+        let service = MockRemocon {
+            observed_api_versions: Arc::clone(&observed_api_versions),
+        };
 
         let handle = tokio::spawn(async move {
             Server::builder()
-                .add_service(RemoconServer::new(MockRemocon))
+                .add_service(RemoconServer::new(service))
                 .serve_with_incoming_shutdown(incoming, async {
                     shutdown_rx.await.ok();
                 })
                 .await
         });
 
-        (addr, shutdown_tx, handle)
+        (addr, shutdown_tx, handle, observed_api_versions)
     }
 }
 
 #[cfg(test)]
 mod grpc_tests {
     use super::*;
-    use grpc_fake_server::spawn_fake_server;
+    use grpc_fake_server::{spawn_fake_server, spawn_fake_server_with_observer};
     use libssam::remocon::remocon_client::RemoconClient;
     use tonic::transport::Channel;
 
@@ -1106,6 +1162,58 @@ mod grpc_tests {
         assert!(
             data.iter()
                 .any(|p| p.status == "Broken" && p.name == "broken-pkg")
+        );
+
+        shutdown_tx.send(()).ok();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_grpc_all_methods_send_api_version_metadata() {
+        let (addr, shutdown_tx, handle, observed_api_versions) =
+            spawn_fake_server_with_observer().await;
+
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+
+        client.list_packages().await.unwrap();
+        client
+            .start_package(vec!["test-pkg".to_owned()])
+            .await
+            .unwrap();
+        client
+            .stop_package(vec!["test-pkg".to_owned()])
+            .await
+            .unwrap();
+        client
+            .install_package("/tmp/dummy.ssam", false, false)
+            .await
+            .unwrap();
+        client.remove_package("test-pkg").await.unwrap();
+        client
+            .wipe_package_data(vec!["test-pkg".to_owned()])
+            .await
+            .unwrap();
+        client.get_timeline_info().await.unwrap();
+        client
+            .list_package_info(vec!["test-pkg".to_owned()])
+            .await
+            .unwrap();
+        client
+            .list_package_info_from_files(Vec::new())
+            .await
+            .unwrap();
+
+        let observed_api_versions = observed_api_versions.lock().unwrap().clone();
+        assert_eq!(observed_api_versions.len(), 9);
+        assert!(
+            observed_api_versions
+                .iter()
+                .all(|values| values == &vec![libssam::remocon::api_version_string()])
         );
 
         shutdown_tx.send(()).ok();

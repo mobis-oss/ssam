@@ -16,10 +16,11 @@
 1. [What you can build](#what-you-can-build)
 2. [Get the protocol](#get-the-protocol)
 3. [Connect to `ssamd`](#connect-to-ssamd)
-4. [Call a method](#call-a-method)
-5. [Parse the response](#parse-the-response)
-6. [Handle bulk per-package results](#handle-bulk-per-package-results)
-7. [Security considerations](#security-considerations)
+4. [Send API version metadata](#send-api-version-metadata)
+5. [Call a method](#call-a-method)
+6. [Parse the response](#parse-the-response)
+7. [Handle bulk per-package results](#handle-bulk-per-package-results)
+8. [Security considerations](#security-considerations)
 
 ---
 
@@ -82,6 +83,20 @@ let mut client = RemoconClient::new(channel);
 
 ---
 
+## Send API version metadata
+
+모든 Remocon request에는 `x-ssam-api-version` metadata가 있어야 합니다. 이 값은
+proto 파일의 `ApiVersion` enum에 정의된 `CURRENT` 값과 일치해야 합니다. 숫자
+값을 직접 하드코딩하지 말고 codegen으로 생성된 해당 enum 값을 사용하는 것을
+권장합니다.
+
+`x-ssam-api-version` metadata가 없거나 잘못된 request는 RPC handler가 실행되기
+전에 gRPC `FAILED_PRECONDITION`으로 거부됩니다.
+
+단, 개행·NUL byte가 포함된 header처럼 client의 metadata 생성 단계 또는 HTTP/2
+transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECONDITION` status가
+보장되지 않습니다.
+
 ## Call a method
 
 레퍼런스의
@@ -91,12 +106,20 @@ method를 고르고 그
 채우세요. 예를 들어
 [`ListPackageInfo`](../reference/remocon-rpc.ko.md#listpackageinfo)는
 [`ListPackageInfoRequest`](../reference/remocon-rpc.ko.md#listpackageinforequest)를
-받습니다:
+받습니다. 아래 `generated::remocon`은 `ssamd.remocon` proto로 생성한 stub 모듈이며
+생성한 module layout이 다르면 해당 경로로 바꾸세요:
 
 ```rust
-let request = ListPackageInfoRequest {
+use generated::remocon::{ApiVersion, ListPackageInfoRequest};
+use tonic::{metadata::MetadataValue, Request};
+
+let mut request = Request::new(ListPackageInfoRequest {
     package_names: vec!["navi".to_string()],
-};
+});
+request.metadata_mut().insert(
+    "x-ssam-api-version",
+    MetadataValue::try_from((ApiVersion::Current as i32).to_string())?,
+);
 let response = client.list_package_info(request).await?;
 ```
 
@@ -135,9 +158,13 @@ let response = client.list_package_info(request).await?;
 예를 들어:
 
 ```rust
-let request = StopPackageRequest {
+let mut request = Request::new(StopPackageRequest {
     package_names: vec!["navi".to_string(), "cluster".to_string()],
-};
+});
+request.metadata_mut().insert(
+    "x-ssam-api-version",
+    MetadataValue::try_from((ApiVersion::Current as i32).to_string())?,
+);
 let response = client.stop_package(request).await?.into_inner();
 for entry in response.results {
     if !entry.success {

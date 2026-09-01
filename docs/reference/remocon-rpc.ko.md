@@ -35,6 +35,21 @@
 
 ---
 
+### API version metadata
+
+모든 Remocon RPC request에는 `x-ssam-api-version` metadata가 있어야 합니다.
+이 metadata의 값은 proto 파일의 `ApiVersion` enum에 정의된 `CURRENT` 값과
+일치해야 하며, `ApiVersion.UNSPECIFIED`는 허용되는 request version이 아닙니다.
+숫자 값을 직접 하드코딩하지 말고 codegen으로 생성된 해당 enum 값을 사용하는
+것을 권장합니다.
+
+`x-ssam-api-version` metadata가 없거나 잘못된 request는 RPC handler가 실행되기
+전에 gRPC `FAILED_PRECONDITION`으로 거부됩니다.
+
+단, 개행이나 NUL byte가 포함된 header처럼 client의 metadata 생성 단계 또는 HTTP/2
+transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECONDITION` status가
+보장되지 않습니다.
+
 ## API at a Glance
 
 | Method | Request | Response | Response data type |

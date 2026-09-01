@@ -11,6 +11,13 @@ pub mod remocon {
     use crate::ssam_package::ssam_pkg_info::PackageInfoResult;
     use crate::ssam_package::ssam_pkg_metadata::PackageMetadata;
 
+    pub const API_VERSION: i32 = ApiVersion::Current as i32;
+    pub const API_VERSION_METADATA_KEY: &str = "x-ssam-api-version";
+
+    pub fn api_version_string() -> String {
+        API_VERSION.to_string()
+    }
+
     impl From<&PackageMetadata> for PackageData {
         fn from(metadata: &PackageMetadata) -> Self {
             Self {

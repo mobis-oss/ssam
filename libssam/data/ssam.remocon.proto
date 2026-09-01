@@ -8,6 +8,11 @@ import "google/protobuf/duration.proto";
 
 package ssamd.remocon;
 
+enum ApiVersion {
+    UNSPECIFIED = 0;
+    CURRENT = 1;
+}
+
 message StartPackageRequest {
     // Empty list means "all installed packages".
     // This semantic is intentional; the CLI enforces --all flag for safety.

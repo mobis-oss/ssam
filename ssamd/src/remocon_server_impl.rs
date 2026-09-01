@@ -14,11 +14,12 @@ use anyhow::Context as _;
 use libssam::{
     PackageActionResult, PackageInfo, PackageStatusEntry,
     remocon::{
-        InspectLocalPackageResult, InstallPackageRequest, InstallPackageResponse,
-        ListPackageInfoFromFilesRequest, ListPackageInfoFromFilesResponse, ListPackageInfoRequest,
-        ListPackageInfoResponse, ListPackagesResponse, RemovePackageRequest, StartPackageRequest,
-        StartPackageResponse, StopPackageRequest, StopPackageResponse, TimelineData, TimelineEvent,
-        TimelineEventKind, WipePackageDataRequest, WipePackageDataResponse,
+        API_VERSION_METADATA_KEY, InspectLocalPackageResult, InstallPackageRequest,
+        InstallPackageResponse, ListPackageInfoFromFilesRequest, ListPackageInfoFromFilesResponse,
+        ListPackageInfoRequest, ListPackageInfoResponse, ListPackagesResponse,
+        RemovePackageRequest, StartPackageRequest, StartPackageResponse, StopPackageRequest,
+        StopPackageResponse, TimelineData, TimelineEvent, TimelineEventKind,
+        WipePackageDataRequest, WipePackageDataResponse, api_version_string,
         remocon_server::Remocon,
     },
 };
@@ -36,6 +37,30 @@ fn build_install_response(
     metadata: &libssam::ssam_package::ssam_pkg_metadata::PackageMetadata,
 ) -> InstallPackageResponse {
     InstallPackageResponse::from(metadata)
+}
+
+/// Rejects requests whose API version metadata is missing, duplicated, or mismatched.
+pub(crate) fn validate_api_version(request: Request<()>) -> Result<Request<()>, Status> {
+    let expected = api_version_string();
+    let mut values = request.metadata().get_all(API_VERSION_METADATA_KEY).iter();
+
+    // Only one metadata value is allowed, so inspect two `next` results to catch duplicates.
+    if let (Some(value), None) = (values.next(), values.next()) {
+        if !value.to_str().is_ok_and(|value| value == expected) {
+            let received = String::from_utf8_lossy(value.as_ref())
+                .escape_debug()
+                .to_string();
+            return Err(Status::failed_precondition(format!(
+                "Invalid {API_VERSION_METADATA_KEY} metadata value [{received}]; expected API version {expected}"
+            )));
+        }
+    } else {
+        return Err(Status::failed_precondition(format!(
+            "{API_VERSION_METADATA_KEY} metadata must contain exactly one value; expected API version {expected}"
+        )));
+    }
+
+    Ok(request)
 }
 
 impl RemoconImpl {
@@ -421,6 +446,7 @@ pub(crate) mod tests {
 
     use async_trait::async_trait;
     use libssam::PackageInfo;
+    use libssam::remocon::ApiVersion;
     use libssam::ssam_package::PackageFsVerityInfo;
     use libssam::ssam_package::ssam_pkg_info::{
         BrokenPackageInfo, BrokenReason, PackageInfo as PackageStateInfo, PackageInfoResult,
@@ -431,7 +457,8 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::Barrier;
-    use tonic::Request;
+    use tonic::metadata::MetadataValue;
+    use tonic::{Code, Request};
 
     type InstallResultMap = Arc<Mutex<HashMap<String, Result<PackageMetadata, anyhow::Error>>>>;
 
@@ -845,6 +872,50 @@ pub(crate) mod tests {
         let config = crate::configuration::tests::test_configuration();
         let remocon = RemoconImpl::new(Arc::new(mock), config);
         (remocon, mock_clone)
+    }
+
+    fn request_with_value(value: &str) -> Request<()> {
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            API_VERSION_METADATA_KEY,
+            MetadataValue::try_from(value).expect("test metadata value"),
+        );
+        request
+    }
+
+    #[test]
+    fn matching_api_version_is_accepted() {
+        let request = request_with_value(&api_version_string());
+
+        assert!(validate_api_version(request).is_ok());
+    }
+
+    #[test]
+    fn invalid_api_version_requests_are_rejected() {
+        let mut duplicate = Request::new(());
+        let value = MetadataValue::try_from(api_version_string()).expect("test metadata value");
+        duplicate
+            .metadata_mut()
+            .append(API_VERSION_METADATA_KEY, value.clone());
+        duplicate
+            .metadata_mut()
+            .append(API_VERSION_METADATA_KEY, value);
+
+        let requests = vec![
+            Request::new(()),
+            request_with_value(""),
+            request_with_value("not-a-number"),
+            request_with_value(&format!("0{}", api_version_string())),
+            request_with_value(&(ApiVersion::Unspecified as i32).to_string()),
+            duplicate,
+        ];
+
+        for request in requests {
+            let status =
+                validate_api_version(request).expect_err("invalid API version should fail");
+            assert_eq!(status.code(), Code::FailedPrecondition);
+            assert!(status.message().contains(&api_version_string()));
+        }
     }
 
     fn package_infos_request(names: &[&str]) -> Request<ListPackageInfoRequest> {

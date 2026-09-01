@@ -37,6 +37,20 @@ control packages.
 
 ---
 
+### API version metadata
+
+Every Remocon RPC request must include the `x-ssam-api-version` metadata. Its
+value must match the `CURRENT` value defined in the `ApiVersion` enum in the
+proto file; `ApiVersion.UNSPECIFIED` is not an accepted request version. Use the
+code-generated value for this enum rather than hardcoding its numeric value.
+
+Requests with missing or invalid `x-ssam-api-version` metadata are rejected
+with gRPC `FAILED_PRECONDITION` before the RPC handler runs.
+
+Headers rejected earlier while the client constructs metadata or by the
+HTTP/2 transport itself, such as values containing a newline or NUL byte, do
+not guarantee a `FAILED_PRECONDITION` status.
+
 ## API at a Glance
 
 | Method | Request | Response | Response data type |
