@@ -58,22 +58,17 @@ fn main() -> anyhow::Result<()> {
 
 ## Connect to `ssamd`
 
-- **Endpoint:** `http://<host>:<port>` —
-  [plain HTTP/2, no TLS](../reference/remocon-rpc.md#connection).
-- **`<host>`:** the daemon's
-  [`rpc_bind_ip`](../reference/daemon-config.md#rpc_bind_ip) (`127.0.0.1` by
-  default).
-- **`<port>`:** fixed at **63737**.
-- **TLS:** none — most gRPC client libraries need an explicit `insecure` or
-  `plaintext` channel option (e.g. Java's `usePlaintext()`, Python's
-  `grpc.insecure_channel`). Rust's `tonic` infers this from the plain
-  `http://` scheme, so no extra flag is needed — check your library's docs
-  for the equivalent.
+`ssamd` accepts local gRPC connections on the fixed Linux abstract Unix domain
+socket `@ssamd`. Remote TCP connections are not supported. The peer's effective
+GID must match the daemon's effective GID; the daemon enforces this with
+`SO_PEERCRED`.
 
 For example, in Rust:
 
 ```rust
-let channel = Channel::from_shared(format!("http://{ip}:{CONTROL_PORT}"))?
+use tonic::transport::Endpoint;
+
+let channel = Endpoint::from_shared("unix://\0ssamd".to_owned())?
     .connect_timeout(GRPC_CONNECT_TIMEOUT)
     .connect()
     .await?;
@@ -179,14 +174,11 @@ for entry in response.results {
 
 ## Security considerations
 
-The RPC has no TLS or authentication of its own (see
-[Connection](../reference/remocon-rpc.md#connection)).
+The RPC uses a local abstract Unix domain socket and does not support remote
+TCP access. The daemon checks `SO_PEERCRED` before dispatching an RPC and allows
+only peers whose effective GID matches the daemon's effective GID.
 
-- Keep the daemon's default localhost binding unless you specifically need
-  remote access, and if you do expose it, restrict access with network or
-  OS-level controls (see
-  [`rpc_bind_ip`](../reference/daemon-config.md#rpc_bind_ip)).
-- This doesn't weaken package authenticity: verification is enforced
-  independently of who calls the RPC, so an unsigned or tampered package is
-  rejected at install time and never loads or runs (see
+- Package authenticity is enforced as a separate security layer: every
+  accepted installation RPC requires verification, so an unsigned or tampered
+  package is rejected at install time and never loads or runs (see
   [Control interface security](../architecture/package-integrity.md#control-interface-security-rpc)).

@@ -147,14 +147,18 @@ flowchart LR
 
 ## Control interface security (RPC)
 
-- `ssamd` 는 [Remocon gRPC 제어 API](../reference/remocon-rpc.ko.md)를 포트
-**63737** 에서 노출하며, [`rpc_bind_ip`](../reference/daemon-config.ko.md#rpc_bind_ip)
-(기본 localhost)에 바인딩되며, TLS나 인증이 없으므로 임의의 클라이언트가 연결하여
-패키지를 설치할 수 있습니다.
-- 그럼에도 **누가 RPC를 호출하든 진위 검증은 여전히 강제됩니다:** 엔드포인트에 임의의
-  클라이언트가 연결해 설치를 시도할 수는 있어도, 서명 검증에 실패한 패키지는 설치
-  단계에서 거부되어 설정·실행되지 않습니다. 즉 서명되지 않거나 변조된 코드는 실제로
-  실행될 수 없습니다.
+- `ssamd` 는 고정된 Linux abstract Unix domain socket `@ssamd`에서
+  [Remocon gRPC 제어 API](../reference/remocon-rpc.ko.md)를 노출합니다. 원격 TCP
+  접근은 제공하지 않습니다.
+- `ssamd` 는 RPC를 dispatch하기 전에 `SO_PEERCRED`를 검사합니다. peer의 effective
+  GID가 데몬의 effective GID와 일치하는 경우에만 허용하며, UID는 확인하지 않습니다.
+  abstract socket은 파일시스템 권한을 제공하지 않으므로 같은 network namespace에서
+  socket name을 아는 process는 연결을 시도할 수 있으며, peer credential이
+  authorization 경계가 됩니다.
+- **허용된 설치 RPC에도 호출자 권한 검증과 별도로 패키지 진위 검증이 적용됩니다:**
+  모든 설치 요청은 패키지 서명·무결성 검증을 통과해야 하며, 검증에 실패한 패키지는
+  설치 단계에서 거부되어 설정·실행되지 않습니다. 따라서 서명되지 않거나 변조된
+  코드는 실제로 실행될 수 없습니다.
 
 ---
 

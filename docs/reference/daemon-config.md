@@ -50,7 +50,6 @@ packages_mnt_root       = "/var/run/ssamd/mnt"
 public_key_file_path    = "/etc/ssamd/public.key"
 packages_cgroup         = ""                          # may be empty
 packages_ext            = "ssam"
-rpc_bind_ip             = "127.0.0.1"                 # optional
 
 [network.bridge]                                      # optional section
 enabled = true
@@ -63,8 +62,8 @@ size = 29                                             # default
 disable_runtime_integrity = false                     # default
 ```
 
-Every key in `[common]` **must be present** (except `rpc_bind_ip`) or the daemon
-fails to start. The `[network]` and `[integrity]` sections are **optional**.
+Every key in `[common]` **must be present** or the daemon fails to start. The
+`[network]` and `[integrity]` sections are **optional**.
 
 ---
 
@@ -129,14 +128,14 @@ Core daemon paths and settings. All keys are strings.
 - **Required.** Package file extension, without a leading dot (e.g. `ssam`).
   Files with this extension are recognized as SSAM packages.
 
-### `rpc_bind_ip`
+### RPC endpoint
 
-- **Optional.** IPv4 address the daemon's RPC control server binds to. Defaults
-  to `127.0.0.1` (localhost) when omitted or unparseable. The server always
-  listens on the fixed SSAM control port **63737**; this is the endpoint a
-  gRPC client connects to. Set a routable address to allow remote control. The
-  control API is powerful, so keep it on localhost unless you have a reason to
-  expose it, and restrict access with network isolation / a firewall if you do.
+The daemon's RPC control server listens on the Linux abstract Unix domain socket
+`@ssamd`. The endpoint is fixed and is not configurable. The abstract socket is
+not a filesystem path, so it does not create a socket file or require a runtime
+directory. RPC clients must run in the same system environment and pass the
+peer-credential check: the peer's effective GID must match the daemon's
+effective GID. UID is not considered.
 
 ---
 
@@ -204,9 +203,9 @@ At startup `ssamd`:
 - **creates** the `downloaded_packages_dir`, `packages_data_root`, and
   `packages_mnt_root` directories automatically if missing.
 - **checks** that `packages_cgroup` exists (when non-empty), aborting if not.
-- calls `sd_notify` once initialized; if `ssamd` is configured as a systemd
-  `notify`-type service unit, this **signals readiness**.
-- **binds** the RPC server to `rpc_bind_ip` (default localhost) on port 63737.
+- **binds** the RPC server to the fixed abstract Unix socket `@ssamd`.
+- calls `sd_notify` after the listener is bound; if `ssamd` is configured as a
+  systemd `notify`-type service unit, this **signals readiness**.
 
 ---
 
@@ -226,7 +225,7 @@ packages_cgroup         = ""
 packages_ext            = "ssam"
 ```
 
-### With cgroup confinement, remote RPC, and bridge networking
+### With cgroup confinement and bridge networking
 
 ```toml
 [common]
@@ -238,7 +237,6 @@ packages_mnt_root       = "/var/run/ssamd/mnt"
 public_key_file_path    = "/etc/ssamd/public.key"
 packages_cgroup         = "ssamd.slice"
 packages_ext            = "ssam"
-rpc_bind_ip             = "192.168.63.100"
 
 [network.bridge]
 enabled = true

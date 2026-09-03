@@ -29,9 +29,8 @@
 | --- | --- |
 | 전송 | gRPC (HTTP/2), proto3 |
 | gRPC package | `ssamd.remocon` (proto3) |
-| 호스트 | [`rpc_bind_ip`](daemon-config.ko.md#rpc_bind_ip) — 기본 `127.0.0.1` |
-| 포트 | **63737** (고정 SSAM 제어 포트) |
-| 인증 | 전송/RPC 레벨에서는 없음 |
+| 엔드포인트 | Linux abstract Unix domain socket `@ssamd` |
+| 인증 | `SO_PEERCRED`: peer의 effective GID가 데몬의 effective GID와 일치해야 함 |
 
 ---
 
@@ -76,9 +75,9 @@ transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECON
 - **Response:** [`InstallPackageResponse`](#installpackageresponse)
 - **Response data type:** [`PackageData`](#packagedata)
 
-설치는 `downgrade` 여부나 호출 주체와 무관하게 항상 서명·무결성 검사를 거칩니다
-([패키지 무결성](../architecture/package-integrity.ko.md) 참조). 서명 검증에 실패한
-패키지는 이 단계에서 거부되어 설치되지 않습니다([제어 인터페이스 보안]
+허용된 설치 RPC는 `downgrade` 설정과 무관하게 항상 서명·무결성 검사를 거칩니다
+([패키지 무결성](../architecture/package-integrity.ko.md) 참조). 검증에 실패한 패키지는
+이 단계에서 거부되어 설치되지 않습니다([제어 인터페이스 보안]
 (../architecture/package-integrity.ko.md#control-interface-security-rpc) 참조).
 
 설치 허용 여부는 같은 패키지의 이미 설치된 버전과 비교해 결정됩니다:

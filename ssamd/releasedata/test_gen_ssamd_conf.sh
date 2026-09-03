@@ -198,6 +198,10 @@ test_apparmor_profile_only() {
     verify_file_content "$apparmor_output" "/opt/mcontainer/pkgs/\* r," "AppArmor profile - bundled packages files (any extension)"
     verify_file_content_not "$apparmor_output" "/opt/mcontainer/pkgs/\*.pkg r," "AppArmor profile - bundled no longer extension-restricted"
     verify_file_content "$apparmor_output" "/usr/share/ssamd/prod.pub.key r" "AppArmor profile - public key"
+    verify_file_content "$apparmor_output" "network unix stream," "AppArmor profile - Unix stream"
+    verify_file_content "$apparmor_output" "network unix dgram," "AppArmor profile - Unix datagram"
+    verify_file_content "$apparmor_output" "network netlink dgram," "AppArmor profile - netlink datagram"
+    verify_file_content_not "$apparmor_output" "network inet tcp," "AppArmor profile - no TCP"
     verify_no_placeholders "$apparmor_output" "AppArmor profile"
     verify_apparmor_syntax "$apparmor_output" "AppArmor profile"
 }
@@ -419,7 +423,7 @@ test_defaults() {
 
     verify_file_content "$output_file" "/run/ssamd/mnt" "Ssamd default configuration - pkgs-mnt-root"
     verify_file_content "$output_file" "packages_ext = \"ssam\"" "Ssamd default configuration - packages_ext"
-    verify_file_content "$output_file" "rpc_bind_ip = \"127.0.0.1\"" "Ssamd default configuration - rpc_bind_ip"
+    verify_file_content_not "$output_file" "rpc_bind_ip" "Ssamd default configuration - no rpc_bind_ip"
     verify_file_content "$output_file" 'bundled_packages_dir = "/var/lib/ssamd/bundled"' "Ssamd default configuration - bundled dir"
     verify_file_content "$output_file" 'downloaded_packages_dir = "/var/lib/ssamd/downloaded"' "Ssamd default configuration - downloaded dir"
     verify_file_content "$output_file" "disable_runtime_integrity = false" "Ssamd default configuration - runtime integrity enabled"
@@ -566,21 +570,6 @@ test_service_unit_defaults() {
     verify_file_content "$service_output" "ExecStart=/usr/bin/ssamd" "Service unit defaults - ExecStart"
     verify_file_content "$service_output" "RequiresMountsFor=/tmp /var/lib/ssamd/bundled /var/lib/mcontainer/packages /var/lib/mcontainer/data /var/run/ssamd/mnt" "Service unit defaults - RequiresMountsFor with default mnt root"
     verify_no_placeholders "$service_output" "Service unit with defaults"
-}
-
-# Test 14: RPC Bind IP
-test_rpc_bind_ip() {
-    print_test_header "Test 14: RPC Bind IP"
-
-    local test_dir="${TEST_OUTPUT_DIR}/test14"
-    mkdir -p "$test_dir"
-    local output_file="${test_dir}/ssamd.toml"
-
-    "$GEN_CONFIG_SCRIPT" \
-        --output-path "$test_dir" \
-        --rpc-bind-ip 192.168.1.100
-
-    verify_file_content "$output_file" "rpc_bind_ip = \"192.168.1.100\"" "Runtime config - rpc_bind_ip"
 }
 
 # Test 19: Network section CLI overrides
@@ -829,7 +818,6 @@ main() {
     test_service_unit_with_base_dir
     test_all_configs_simultaneously
     test_service_unit_defaults
-    test_rpc_bind_ip
     test_network_overrides
     test_network_arg_validation
     test_runtime_integrity_option

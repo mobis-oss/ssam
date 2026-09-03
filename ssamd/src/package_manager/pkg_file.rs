@@ -509,7 +509,6 @@ service_type = "simple"
                 public_key_file_path: String::new(),
                 packages_cgroup: String::new(),
                 packages_ext: "ssam".to_owned(),
-                rpc_bind_ip: None,
             },
             None,
             IntegrityConfig {

@@ -32,26 +32,20 @@ inspecting them — by calling `ssamd`'s
 
 ## Connecting to the daemon
 
-`ssam` connects to `ssamd` over *gRPC* at:
+`ssam` connects to `ssamd` over *gRPC* at the fixed Linux abstract Unix domain
+socket `@ssamd`:
 
 ```
-http://<SSAMD_IP>:63737
+unix://\0ssamd
 ```
 
-| Setting | Source | Default |
+| Setting | Value |
 | --- | --- | --- |
-| Daemon IP | `SSAMD_IP` environment variable (must be a valid IPv4) | `127.0.0.1` (localhost) |
-| Port | fixed SSAM control port | `63737` |
+| Endpoint | `unix://\0ssamd` |
+| Transport | local gRPC over an abstract Unix domain socket |
+| Authorization | peer effective GID must match the daemon's effective GID via `SO_PEERCRED` |
 
-To target a remote daemon (only if it binds a routable
-[`rpc_bind_ip`](daemon-config.md#rpc_bind_ip)):
-
-```console
-$ SSAMD_IP=192.168.63.100 ssam list
-```
-
-Expose a remote daemon carefully — remote access is gated by the daemon's bind
-address and the network. For the control API details, see the
+Remote TCP access is not supported. For the control API details, see the
 [Remocon gRPC control API](remocon-rpc.md).
 
 ---
@@ -158,9 +152,8 @@ ssam install <PACKAGE_PATH> [-d|--downgrade] [-r|--remove_data]
 | `-d`, `--downgrade` | Allow installing a package that is a **lower version** than the one already installed. |
 | `-r`, `--remove_data` | Remove all data associated with the package during (re)install. |
 
-A relative `<PACKAGE_PATH>` is only resolved against the local filesystem —
-targeting a remote daemon (`SSAMD_IP` set to a non-loopback address) requires
-an absolute path.
+A relative `<PACKAGE_PATH>` is resolved against the local filesystem because
+the client and daemon use the same local transport.
 
 ```console
 $ ssam install ./helloworld-1.0.0.ssam
@@ -212,7 +205,7 @@ ssam pkg-info <PACKAGE_URI>
 | URI form | Meaning |
 | --- | --- |
 | `ssam://<name>` | An **installed** package, by name. |
-| `file:///<absolute-path>` | A SSAM package **file on disk** (not necessarily installed). The path must be absolute, and this form is only supported when targeting a local (loopback) daemon. |
+| `file:///<absolute-path>` | A SSAM package **file on disk** (not necessarily installed). The path must be absolute. |
 
 ```console
 $ ssam pkg-info ssam://helloworld

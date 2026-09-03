@@ -58,22 +58,16 @@ fn main() -> anyhow::Result<()> {
 
 ## Connect to `ssamd`
 
-- **엔드포인트:** `http://<host>:<port>` —
-  [평문 HTTP/2, TLS 없음](../reference/remocon-rpc.ko.md#connection).
-- **`<host>`:** 데몬의
-  [`rpc_bind_ip`](../reference/daemon-config.ko.md#rpc_bind_ip)(기본값
-  `127.0.0.1`).
-- **`<port>`:** 고정된 **63737**.
-- **TLS:** 없음 — 대부분의 gRPC 클라이언트 라이브러리에서 `insecure` 또는
-  `plaintext` 채널 옵션을 명시해야 합니다(예: Java의 `usePlaintext()`,
-  Python의 `grpc.insecure_channel`). Rust의 `tonic` 은 `http://` 스킴만으로
-  평문임을 인식하므로 별도 플래그가 필요 없습니다 — 사용하는 라이브러리에서
-  해당하는 옵션을 찾으세요.
+`ssamd` 는 고정된 Linux abstract Unix domain socket `@ssamd`에서 로컬 gRPC
+연결을 받습니다. 원격 TCP 연결은 지원하지 않습니다. peer의 effective GID가 데몬의
+effective GID와 일치해야 하며, 데몬은 `SO_PEERCRED`로 이를 검사합니다.
 
 예를 들어 Rust로는:
 
 ```rust
-let channel = Channel::from_shared(format!("http://{ip}:{CONTROL_PORT}"))?
+use tonic::transport::Endpoint;
+
+let channel = Endpoint::from_shared("unix://\0ssamd".to_owned())?
     .connect_timeout(GRPC_CONNECT_TIMEOUT)
     .connect()
     .await?;
@@ -181,13 +175,11 @@ for entry in response.results {
 
 ## Security considerations
 
-이 RPC 자체엔 TLS나 인증이 없습니다(
-[Connection](../reference/remocon-rpc.ko.md#connection) 참조).
-- 원격 접근이 꼭 필요한 게 아니라면 데몬의 기본 localhost 바인딩을 유지하고, 노출해야
-한다면 네트워크·OS 수준 접근 제어로 범위를 제한하세요(
-[`rpc_bind_ip`](../reference/daemon-config.ko.md#rpc_bind_ip) 참조).
+이 RPC는 로컬 abstract Unix domain socket을 사용하며 원격 TCP 연결을 지원하지
+않습니다. 데몬은 RPC를 dispatch하기 전에 `SO_PEERCRED`를 검사하고 peer의
+effective GID가 데몬의 effective GID와 일치하는 경우만 허용합니다.
 
-- 그렇다고 패키지 진위 검증이 약화되는 것은 아닙니다: 검증은 RPC를 호출하는
-주체와 무관하게 독립적으로 강제되므로, 서명되지 않거나 변조된 패키지는
-누가 호출하든 설치 단계에서 거부되어 로드·실행되지 않습니다(
+- 패키지 진위 검증은 별도의 보안 계층으로 적용됩니다: 허용된 설치 RPC는
+항상 검증을 거치므로, 서명되지 않거나 변조된 패키지는 설치 단계에서 거부되어
+로드·실행되지 않습니다(
 [제어 인터페이스 보안](../architecture/package-integrity.ko.md#control-interface-security-rpc) 참조).

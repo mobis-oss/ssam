@@ -132,13 +132,6 @@ impl CommandHandler for PkgInfo {
             }
         }
 
-        if !package_paths.is_empty() && !client.is_local_mode() {
-            anyhow::bail!(
-                "file:// URIs are only supported in local mode. \
-                 Use 'ssam://<package_name>' to query a remote daemon."
-            );
-        }
-
         let mut rendered_any = false;
         let mut package_lookup_failed = false;
         if !package_names.is_empty() {
@@ -530,23 +523,6 @@ mod tests {
         assert!(
             result.contains("Status: Running"),
             "ssam:// should show status"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_pkg_info_file_uri_rejected_in_remote_mode() {
-        let mut client = MockClient::new_success().with_remote_mode();
-        let mut stdout = Vec::new();
-        let handler = PkgInfo;
-        let matches = handler
-            .command()
-            .get_matches_from(vec!["pkg-info", "file:///tmp/test.ssam"]);
-        let result = handler.handle(&matches, &mut client, &mut stdout).await;
-        assert!(result.is_err(), "file:// should be rejected in remote mode");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("local mode"),
-            "error should mention local mode"
         );
     }
 

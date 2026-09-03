@@ -45,7 +45,6 @@ packages_mnt_root       = "/var/run/ssamd/mnt"
 public_key_file_path    = "/etc/ssamd/public.key"
 packages_cgroup         = ""                          # 비워도 됨
 packages_ext            = "ssam"
-rpc_bind_ip             = "127.0.0.1"                 # 선택
 
 [network.bridge]                                      # 선택 섹션
 enabled = true
@@ -58,8 +57,8 @@ size = 29                                             # 기본값
 disable_runtime_integrity = false                     # 기본값
 ```
 
-`[common]` 의 모든 키는 **반드시 존재해야** 합니다(`rpc_bind_ip` 제외). 그렇지
-않으면 데몬이 기동에 실패합니다. `[network]` 와 `[integrity]` 섹션은 **선택** 입니다.
+`[common]` 의 모든 키는 **반드시 존재해야** 합니다. 그렇지 않으면 데몬이 기동에
+실패합니다. `[network]` 와 `[integrity]` 섹션은 **선택** 입니다.
 
 ---
 
@@ -119,14 +118,13 @@ disable_runtime_integrity = false                     # 기본값
 - **필수.** 앞의 점을 제외한 패키지 파일 확장자(예: `ssam`). 이 확장자를 가진
   파일이 SSAM 패키지로 인식됩니다.
 
-### `rpc_bind_ip`
+### RPC 엔드포인트
 
-- **선택.** 데몬 RPC 제어 서버가 바인딩하는 IPv4 주소. 생략하거나 파싱할 수
-  없으면 `127.0.0.1`(localhost)로 기본 설정됩니다. 서버는 항상 고정 SSAM 제어
-  포트 **63737** 에서 수신하며, gRPC 클라이언트가 접속하는 엔드포인트입니다. 원격
-  제어를 허용하려면 라우팅 가능한 주소를 설정하세요. 제어 API는 강력하므로, 특별한
-  사유가 없으면 localhost로 두고 원격 노출이 필요하면 네트워크 격리·방화벽으로 접근을
-  제한하세요.
+데몬의 RPC 제어 서버는 Linux abstract Unix domain socket `@ssamd`에서 수신합니다.
+엔드포인트는 고정되어 있어 설정할 수 없습니다. abstract socket은 파일시스템 경로가
+아니므로 socket 파일이나 runtime directory를 만들지 않습니다. RPC 클라이언트는 같은
+시스템 환경에서 실행되어야 하며 peer credential 검사를 통과해야 합니다. peer의
+effective GID가 데몬의 effective GID와 일치해야 하며 UID는 확인하지 않습니다.
 
 ---
 
@@ -187,9 +185,9 @@ NAT·외부 라우팅이 없습니다. 브리지 인터페이스 이름은 데�
 - `public_key_file_path` 에 지정된 파일이 존재하기를 **요구** 하며, 없으면 *"Public key file not found"* 로 중단합니다.
 - `downloaded_packages_dir`·`packages_data_root`·`packages_mnt_root` 디렉터리는 없으면 자동으로 **생성** 합니다.
 - `packages_cgroup` 이 (비어 있지 않을 때) 존재하는지 **확인** 하고, 없으면 중단합니다.
-- 초기화가 끝나면 `sd_notify` 를 호출합니다. `ssamd` 를 systemd의 `notify` 타입 서비스
-  유닛으로 구성했다면 이때 **준비 완료가 통지** 됩니다.
-- RPC 서버를 `rpc_bind_ip`(기본 localhost)의 포트 63737에 **바인딩** 합니다.
+- RPC 서버를 고정 abstract Unix socket `@ssamd`에 **바인딩** 합니다.
+- listener를 바인딩한 뒤 `sd_notify` 를 호출합니다. `ssamd` 를 systemd의 `notify` 타입
+  서비스 유닛으로 구성했다면 이때 **준비 완료가 통지** 됩니다.
 
 ---
 
@@ -209,7 +207,7 @@ packages_cgroup         = ""
 packages_ext            = "ssam"
 ```
 
-### With cgroup confinement, remote RPC, and bridge networking
+### With cgroup confinement and bridge networking
 
 ```toml
 [common]
@@ -221,7 +219,6 @@ packages_mnt_root       = "/var/run/ssamd/mnt"
 public_key_file_path    = "/etc/ssamd/public.key"
 packages_cgroup         = "ssamd.slice"
 packages_ext            = "ssam"
-rpc_bind_ip             = "192.168.63.100"
 
 [network.bridge]
 enabled = true

@@ -156,13 +156,18 @@ bounds what a malicious file can do **before** verification completes:
 ## Control interface security (RPC)
 
 - `ssamd` exposes the [Remocon gRPC control API](../reference/remocon-rpc.md) on
-  port **63737**, bound to [`rpc_bind_ip`](../reference/daemon-config.md#rpc_bind_ip)
-  (localhost by default). There is no TLS or authentication, so any client that
-  can reach the endpoint can install a package.
-- Nonetheless, **authenticity is still enforced regardless of who calls the
-  RPC:** an attacker may trigger installation, but a package that fails
-  signature verification is refused at the install step and never gets set up
-  or run. Unsigned or tampered code therefore cannot actually execute.
+  the fixed Linux abstract Unix domain socket `@ssamd`. Remote TCP access is
+  not available.
+- Before dispatching an RPC, `ssamd` checks `SO_PEERCRED`. Only a peer whose
+  effective GID matches the daemon's effective GID is allowed; UID is not
+  considered. Because an abstract socket has no filesystem permissions, a
+  process in the same network namespace can attempt to connect if it knows the
+  socket name; peer credentials are the authorization boundary.
+- **Package authenticity is enforced separately from peer authorization for
+  every accepted installation RPC:** all installation requests must pass
+  signature and integrity verification. A package that fails verification is
+  refused at the install step and never gets set up or run. Unsigned or
+  tampered code therefore cannot actually execute.
 
 ---
 

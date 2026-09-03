@@ -31,26 +31,21 @@
 
 ## Connecting to the daemon
 
-`ssam` 은 `ssamd` 에 다음 *gRPC* 주소로 연결합니다:
+`ssam` 은 고정된 Linux abstract Unix domain socket `@ssamd`를 통해 `ssamd`에
+*gRPC*로 연결합니다:
 
 ```
-http://<SSAMD_IP>:63737
+unix://\0ssamd
 ```
 
-| 설정 | 출처 | 기본값 |
+| 설정 | 값 |
 | --- | --- | --- |
-| 데몬 IP | `SSAMD_IP` 환경 변수 (유효한 IPv4여야 함) | `127.0.0.1` (localhost) |
-| 포트 | 고정 SSAM 제어 포트 | `63737` |
+| 엔드포인트 | `unix://\0ssamd` |
+| 전송 | abstract Unix domain socket 기반 로컬 gRPC |
+| 인증 | `SO_PEERCRED`를 통한 peer effective GID와 데몬 effective GID 일치 |
 
-원격 데몬을 대상으로 하려면(데몬이 라우팅 가능한
-[`rpc_bind_ip`](daemon-config.ko.md#rpc_bind_ip)에 바인딩한 경우에만):
-
-```console
-$ SSAMD_IP=192.168.63.100 ssam list
-```
-
-원격 데몬은 신중히 노출하세요 — 원격 접근은 데몬의 바인딩 주소와 네트워크로
-통제됩니다. 제어 API의 세부는 [Remocon gRPC 제어 API](remocon-rpc.ko.md)를 참고하세요.
+원격 TCP 접근은 지원하지 않습니다. 제어 API의 세부는
+[Remocon gRPC 제어 API](remocon-rpc.ko.md)를 참고하세요.
 
 ---
 
@@ -155,9 +150,8 @@ ssam install <PACKAGE_PATH> [-d|--downgrade] [-r|--remove_data]
 | `-d`, `--downgrade` | 이미 설치된 것보다 **낮은 버전** 이어도 설치 허용. |
 | `-r`, `--remove_data` | (재)설치 시 패키지에 연결된 모든 데이터 제거. |
 
-`<PACKAGE_PATH>` 가 상대 경로면 로컬 파일시스템 기준으로만 해석됩니다 —
-원격 데몬을 대상으로 할 때(`SSAMD_IP` 가 loopback이 아닐 때)는 절대 경로가
-필요합니다.
+`<PACKAGE_PATH>` 가 상대 경로면 클라이언트와 데몬이 같은 로컬 전송을 사용하므로
+로컬 파일시스템 기준으로 해석됩니다.
 
 ```console
 $ ssam install ./helloworld-1.0.0.ssam
@@ -209,7 +203,7 @@ ssam pkg-info <PACKAGE_URI>
 | URI 형식 | 의미 |
 | --- | --- |
 | `ssam://<name>` | 이름으로 참조되는 **설치된** 패키지. |
-| `file:///<absolute-path>` | 디스크의 SSAM 패키지 **파일**(설치 여부 무관). 경로는 절대 경로여야 하며, 이 형식은 로컬(loopback) 데몬을 대상으로 할 때만 지원됩니다. |
+| `file:///<absolute-path>` | 디스크의 SSAM 패키지 **파일**(설치 여부 무관). 경로는 절대 경로여야 합니다. |
 
 ```console
 $ ssam pkg-info ssam://helloworld

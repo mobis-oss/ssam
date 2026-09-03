@@ -5,7 +5,7 @@ pub mod ssam_package;
 // tonic-generated code; pedantic lints suppressed
 #[allow(clippy::pedantic)]
 pub mod remocon {
-    pub const CONTROL_PORT: u16 = 63737;
+    pub const CONTROL_SOCKET_PATH: &str = "\0ssamd";
     tonic::include_proto!("ssamd.remocon");
 
     use crate::ssam_package::ssam_pkg_info::PackageInfoResult;

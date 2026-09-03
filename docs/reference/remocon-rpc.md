@@ -31,9 +31,8 @@ control packages.
 | --- | --- |
 | Transport | gRPC (HTTP/2), proto3 |
 | gRPC package | `ssamd.remocon` (proto3) |
-| Host | [`rpc_bind_ip`](daemon-config.md#rpc_bind_ip) — `127.0.0.1` by default |
-| Port | **63737** (fixed SSAM control port) |
-| Auth | None at the transport/RPC level |
+| Endpoint | Linux abstract Unix domain socket `@ssamd` |
+| Auth | `SO_PEERCRED`: peer effective GID must match the daemon's effective GID |
 
 ---
 
@@ -77,10 +76,10 @@ Install a package from a local path.
 - **Response:** [`InstallPackageResponse`](#installpackageresponse)
 - **Response data type:** [`PackageData`](#packagedata)
 
-Installation always runs full signature and integrity checks (see
-[Package Integrity](../architecture/package-integrity.md)), regardless of
-`downgrade` or who calls the RPC. A package that fails verification is
-rejected at this step and is not installed (see
+Every accepted installation RPC runs full signature and integrity checks (see
+[Package Integrity](../architecture/package-integrity.md)), regardless of the
+`downgrade` option. A package that fails verification is rejected at this step
+and is not installed (see
 [Control interface security](../architecture/package-integrity.md#control-interface-security-rpc)).
 
 Version comparison against any currently installed version of the same

@@ -21,8 +21,10 @@ use futures_util::FutureExt;
 use once_cell::sync::Lazy;
 use remocon_server_impl::{RemoconImpl, validate_api_version};
 
-use std::{fs, net::Ipv4Addr, os::unix::fs::DirBuilderExt, path::Path, sync::Arc, time::Instant};
+use std::{fs, os::unix::fs::DirBuilderExt, path::Path, sync::Arc, time::Instant};
 use tokio::sync::oneshot;
+use tokio_stream::wrappers::UnixListenerStream;
+use tonic::{Request, Status, service::InterceptorLayer, transport::server::UdsConnectInfo};
 
 use package_manager::PackageManagerService;
 use utils::actor_supervisor::spawn_with;
@@ -41,8 +43,6 @@ static SSAMD_UPTIME: Lazy<std::time::Duration> = Lazy::new(|| {
 struct Daemon;
 
 impl Daemon {
-    const DEFAULT_RPC_BIND_IP_ADDR: Ipv4Addr = Ipv4Addr::LOCALHOST;
-
     async fn run() -> anyhow::Result<()> {
         let config_path = configuration::default_config_path();
         let config = Arc::new(
@@ -62,11 +62,6 @@ impl Daemon {
         let actor = package_manager::PackageManagerActor::new(Arc::clone(&config)).await?;
 
         let actor_ref = spawn_with::<package_manager::PackageManagerActor>(actor);
-
-        // Refer to include/systemd/sd-daemon.h or man sd_notify(3) for detail
-        sd_notify::notify(&[sd_notify::NotifyState::Ready])?;
-
-        log::debug!("Successfully started.");
         let package_manager: Arc<dyn PackageManagerService> =
             Arc::new(package_manager::PackageManager::new(actor_ref));
         let remocon_service = RemoconImpl::new(Arc::clone(&package_manager), Arc::clone(&config));
@@ -75,20 +70,9 @@ impl Daemon {
             validate_api_version,
         );
 
-        let ipaddr = config.rpc_bind_ip().map_or_else(
-            || {
-                log::debug!("No bind IP address configured, defaulting to localhost");
-                Self::DEFAULT_RPC_BIND_IP_ADDR
-            },
-            |ip| {
-                ip.parse::<std::net::Ipv4Addr>().unwrap_or_else(|e| {
-                    log::error!("Invalid bind IP address '{ip}': {e}, defaulting to localhost");
-                    Self::DEFAULT_RPC_BIND_IP_ADDR
-                })
-            },
-        );
-        let addr =
-            std::net::SocketAddr::new(std::net::IpAddr::V4(ipaddr), libssam::remocon::CONTROL_PORT);
+        let listener = tokio::net::UnixListener::bind(libssam::remocon::CONTROL_SOCKET_PATH)
+            .context("Failed to bind abstract RPC socket")?;
+        let incoming = UnixListenerStream::new(listener);
 
         let mut sigterm_handler =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -113,14 +97,17 @@ impl Daemon {
             }
         });
 
+        // Refer to include/systemd/sd-daemon.h or man sd_notify(3) for detail
+        sd_notify::notify(&[sd_notify::NotifyState::Ready])?;
+
+        log::debug!("Successfully started.");
         log::debug!("Now client can send control messages");
-        if let Err(err) = tonic::transport::Server::builder()
+        tonic::transport::Server::builder()
+            .layer(InterceptorLayer::new(authorize_peer))
             .add_service(server)
-            .serve_with_shutdown(addr, shutdown_receiver.map(|_| ()))
+            .serve_with_incoming_shutdown(incoming, shutdown_receiver.map(|_| ()))
             .await
-        {
-            log::error!("Server error: {err:?}");
-        }
+            .context("RPC server failed")?;
 
         log::trace!("Terminated.");
         Ok(())
@@ -176,6 +163,21 @@ impl Daemon {
     }
 }
 
+fn authorize_peer(request: Request<()>) -> Result<Request<()>, Status> {
+    let credentials = request
+        .extensions()
+        .get::<UdsConnectInfo>()
+        .and_then(|info| info.peer_cred.as_ref())
+        .ok_or_else(|| Status::permission_denied("peer credentials unavailable"))?;
+
+    let daemon_egid = rustix::process::getegid().as_raw();
+    if credentials.gid() == daemon_egid {
+        Ok(request)
+    } else {
+        Err(Status::permission_denied("peer credentials rejected"))
+    }
+}
+
 /// # Errors
 ///
 /// Returns an error if the logger fails to initialize, the Tokio runtime
@@ -189,4 +191,24 @@ pub fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(Daemon::run())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authorize_peer;
+    use tonic::{Code, Request};
+
+    #[test]
+    fn peer_authorization_rejects_missing_credentials() {
+        let status = authorize_peer(Request::new(())).expect_err("credentials must be required");
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn abstract_socket_bind_rejects_collision() {
+        let path = format!("\0ssamd-test-{}", std::process::id());
+        let listener = tokio::net::UnixListener::bind(&path).expect("first bind should succeed");
+        assert!(tokio::net::UnixListener::bind(&path).is_err());
+        drop(listener);
+    }
 }

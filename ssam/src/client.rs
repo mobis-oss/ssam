@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context as _, Result};
-use std::net::Ipv4Addr;
+use tonic::Request;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
 use libssam::remocon::remocon_client::RemoconClient;
@@ -14,10 +15,12 @@ use libssam::remocon::{
     WipePackageDataRequest, WipePackageDataResponse, api_version_string,
 };
 
+pub(crate) fn unix_socket_uri(socket_path: &str) -> String {
+    format!("unix://{socket_path}")
+}
+
 #[cfg(test)]
 use libssam::remocon::InspectLocalPackageResult;
-use tonic::Request;
-use tonic::metadata::MetadataValue;
 
 #[tonic::async_trait]
 pub trait Client: Send {
@@ -43,12 +46,10 @@ pub trait Client: Send {
         &mut self,
         paths: Vec<String>,
     ) -> Result<ListPackageInfoFromFilesResponse>;
-    fn is_local_mode(&self) -> bool;
 }
 
 pub struct GrpcClient {
     inner: RemoconClient<Channel>,
-    server_ip: Ipv4Addr,
 }
 
 fn build_remocon_request<T>(
@@ -63,20 +64,13 @@ fn build_remocon_request<T>(
 }
 
 impl GrpcClient {
-    pub fn new(client: RemoconClient<Channel>, server_ip: Ipv4Addr) -> Self {
-        Self {
-            inner: client,
-            server_ip,
-        }
+    pub fn new(client: RemoconClient<Channel>) -> Self {
+        Self { inner: client }
     }
 }
 
 #[tonic::async_trait]
 impl Client for GrpcClient {
-    fn is_local_mode(&self) -> bool {
-        self.server_ip.is_loopback()
-    }
-
     async fn list_packages(&mut self) -> Result<ListPackagesResponse> {
         let request = build_remocon_request(()).context("Failed to create Remocon request")?;
         Ok(self
@@ -214,7 +208,6 @@ pub struct MockClient {
     pub list_package_info_result: Option<anyhow::Result<ListPackageInfoResponse>>,
     pub list_package_info_from_files_result:
         Option<anyhow::Result<ListPackageInfoFromFilesResponse>>,
-    pub is_local: bool,
     pub captured_downgrade: Option<bool>,
     pub captured_start_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     pub captured_list_package_info_names: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
@@ -308,7 +301,6 @@ impl MockClient {
             list_package_info_from_files_result: Some(Ok(ListPackageInfoFromFilesResponse {
                 packages: vec![inspect_local_response],
             })),
-            is_local: true,
             captured_downgrade: None,
             captured_start_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             captured_list_package_info_names: std::sync::Arc::new(
@@ -384,11 +376,6 @@ impl MockClient {
                 nanos: 0,
             }),
         }
-    }
-
-    pub fn with_remote_mode(mut self) -> Self {
-        self.is_local = false;
-        self
     }
 
     pub fn with_list_error(mut self) -> Self {
@@ -469,10 +456,6 @@ impl MockClient {
 #[cfg(test)]
 #[tonic::async_trait]
 impl Client for MockClient {
-    fn is_local_mode(&self) -> bool {
-        self.is_local
-    }
-
     async fn list_packages(&mut self) -> anyhow::Result<ListPackagesResponse> {
         self.list_packages_result
             .take()
@@ -574,8 +557,8 @@ mod grpc_fake_server {
     use libssam::remocon::*;
     use libssam::remocon::{TimelineEvent, TimelineEventKind};
     use libssam::{PackageActionResult, PackageStatusEntry};
-    use std::net::SocketAddr;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
@@ -912,27 +895,34 @@ mod grpc_fake_server {
         }
     }
 
+    fn test_socket_name() -> String {
+        static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "ssam-test-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
     pub async fn spawn_fake_server() -> (
-        SocketAddr,
+        String,
         oneshot::Sender<()>,
         JoinHandle<Result<(), tonic::transport::Error>>,
     ) {
-        let (addr, shutdown_tx, handle, _) = spawn_fake_server_with_observer().await;
-        (addr, shutdown_tx, handle)
+        let (socket_path, shutdown_tx, handle, _) = spawn_fake_server_with_observer().await;
+        (socket_path, shutdown_tx, handle)
     }
 
     pub async fn spawn_fake_server_with_observer() -> (
-        SocketAddr,
+        String,
         oneshot::Sender<()>,
         JoinHandle<Result<(), tonic::transport::Error>>,
         Arc<Mutex<Vec<Vec<String>>>>,
     ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("Failed to bind fake server");
-        let addr = listener.local_addr().expect("Failed to get local addr");
-
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let socket_path = format!("\0{}", test_socket_name());
+        let listener =
+            tokio::net::UnixListener::bind(&socket_path).expect("Failed to bind fake server");
+        let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let observed_api_versions = Arc::new(Mutex::new(Vec::new()));
@@ -949,7 +939,7 @@ mod grpc_fake_server {
                 .await
         });
 
-        (addr, shutdown_tx, handle, observed_api_versions)
+        (socket_path, shutdown_tx, handle, observed_api_versions)
     }
 }
 
@@ -958,19 +948,19 @@ mod grpc_tests {
     use super::*;
     use grpc_fake_server::{spawn_fake_server, spawn_fake_server_with_observer};
     use libssam::remocon::remocon_client::RemoconClient;
-    use tonic::transport::Channel;
+    use tonic::transport::Endpoint;
 
     #[tokio::test]
     async fn test_grpc_list_packages() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client.list_packages().await.unwrap();
         assert_eq!(response.entries.len(), 1);
@@ -984,13 +974,13 @@ mod grpc_tests {
     async fn test_grpc_start_package() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client
             .start_package(vec!["test-pkg".to_owned()])
@@ -1008,13 +998,13 @@ mod grpc_tests {
     async fn test_grpc_stop_package() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client
             .stop_package(vec!["test-pkg".to_owned()])
@@ -1032,13 +1022,13 @@ mod grpc_tests {
     async fn test_grpc_install_package() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client
             .install_package("/tmp/dummy.ssam", false, false)
@@ -1056,13 +1046,13 @@ mod grpc_tests {
     async fn test_grpc_remove_package() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         client.remove_package("test-pkg").await.unwrap();
 
@@ -1074,13 +1064,13 @@ mod grpc_tests {
     async fn test_grpc_wipe_package_data() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client
             .wipe_package_data(vec!["test-pkg".to_owned()])
@@ -1098,13 +1088,13 @@ mod grpc_tests {
     async fn test_grpc_get_timeline_info() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client.get_timeline_info().await.unwrap();
         assert_eq!(response.events.len(), 1);
@@ -1118,13 +1108,13 @@ mod grpc_tests {
     async fn test_grpc_list_package_info() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client
             .list_package_info(vec!["test-pkg".to_owned()])
@@ -1144,13 +1134,13 @@ mod grpc_tests {
     async fn test_grpc_list_package_info_empty_names() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client.list_package_info(Vec::new()).await.unwrap();
         let data = response.packages;
@@ -1173,12 +1163,12 @@ mod grpc_tests {
         let (addr, shutdown_tx, handle, observed_api_versions) =
             spawn_fake_server_with_observer().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         client.list_packages().await.unwrap();
         client
@@ -1224,13 +1214,13 @@ mod grpc_tests {
     async fn test_grpc_start_package_error() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let response = client
             .start_package(vec!["error".to_owned()])
@@ -1256,13 +1246,13 @@ mod grpc_tests {
     async fn test_grpc_install_package_error() {
         let (addr, shutdown_tx, handle) = spawn_fake_server().await;
 
-        let channel = Channel::from_shared(format!("http://{addr}"))
+        let channel = Endpoint::from_shared(unix_socket_uri(&addr))
             .unwrap()
             .connect()
             .await
             .unwrap();
 
-        let mut client = GrpcClient::new(RemoconClient::new(channel), Ipv4Addr::LOCALHOST);
+        let mut client = GrpcClient::new(RemoconClient::new(channel));
 
         let error = client
             .install_package("/error.ssam", false, false)
@@ -1282,38 +1272,13 @@ mod grpc_tests {
     async fn test_grpc_connection_failure() {
         use std::time::Duration;
 
-        let result = Channel::from_shared("http://127.0.0.1:1".to_string())
+        let socket_path = format!("\0ssam-test-missing-{}", std::process::id());
+        let result = Endpoint::from_shared(unix_socket_uri(&socket_path))
             .unwrap()
             .connect_timeout(Duration::from_millis(100))
             .connect()
             .await;
 
-        assert!(result.is_err(), "Expected connection failure to port 1");
-    }
-
-    #[tokio::test]
-    async fn test_grpc_is_local_mode() {
-        let (addr, shutdown_tx, handle) = spawn_fake_server().await;
-
-        let channel = Channel::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-
-        // Test case 1: Localhost (127.0.0.1) -> should be local mode
-        let client = GrpcClient::new(RemoconClient::new(channel.clone()), Ipv4Addr::LOCALHOST);
-        assert!(client.is_local_mode(), "LOCALHOST should be local mode");
-
-        // Test case 2: Non-local IP -> should NOT be local mode
-        let non_local_ip = Ipv4Addr::new(192, 168, 0, 1);
-        let client = GrpcClient::new(RemoconClient::new(channel), non_local_ip);
-        assert!(
-            !client.is_local_mode(),
-            "External IP should not be local mode"
-        );
-
-        shutdown_tx.send(()).ok();
-        handle.await.unwrap().unwrap();
+        assert!(result.is_err(), "Expected connection failure");
     }
 }

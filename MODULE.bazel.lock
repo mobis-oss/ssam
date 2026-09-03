@@ -500,7 +500,7 @@
           "FILE:@@//Cargo.toml 2e6e445415927cb7eaaca11ad0c49a4848e06d8fb009ace7084c68b4802f3d16",
           "FILE:@@//libssam/Cargo.toml f8ae0f94763ae1efc3a46607c70dd5ee363330f2def6b72f2278f5812e83778b",
           "FILE:@@//proc_macros/Cargo.toml 1cb6df23346e29c6061fc7dfdad3305b7abbcb4ff2f888479483ccebe74bdea2",
-          "FILE:@@//ssamd/Cargo.toml 36fc67ee88b167887e7ab63a935bdb27d9e1bdf415163155daed580745366898",
+          "FILE:@@//ssamd/Cargo.toml 634885744c7ba32641fbb4b32332a65eca7d9e8d64ea3cc1b066e4e211167056",
           "FILE:@@//quotactl-rs/Cargo.toml b506908e9096bff30924ca1b418e3f168b4b128834755cecfd8b75965032071e",
           "FILE:@@//ssam-log/Cargo.toml 218bd1efab6b3cdb2e5a201eaca6e170b254ebc7006ffb6b295fb7d5347863b7",
           "FILE:@@//ssam/Cargo.toml b12fd9c8164d44e988980a7c72b9db152075d6e3ee36298652988bd6dd087145",

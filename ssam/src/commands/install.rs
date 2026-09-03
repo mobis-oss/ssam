@@ -77,24 +77,13 @@ impl CommandHandler for Install {
         let downgrade = matches.get_flag(Self::INSTALL_DOWNGRADE);
         let remove_data = matches.get_flag(Self::REMOVE_DATA);
 
-        let is_local_mode = client.is_local_mode();
         let path = Path::new(package_path);
 
-        // Resolve path based on mode and path type
         let processed_path = if path.is_absolute() {
             package_path.to_owned()
-        } else if is_local_mode {
-            Self::canonicalize_relative(package_path)?
         } else {
-            anyhow::bail!(
-                "Relative paths are not supported in remote mode. \
-                 Please provide an absolute path."
-            );
+            Self::canonicalize_relative(package_path)?
         };
-
-        if !is_local_mode {
-            eprintln!("Warning: Absolute path may not work as intended in remote mode");
-        }
 
         writeln!(stdout, "Installing package: {processed_path}")?;
         let response = client
@@ -209,44 +198,6 @@ mod tests {
                 .to_string()
                 .contains("missing package data")
         );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_install_remote_relative_path_error() {
-        let mut client = MockClient::new_success().with_remote_mode();
-        let handler = Install;
-        let cmd = handler.command();
-
-        let matches = cmd
-            .try_get_matches_from(["install", "relative/path/pkg.ssam"])
-            .unwrap();
-
-        let mut stdout = Vec::new();
-        let result = handler.handle(&matches, &mut client, &mut stdout).await;
-
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Relative paths are not supported in remote mode")
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_install_remote_absolute_path_success() {
-        let mut client = MockClient::new_success().with_remote_mode();
-        let handler = Install;
-        let cmd = handler.command();
-
-        let matches = cmd
-            .try_get_matches_from(["install", "/absolute/path/pkg.ssam"])
-            .unwrap();
-
-        let mut stdout = Vec::new();
-        let result = handler.handle(&matches, &mut client, &mut stdout).await;
-
-        assert!(result.is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]

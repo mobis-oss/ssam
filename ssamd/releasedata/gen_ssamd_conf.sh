@@ -30,7 +30,6 @@ SSAMD_CONFIG=(
     [CONF_PACKAGES_DATA_ROOT]="/var/lib/ssamd/data"
     [CONF_PUBLIC_KEY_FILE_PATH]="/etc/ssamd/public.key"
     [CONF_PACKAGES_EXT]="ssam"
-    [CONF_RPC_BIND_IP]="127.0.0.1"
     [CONF_PACKAGES_CGROUP]=""
     [CONF_PACKAGES_OVERLAYFS_ROOT]=""
     [CONF_BRIDGE_ENABLED]="false"
@@ -83,8 +82,6 @@ Arguments for SSAMD configuration (All paths below are on the target device)
                                  (default: "${SSAMD_CONFIG[CONF_PUBLIC_KEY_FILE_PATH]}")
     --packages-ext         EXT   Package file extension without a dot.
                                  (default: "${SSAMD_CONFIG[CONF_PACKAGES_EXT]}")
-    --rpc-bind-ip          IP    IP address to bind the ssamd RPC server
-                                 (default: "${SSAMD_CONFIG[CONF_RPC_BIND_IP]}")
     --bridge-enabled       BOOL  Enable per-container bridge networking.
                                  (default: ${SSAMD_CONFIG[CONF_BRIDGE_ENABLED]})
     --bridge-pool-base     CIDR  IP pool bridges carve container subnets from.
@@ -107,8 +104,7 @@ Example - Generate all available configuration files:
         --public-key-file ${SSAMD_CONFIG[CONF_PUBLIC_KEY_FILE_PATH]} \\
         --packages-ext ${SSAMD_CONFIG[CONF_PACKAGES_EXT]} \\
         --pkgs-overlayfs-root /var/lib/ssamd/data/overlayfs \\
-        --pkgs-cgroup ssamd.slice \\
-        --rpc-bind-ip 192.168.63.100
+        --pkgs-cgroup ssamd.slice
 
 EOF
 }
@@ -140,7 +136,6 @@ update_template_common () {
         -e "s|@CONF_PUBLIC_KEY_FILE_PATH@|${SSAMD_CONFIG[CONF_PUBLIC_KEY_FILE_PATH]}|g" \
         -e "s|@CONF_PACKAGES_CGROUP@|${SSAMD_CONFIG[CONF_PACKAGES_CGROUP]}|g" \
         -e "s|@CONF_PACKAGES_EXT@|${SSAMD_CONFIG[CONF_PACKAGES_EXT]}|g" \
-        -e "s|@CONF_RPC_BIND_IP@|${SSAMD_CONFIG[CONF_RPC_BIND_IP]}|g" \
         -e "s|@CONF_BRIDGE_ENABLED@|${SSAMD_CONFIG[CONF_BRIDGE_ENABLED]}|g" \
         -e "s|@CONF_BRIDGE_POOL_BASE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]}|g" \
         -e "s|@CONF_BRIDGE_POOL_SIZE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]}|g" \
@@ -306,7 +301,7 @@ generate_ssamd_config() {
 # Parse command line arguments
 parse_arguments() {
     temp_args=$(getopt -o h \
-        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,rpc-bind-ip:,bridge-enabled:,bridge-pool-base:,bridge-pool-size:,disable-runtime-integrity: \
+        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,bridge-enabled:,bridge-pool-base:,bridge-pool-size:,disable-runtime-integrity: \
         -n "$(basename "$0")" -- "$@") || error_exit "Invalid argument"
 
     eval set -- "$temp_args"
@@ -372,10 +367,6 @@ parse_arguments() {
                 ;;
             --packages-ext)
                 SSAMD_CONFIG[CONF_PACKAGES_EXT]="$2"
-                shift 2
-                ;;
-            --rpc-bind-ip)
-                SSAMD_CONFIG[CONF_RPC_BIND_IP]="$2"
                 shift 2
                 ;;
             --bridge-enabled)
@@ -481,7 +472,6 @@ packages_mnt_root = \"@CONF_PACKAGES_MNT_ROOT@\"
 public_key_file_path = \"@CONF_PUBLIC_KEY_FILE_PATH@\"
 packages_cgroup = \"@CONF_PACKAGES_CGROUP@\"
 packages_ext = \"@CONF_PACKAGES_EXT@\"
-rpc_bind_ip = \"@CONF_RPC_BIND_IP@\"
 
 [network.bridge]
 enabled = @CONF_BRIDGE_ENABLED@
@@ -524,7 +514,9 @@ include <tunables/global>
   include <abstractions/apparmor_api/find_mountpoint>
 
   capability sys_admin,
-  network inet tcp,
+  network unix stream,
+  network unix dgram,
+  network netlink dgram,
 
   mount -> @APPARMOR_NORMALIZED_PACKAGES_MNT_ROOT@/*/,
   umount @APPARMOR_NORMALIZED_PACKAGES_MNT_ROOT@/*/,

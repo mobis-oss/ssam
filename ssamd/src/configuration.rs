@@ -51,9 +51,6 @@ pub struct Common {
 
     /// Package file extension (required)
     pub packages_ext: String,
-
-    /// Remote control server bind IP (optional)
-    pub rpc_bind_ip: Option<String>,
 }
 
 /// Daemon-global network configuration, parsed from the optional `[network]` TOML section
@@ -245,11 +242,6 @@ impl Configuration {
         &self.common.packages_ext
     }
 
-    /// Get bind IP address as a borrowed reference (optional)
-    pub(crate) fn rpc_bind_ip(&self) -> Option<&str> {
-        self.common.rpc_bind_ip.as_deref()
-    }
-
     /// Get daemon network configuration (`None` when `[network]` section is absent)
     pub(crate) fn network_config(&self) -> Option<&NetworkConfig> {
         self.network.as_ref()
@@ -301,7 +293,6 @@ pub(crate) mod tests {
                 public_key_file_path: "/var/lib/ssamd/keys/test.pub.key".to_owned(),
                 packages_cgroup: String::new(),
                 packages_ext: "ssam".to_owned(),
-                rpc_bind_ip: None,
             },
             Some(NetworkConfig {
                 bridge: Some(BridgeConfig {
