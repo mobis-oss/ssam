@@ -32,7 +32,12 @@ control packages.
 | Transport | gRPC (HTTP/2), proto3 |
 | gRPC package | `ssamd.remocon` (proto3) |
 | Endpoint | Linux abstract Unix domain socket `@ssamd` |
-| Auth | `SO_PEERCRED`: peer effective GID must match the daemon's effective GID |
+| Auth | `SO_PEERCRED`: peer effective GID must match the daemon's effective GID or an entry in `[rpc].allowed_gids` |
+
+Before dispatching an RPC, `ssamd` reads the peer's effective GID from
+`SO_PEERCRED`. The peer is allowed when that GID matches the daemon's effective
+GID or one of the additional GIDs in `[rpc].allowed_gids`; the list defaults to
+empty. UID is not used for authorization.
 
 ---
 

@@ -159,10 +159,12 @@ bounds what a malicious file can do **before** verification completes:
   the fixed Linux abstract Unix domain socket `@ssamd`. Remote TCP access is
   not available.
 - Before dispatching an RPC, `ssamd` checks `SO_PEERCRED`. Only a peer whose
-  effective GID matches the daemon's effective GID is allowed; UID is not
-  considered. Because an abstract socket has no filesystem permissions, a
-  process in the same network namespace can attempt to connect if it knows the
-  socket name; peer credentials are the authorization boundary.
+  effective GID matches the daemon's effective GID or an entry in
+  `[rpc].allowed_gids` is allowed; UID is not considered. The daemon's own
+  effective GID is always allowed and the additional list defaults to empty.
+  Because an abstract socket has no filesystem permissions, a process in the
+  same network namespace can attempt to connect if it knows the socket name;
+  peer credentials are the authorization boundary.
 - **Package authenticity is enforced separately from peer authorization for
   every accepted installation RPC:** all installation requests must pass
   signature and integrity verification. A package that fails verification is

@@ -455,6 +455,81 @@ test_runtime_integrity_option() {
     fi
 }
 
+# Test 6c: RPC peer GID allowlist
+test_rpc_allowed_gids_option() {
+    print_test_header "Test 6c: RPC Allowed GIDs"
+
+    local test_dir="${TEST_OUTPUT_DIR}/test6c"
+    mkdir -p "$test_dir"
+    local output_file="${test_dir}/ssamd.toml"
+
+    "$GEN_CONFIG_SCRIPT" --output-path "$test_dir"
+    verify_file_content "$output_file" "\[rpc\]" "RPC config - default section"
+    verify_file_content "$output_file" "allowed_gids = \[\]" "RPC config - default empty list"
+    verify_no_placeholders "$output_file" "RPC config - default"
+
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        --rpc-allowed-gids 1000,1001
+    verify_file_content "$output_file" "allowed_gids = \[1000, 1001\]" "RPC config - configured GIDs"
+    verify_no_placeholders "$output_file" "RPC config - configured GIDs"
+
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        --rpc-allowed-gids ""
+    verify_file_content "$output_file" "allowed_gids = \[\]" "RPC config - explicit empty list"
+
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        --rpc-allowed-gids 0,4294967295
+    verify_file_content "$output_file" "allowed_gids = \[0, 4294967295\]" "RPC config - boundary GIDs"
+
+    local invalid output rc
+    local -a invalid_values=(
+        "1000,,1001"
+        "1000,"
+        ",1000"
+        "-1"
+        "4294967296"
+        "abc"
+        "1000, 1001"
+        "[1000]"
+    )
+    for invalid in "${invalid_values[@]}"; do
+        set +e
+        output=$("$GEN_CONFIG_SCRIPT" --rpc-allowed-gids "$invalid" 2>&1)
+        rc=$?
+        set -e
+        if [[ $rc -ne 0 ]]; then
+            print_result "Error handling - invalid RPC GID '$invalid'" "PASS"
+        else
+            print_result "Error handling - invalid RPC GID '$invalid'" "FAIL"
+        fi
+    done
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" \
+        --rpc-allowed-gids 1000 \
+        --rpc-allowed-gids 1001 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        print_result "Error handling - repeated RPC GID option" "PASS"
+    else
+        print_result "Error handling - repeated RPC GID option" "FAIL"
+    fi
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --rpc-allowed-gids 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        print_result "Error handling - RPC GID option without value" "PASS"
+    else
+        print_result "Error handling - RPC GID option without value" "FAIL"
+    fi
+}
+
 # Test 10: Generate systemd service unit
 test_service_unit_only() {
     print_test_header "Test 10: Generate Systemd Service Unit"
@@ -821,6 +896,7 @@ main() {
     test_network_overrides
     test_network_arg_validation
     test_runtime_integrity_option
+    test_rpc_allowed_gids_option
     test_apparmor_var_run_special_case
     test_apparmor_run_special_case
     test_apparmor_var_run_prefix_collision

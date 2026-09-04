@@ -31,10 +31,11 @@ the system's *trust chain* protects it.
 
 1. [File structure at a glance](#file-structure-at-a-glance)
 2. [`[common]`](#common)
-3. [`[network]`](#network)
-4. [`[integrity]`](#integrity)
-5. [Startup validation](#startup-validation)
-6. [Complete examples](#complete-examples)
+3. [`[rpc]`](#rpc)
+4. [`[network]`](#network)
+5. [`[integrity]`](#integrity)
+6. [Startup validation](#startup-validation)
+7. [Complete examples](#complete-examples)
 
 ---
 
@@ -58,12 +59,15 @@ enabled = true
 base = "172.20.0.0/16"                                # default
 size = 29                                             # default
 
+[rpc]                                                  # optional section
+allowed_gids = []                                      # default
+
 [integrity]                                           # optional section
 disable_runtime_integrity = false                     # default
 ```
 
 Every key in `[common]` **must be present** or the daemon fails to start. The
-`[network]` and `[integrity]` sections are **optional**.
+`[rpc]`, `[network]`, and `[integrity]` sections are **optional**.
 
 ---
 
@@ -135,7 +139,27 @@ The daemon's RPC control server listens on the Linux abstract Unix domain socket
 not a filesystem path, so it does not create a socket file or require a runtime
 directory. RPC clients must run in the same system environment and pass the
 peer-credential check: the peer's effective GID must match the daemon's
-effective GID. UID is not considered.
+effective GID or be included in `[rpc].allowed_gids`. UID is not considered.
+
+## `[rpc]`
+
+RPC peer authorization configuration. The whole section is **optional** — omit
+it, or leave `allowed_gids` empty, to allow only peers with the daemon's
+effective GID.
+
+### `allowed_gids`
+
+- **Unsigned integer array, optional (default `[]`).** Additional peer
+  effective GIDs allowed to access the RPC server, for example:
+
+  ```toml
+  [rpc]
+  allowed_gids = [1000, 1001]
+  ```
+
+- The daemon's own effective GID is always allowed, independently of this
+  list. UID is not used for authorization. A peer whose effective GID matches
+  neither the daemon's effective GID nor an entry in this list is rejected.
 
 ---
 

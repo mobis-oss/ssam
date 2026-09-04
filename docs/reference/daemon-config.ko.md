@@ -26,10 +26,11 @@
 
 1. [File structure at a glance](#file-structure-at-a-glance)
 2. [`[common]`](#common)
-3. [`[network]`](#network)
-4. [`[integrity]`](#integrity)
-5. [Startup validation](#startup-validation)
-6. [Complete examples](#complete-examples)
+3. [`[rpc]`](#rpc)
+4. [`[network]`](#network)
+5. [`[integrity]`](#integrity)
+6. [Startup validation](#startup-validation)
+7. [Complete examples](#complete-examples)
 
 ---
 
@@ -53,12 +54,15 @@ enabled = true
 base = "172.20.0.0/16"                                # 기본값
 size = 29                                             # 기본값
 
+[rpc]                                                  # 선택 섹션
+allowed_gids = []                                      # 기본값
+
 [integrity]                                           # 선택 섹션
 disable_runtime_integrity = false                     # 기본값
 ```
 
 `[common]` 의 모든 키는 **반드시 존재해야** 합니다. 그렇지 않으면 데몬이 기동에
-실패합니다. `[network]` 와 `[integrity]` 섹션은 **선택** 입니다.
+실패합니다. `[rpc]`, `[network]`, `[integrity]` 섹션은 **선택** 입니다.
 
 ---
 
@@ -124,7 +128,27 @@ disable_runtime_integrity = false                     # 기본값
 엔드포인트는 고정되어 있어 설정할 수 없습니다. abstract socket은 파일시스템 경로가
 아니므로 socket 파일이나 runtime directory를 만들지 않습니다. RPC 클라이언트는 같은
 시스템 환경에서 실행되어야 하며 peer credential 검사를 통과해야 합니다. peer의
-effective GID가 데몬의 effective GID와 일치해야 하며 UID는 확인하지 않습니다.
+effective GID가 데몬의 effective GID와 일치하거나 `[rpc].allowed_gids`에 포함되어야
+하며 UID는 확인하지 않습니다.
+
+## `[rpc]`
+
+RPC peer authorization 설정입니다. 섹션 전체를 **생략**하거나 `allowed_gids`를 비워
+두면 데몬의 effective GID와 같은 peer만 허용합니다.
+
+### `allowed_gids`
+
+- **부호 없는 정수 배열, 선택(기본 `[]`).** RPC 서버 접근을 추가로 허용할 peer의
+  effective GID입니다. 예:
+
+  ```toml
+  [rpc]
+  allowed_gids = [1000, 1001]
+  ```
+
+- 데몬 자신의 effective GID는 이 목록과 무관하게 항상 허용됩니다. 인증에는 UID를
+  사용하지 않습니다. peer의 effective GID가 데몬의 effective GID와 목록의 어느
+  항목에도 해당하지 않으면 거부됩니다.
 
 ---
 

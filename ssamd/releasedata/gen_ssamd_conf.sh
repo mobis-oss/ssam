@@ -8,6 +8,7 @@
 # in templates with defaults or user-provided values.
 
 set -e
+export LC_ALL=C
 
 #=============================================================================
 # Configuration Variables
@@ -36,12 +37,44 @@ SSAMD_CONFIG=(
     [CONF_BRIDGE_POOL_BASE]="172.20.0.0/16"
     [CONF_BRIDGE_POOL_SIZE]="29"
     [CONF_DISABLE_RUNTIME_INTEGRITY]="false"
+    [CONF_RPC_ALLOWED_GIDS]=""
 )
 
 error_exit() {
     echo "Error: $1" >&2
     echo "Refer to '$(basename "$0") --help' for usage information." >&2
     exit 1
+}
+
+validate_rpc_allowed_gids() {
+    local value="$1" gid normalized formatted=""
+    local -a gids
+
+    if [[ -z "$value" ]]; then
+        RPC_ALLOWED_GIDS_NORMALIZED=""
+        return 0
+    fi
+
+    if ! [[ "$value" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        error_exit "--rpc-allowed-gids must be a comma-separated ASCII decimal list, got: '$value'"
+    fi
+
+    IFS=',' read -r -a gids <<< "$value"
+    for gid in "${gids[@]}"; do
+        normalized="$gid"
+        while [[ ${#normalized} -gt 1 && ${normalized:0:1} == "0" ]]; do
+            normalized="${normalized:1}"
+        done
+        if [[ ${#normalized} -gt 10 ]] ||
+            [[ ${#normalized} -eq 10 && "$normalized" > "4294967295" ]]; then
+            error_exit "--rpc-allowed-gids values must be in [0, 4294967295], got: '$gid'"
+        fi
+        if [[ -n "$formatted" ]]; then
+            formatted+=", "
+        fi
+        formatted+="$normalized"
+    done
+    RPC_ALLOWED_GIDS_NORMALIZED="$formatted"
 }
 
 usage() {
@@ -90,6 +123,8 @@ Arguments for SSAMD configuration (All paths below are on the target device)
                                  (default: ${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]})
     --disable-runtime-integrity BOOL  Disable runtime package filesystem integrity.
                                       (default: ${SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]})
+    --rpc-allowed-gids LIST  Additional RPC peer effective GIDs, comma-separated.
+                            (default: empty list)
 
 Example - Generate all available configuration files:
     $(basename "$0") \\
@@ -140,6 +175,7 @@ update_template_common () {
         -e "s|@CONF_BRIDGE_POOL_BASE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]}|g" \
         -e "s|@CONF_BRIDGE_POOL_SIZE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]}|g" \
         -e "s|@CONF_DISABLE_RUNTIME_INTEGRITY@|${SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]}|g" \
+        -e "s|@CONF_RPC_ALLOWED_GIDS@|${SSAMD_CONFIG[CONF_RPC_ALLOWED_GIDS]}|g" \
         - > "$output_filename"
 }
 
@@ -301,7 +337,7 @@ generate_ssamd_config() {
 # Parse command line arguments
 parse_arguments() {
     temp_args=$(getopt -o h \
-        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,bridge-enabled:,bridge-pool-base:,bridge-pool-size:,disable-runtime-integrity: \
+        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,bridge-enabled:,bridge-pool-base:,bridge-pool-size:,disable-runtime-integrity:,rpc-allowed-gids: \
         -n "$(basename "$0")" -- "$@") || error_exit "Invalid argument"
 
     eval set -- "$temp_args"
@@ -411,6 +447,15 @@ parse_arguments() {
                 SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]="$2"
                 shift 2
                 ;;
+            --rpc-allowed-gids)
+                if [[ -n "${RPC_ALLOWED_GIDS_SET:-}" ]]; then
+                    error_exit "--rpc-allowed-gids may be specified only once"
+                fi
+                validate_rpc_allowed_gids "$2"
+                SSAMD_CONFIG[CONF_RPC_ALLOWED_GIDS]="$RPC_ALLOWED_GIDS_NORMALIZED"
+                RPC_ALLOWED_GIDS_SET=1
+                shift 2
+                ;;
             --)
                 shift
                 break
@@ -482,6 +527,9 @@ size = @CONF_BRIDGE_POOL_SIZE@
 
 [integrity]
 disable_runtime_integrity = @CONF_DISABLE_RUNTIME_INTEGRITY@
+
+[rpc]
+allowed_gids = [@CONF_RPC_ALLOWED_GIDS@]
 "
 
 TEMPLATE_SSAMD_SERVICE_UNIT="

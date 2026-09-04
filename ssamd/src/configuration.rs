@@ -133,6 +133,14 @@ pub struct IntegrityConfig {
     pub disable_runtime_integrity: bool,
 }
 
+/// RPC authorization configuration parsed from `[rpc]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RpcConfig {
+    /// Additional peer effective GIDs allowed to access the RPC server.
+    #[serde(default)]
+    pub allowed_gids: Vec<u32>,
+}
+
 /// Configuration manager that holds the runtime configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct Configuration {
@@ -145,6 +153,10 @@ pub struct Configuration {
     /// Runtime package filesystem integrity configuration.
     #[serde(default)]
     integrity: IntegrityConfig,
+
+    /// RPC authorization configuration.
+    #[serde(default)]
+    rpc: RpcConfig,
 }
 
 impl Configuration {
@@ -155,6 +167,7 @@ impl Configuration {
             common,
             network,
             integrity,
+            rpc: RpcConfig::default(),
         }
     }
 
@@ -257,6 +270,12 @@ impl Configuration {
     pub fn runtime_integrity_disabled(&self) -> bool {
         self.integrity.disable_runtime_integrity
     }
+
+    /// Get additional RPC peer effective GIDs.
+    #[must_use]
+    pub fn rpc_allowed_gids(&self) -> &[u32] {
+        &self.rpc.allowed_gids
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +347,13 @@ pub(crate) mod tests {
         temp_file
     }
 
+    fn create_test_config_file_with_rpc(allowed_gids: &str) -> NamedTempFile {
+        let mut temp_file = create_test_config_file();
+        writeln!(temp_file, "\n[rpc]\nallowed_gids = [{allowed_gids}]").unwrap();
+        temp_file.flush().unwrap();
+        temp_file
+    }
+
     #[test]
     fn test_no_config_file() {
         // Should return error when TOML file does not exist
@@ -393,6 +419,41 @@ pub(crate) mod tests {
 
         let config = Configuration::load_from_path(temp_file.path()).unwrap();
         assert!(config.bundled_packages_dir().is_empty());
+    }
+
+    #[test]
+    fn test_rpc_allowed_gids_defaults_to_empty() {
+        let temp_file = create_test_config_file();
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+
+        assert!(config.rpc_allowed_gids().is_empty());
+    }
+
+    #[test]
+    fn test_rpc_allowed_gids_loads_values() {
+        let temp_file = create_test_config_file_with_rpc("1000, 1001");
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+
+        assert_eq!(config.rpc_allowed_gids(), &[1000, 1001]);
+    }
+
+    #[test]
+    fn test_rpc_allowed_gids_empty_list() {
+        let temp_file = create_test_config_file_with_rpc("");
+        let config = Configuration::load_from_path(temp_file.path()).unwrap();
+
+        assert!(config.rpc_allowed_gids().is_empty());
+    }
+
+    #[test]
+    fn test_invalid_rpc_allowed_gids() {
+        for value in ["-1", "\"1000\"", "4294967296"] {
+            let temp_file = create_test_config_file_with_rpc(value);
+            assert!(
+                Configuration::load_from_path(temp_file.path()).is_err(),
+                "invalid GID should be rejected: {value}"
+            );
+        }
     }
 
     #[test]

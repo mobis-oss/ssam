@@ -42,7 +42,11 @@ unix://\0ssamd
 | --- | --- | --- |
 | 엔드포인트 | `unix://\0ssamd` |
 | 전송 | abstract Unix domain socket 기반 로컬 gRPC |
-| 인증 | `SO_PEERCRED`를 통한 peer effective GID와 데몬 effective GID 일치 |
+| 인증 | `SO_PEERCRED`를 통한 peer effective GID와 데몬 effective GID 또는 `[rpc].allowed_gids` 일치 |
+
+데몬의 effective GID는 항상 허용됩니다. 추가 peer effective GID는
+`[rpc].allowed_gids`로 설정할 수 있으며 기본값은 빈 목록입니다. 인증에는 UID를
+사용하지 않습니다.
 
 원격 TCP 접근은 지원하지 않습니다. 제어 API의 세부는
 [Remocon gRPC 제어 API](remocon-rpc.ko.md)를 참고하세요.

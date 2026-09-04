@@ -60,7 +60,9 @@ fn main() -> anyhow::Result<()> {
 
 `ssamd` 는 고정된 Linux abstract Unix domain socket `@ssamd`에서 로컬 gRPC
 연결을 받습니다. 원격 TCP 연결은 지원하지 않습니다. peer의 effective GID가 데몬의
-effective GID와 일치해야 하며, 데몬은 `SO_PEERCRED`로 이를 검사합니다.
+effective GID와 일치하거나 `[rpc].allowed_gids` 항목에 포함되어야 하며, 데몬은
+`SO_PEERCRED`로 이를 검사합니다. 인증에는 UID를 사용하지 않으며, 추가 목록의
+기본값은 비어 있습니다([데몬 설정 레퍼런스](../reference/daemon-config.ko.md#rpc) 참조).
 
 예를 들어 Rust로는:
 
@@ -177,7 +179,8 @@ for entry in response.results {
 
 이 RPC는 로컬 abstract Unix domain socket을 사용하며 원격 TCP 연결을 지원하지
 않습니다. 데몬은 RPC를 dispatch하기 전에 `SO_PEERCRED`를 검사하고 peer의
-effective GID가 데몬의 effective GID와 일치하는 경우만 허용합니다.
+effective GID가 데몬의 effective GID와 일치하거나 `[rpc].allowed_gids` 항목에
+포함되는 경우 허용합니다. 인증에는 UID를 사용하지 않습니다.
 
 - 패키지 진위 검증은 별도의 보안 계층으로 적용됩니다: 허용된 설치 RPC는
 항상 검증을 거치므로, 서명되지 않거나 변조된 패키지는 설치 단계에서 거부되어

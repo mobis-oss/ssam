@@ -65,6 +65,7 @@ impl Daemon {
         let package_manager: Arc<dyn PackageManagerService> =
             Arc::new(package_manager::PackageManager::new(actor_ref));
         let remocon_service = RemoconImpl::new(Arc::clone(&package_manager), Arc::clone(&config));
+        let allowed_gids = config.rpc_allowed_gids().to_owned();
         let server = libssam::remocon::remocon_server::RemoconServer::with_interceptor(
             remocon_service,
             validate_api_version,
@@ -103,7 +104,9 @@ impl Daemon {
         log::debug!("Successfully started.");
         log::debug!("Now client can send control messages");
         tonic::transport::Server::builder()
-            .layer(InterceptorLayer::new(authorize_peer))
+            .layer(InterceptorLayer::new(move |request| {
+                authorize_peer(request, &allowed_gids)
+            }))
             .add_service(server)
             .serve_with_incoming_shutdown(incoming, shutdown_receiver.map(|_| ()))
             .await
@@ -163,7 +166,7 @@ impl Daemon {
     }
 }
 
-fn authorize_peer(request: Request<()>) -> Result<Request<()>, Status> {
+fn authorize_peer(request: Request<()>, allowed_gids: &[u32]) -> Result<Request<()>, Status> {
     let credentials = request
         .extensions()
         .get::<UdsConnectInfo>()
@@ -171,7 +174,8 @@ fn authorize_peer(request: Request<()>) -> Result<Request<()>, Status> {
         .ok_or_else(|| Status::permission_denied("peer credentials unavailable"))?;
 
     let daemon_egid = rustix::process::getegid().as_raw();
-    if credentials.gid() == daemon_egid {
+    let gid = credentials.gid();
+    if gid == daemon_egid || allowed_gids.contains(&gid) {
         Ok(request)
     } else {
         Err(Status::permission_denied("peer credentials rejected"))
@@ -200,7 +204,8 @@ mod tests {
 
     #[test]
     fn peer_authorization_rejects_missing_credentials() {
-        let status = authorize_peer(Request::new(())).expect_err("credentials must be required");
+        let status =
+            authorize_peer(Request::new(()), &[]).expect_err("credentials must be required");
         assert_eq!(status.code(), Code::PermissionDenied);
     }
 

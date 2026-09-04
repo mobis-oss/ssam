@@ -60,8 +60,10 @@ fn main() -> anyhow::Result<()> {
 
 `ssamd` accepts local gRPC connections on the fixed Linux abstract Unix domain
 socket `@ssamd`. Remote TCP connections are not supported. The peer's effective
-GID must match the daemon's effective GID; the daemon enforces this with
-`SO_PEERCRED`.
+GID must match the daemon's effective GID or an entry in
+`[rpc].allowed_gids`; the daemon enforces this with `SO_PEERCRED`. UID is not
+used for authorization. The additional list defaults to empty; see the
+[daemon configuration reference](../reference/daemon-config.md#rpc).
 
 For example, in Rust:
 
@@ -176,7 +178,8 @@ for entry in response.results {
 
 The RPC uses a local abstract Unix domain socket and does not support remote
 TCP access. The daemon checks `SO_PEERCRED` before dispatching an RPC and allows
-only peers whose effective GID matches the daemon's effective GID.
+peers whose effective GID matches the daemon's effective GID or an entry in
+`[rpc].allowed_gids`. UID is not used for authorization.
 
 - Package authenticity is enforced as a separate security layer: every
   accepted installation RPC requires verification, so an unsigned or tampered
