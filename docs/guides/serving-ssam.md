@@ -270,30 +270,32 @@ enabled = true
 
 ## Generating configuration with `gen_ssamd_conf.sh`
 
-`ssamd/releasedata/gen_ssamd_conf.sh` is an **optional helper** that generates `ssamd.toml` (and, on request, a *systemd* service unit and an *AppArmor* profile) from command-line options, filling in sensible defaults.
-You never *need* it — a hand-written `ssamd.toml` works — but it is convenient for provisioning a target device consistently.
+You can write `ssamd.toml` by hand, but `gen_ssamd_conf.sh` is provided for convenience.
+`gen_ssamd_conf.sh` accepts command-line options and generates `ssamd.toml` and, on request, a *systemd* service unit and an *AppArmor* profile.
+It is an optional convenience, for example, when provisioning target devices consistently.
 
-Run with no arguments to emit a default `ssamd.toml` in the current directory, or pass options to customize:
+Specify options to generate the configuration.
+The table below also describes whether each option is required and what happens when it is omitted:
 
 | Option | Purpose |
 | --- | --- |
-| `--output-path PATH` | Where generated files are written (default: cwd) |
-| `--gen-service-unit` | Also generate `ssamd.service` (systemd unit) |
-| `--gen-apparmor-profile` | Also generate an AppArmor profile for ssamd |
-| `--ssamd-install-path PATH` | ssamd install path on the target device |
-| `--pkgs-mnt-root PATH` | → `packages_mnt_root` |
-| `--bundled-pkgs-dir PATH` | → `bundled_packages_dir` |
-| `--downloaded-pkgs-dir PATH` | → `downloaded_packages_dir` |
-| `--pkgs-data-root PATH` | → `packages_data_root` |
-| `--pkgs-overlayfs-root PATH` | → `packages_overlayfs_root` |
-| `--pkgs-cgroup NAME` | → `packages_cgroup` |
-| `--public-key-file PATH` | → `public_key_file_path` |
-| `--packages-ext EXT` | → `packages_ext` (no leading dot) |
-| `--rpc-allowed-gids LIST` | → `rpc.allowed_gids` |
-| `--bridge-enabled BOOL` | → `network.bridge.enabled` |
-| `--bridge-pool-base CIDR` | → `network.bridge.addr_pool.base` |
-| `--bridge-pool-size BITS` | → `network.bridge.addr_pool.size` |
-| `--disable-runtime-integrity BOOL` | → `integrity.disable_runtime_integrity` |
+| `--output-path PATH` | (optional) Specifies where generated files are written (default: current directory). |
+| `--gen-service-unit` | (optional) Generates `ssamd.service` (*systemd* service unit). |
+| `--gen-apparmor-profile` | (optional) Generates an *AppArmor* profile for `ssamd`. |
+| `--ssamd-install-path PATH` | (conditionally required) Specifies the `ssamd` installation path on the target device. Required when generating a service unit or an *AppArmor* profile. |
+| `--pkgs-mnt-root PATH` | [`packages_mnt_root`](../reference/daemon-config.md#packages_mnt_root). (required) Specifies the root directory where package filesystems are mounted. |
+| `--bundled-pkgs-dir PATH` | [`bundled_packages_dir`](../reference/daemon-config.md#bundled_packages_dir). (optional) Specifies the read-only directory for bundled packages. Omit for no bundled packages. |
+| `--downloaded-pkgs-dir PATH` | [`downloaded_packages_dir`](../reference/daemon-config.md#downloaded_packages_dir). (required) Specifies the read-write directory for packages installed at runtime. |
+| `--pkgs-data-root PATH` | [`packages_data_root`](../reference/daemon-config.md#packages_data_root). (required) Specifies the root directory for persistent data of package containers. |
+| `--pkgs-overlayfs-root PATH` | [`packages_overlayfs_root`](../reference/daemon-config.md#packages_overlayfs_root). (optional) Specifies the OverlayFS root directory for a writable layer used in debugging and development. Omit to disable OverlayFS. |
+| `--pkgs-cgroup NAME` | [`packages_cgroup`](../reference/daemon-config.md#packages_cgroup). (optional) Specifies the cgroup where package containers are placed. Omit to use the default cgroup. |
+| `--public-key-file PATH` | [`public_key_file_path`](../reference/daemon-config.md#public_key_file_path). (required) Specifies the path to the public key file used to verify package signatures. |
+| `--packages-ext EXT` | [`packages_ext`](../reference/daemon-config.md#packages_ext). (optional) Specifies the package file extension without a leading dot. Omit to use the default `ssam` extension. |
+| `--rpc-allowed-gids LIST` | [`rpc.allowed_gids`](../reference/daemon-config.md#allowed_gids). (optional) Specifies the effective GIDs of additional Remocon clients to permit. Omit to allow no additional GIDs. |
+| `--bridge-enabled BOOL` | [`network.bridge.enabled`](../reference/daemon-config.md#networkbridge). (optional) Configures the daemon to provide `bridge` networking to containers. Omit to disable bridge networking. |
+| `--bridge-pool-base CIDR` | [`network.bridge.addr_pool.base`](../reference/daemon-config.md#networkbridgeaddr_pool). (optional) Specifies the base CIDR of the address pool for assigning per-bridge subnets. Omit to use the daemon default; requires `--bridge-enabled`. |
+| `--bridge-pool-size BITS` | [`network.bridge.addr_pool.size`](../reference/daemon-config.md#networkbridgeaddr_pool). (optional) Specifies the prefix length of each per-bridge subnet. Omit to use the daemon default; requires `--bridge-enabled`. |
+| `--disable-runtime-integrity BOOL` | [`integrity.disable_runtime_integrity`](../reference/daemon-config.md#disable_runtime_integrity). (optional) Disables the daemon's runtime integrity checks. Omit to keep the checks enabled. |
 
 Example — generate the config, a service unit, and an AppArmor profile:
 
@@ -302,15 +304,13 @@ $ ssamd/releasedata/gen_ssamd_conf.sh \
       --output-path . \
       --gen-service-unit \
       --gen-apparmor-profile \
+      --ssamd-install-path /usr/bin/ssamd \
       --bundled-pkgs-dir /var/lib/ssamd/bundled \
       --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
       --pkgs-data-root /var/lib/ssamd/data \
       --pkgs-mnt-root /var/run/ssamd/mnt \
-      --public-key-file /etc/ssamd/public.key \
-      --pkgs-cgroup ssamd.slice
+      --public-key-file /etc/ssamd/public.key
 ```
-
-> The generator always emits a `[network.bridge]`/`[network.bridge.addr_pool]` section (disabled by default) — override it with the flags above, or edit `ssamd.toml` afterward.
 
 Run `gen_ssamd_conf.sh --help` for the authoritative option list on your checkout.
 

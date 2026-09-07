@@ -272,30 +272,31 @@ enabled = true
 
 ## Generating configuration with `gen_ssamd_conf.sh`
 
-`ssamd/releasedata/gen_ssamd_conf.sh`는 명령줄 옵션을 받아 합리적인 기본값을 채워 `ssamd.toml`(및 요청 시 *systemd* service unit과 *AppArmor* 프로파일)을 생성하는 **선택적 헬퍼** 입니다.
-반드시 필요한 것은 아니며 — 손으로 작성한 `ssamd.toml`도 동작합니다 — 타깃 디바이스를 일관되게 프로비저닝할 때 편리합니다.
+`ssamd.toml`을 직접 작성하여도 되지만, 편의를 위해 `gen_ssamd_conf.sh`를 제공합니다.
+`gen_ssamd_conf.sh`는 명령줄 옵션을 받아 `ssamd.toml` 및 요청 시 *systemd* service unit과 *AppArmor* 프로파일을 생성하는 도구입니다.
+반드시 필요한 것은 아니며, 예를 들어, 타깃 디바이스를 일관되게 프로비저닝할 때 편리합니다.
 
-인자 없이 실행하면 현재 디렉터리에 기본 `ssamd.toml`을 생성하고, 옵션으로 커스터마이즈할 수 있습니다:
+옵션을 지정해 설정을 생성합니다. 각 옵션의 필수 여부와 생략했을 때의 동작도 아래 표에 정리했습니다:
 
 | 옵션 | 용도 |
 | --- | --- |
-| `--output-path PATH` | 생성 파일이 기록될 위치 (기본: 현재 디렉터리) |
-| `--gen-service-unit` | `ssamd.service`(systemd unit)도 생성 |
-| `--gen-apparmor-profile` | ssamd용 AppArmor 프로파일도 생성 |
-| `--ssamd-install-path PATH` | 타깃 디바이스의 ssamd 설치 경로 |
-| `--pkgs-mnt-root PATH` | → `packages_mnt_root` |
-| `--bundled-pkgs-dir PATH` | → `bundled_packages_dir` |
-| `--downloaded-pkgs-dir PATH` | → `downloaded_packages_dir` |
-| `--pkgs-data-root PATH` | → `packages_data_root` |
-| `--pkgs-overlayfs-root PATH` | → `packages_overlayfs_root` |
-| `--pkgs-cgroup NAME` | → `packages_cgroup` |
-| `--public-key-file PATH` | → `public_key_file_path` |
-| `--packages-ext EXT` | → `packages_ext` (앞의 점 없이) |
-| `--rpc-allowed-gids LIST` | → `rpc.allowed_gids` |
-| `--bridge-enabled BOOL` | → `network.bridge.enabled` |
-| `--bridge-pool-base CIDR` | → `network.bridge.addr_pool.base` |
-| `--bridge-pool-size BITS` | → `network.bridge.addr_pool.size` |
-| `--disable-runtime-integrity BOOL` | → `integrity.disable_runtime_integrity` |
+| `--output-path PATH` | (선택) 생성될 파일의 위치를 지정합니다 (기본: 현재 디렉터리). |
+| `--gen-service-unit` | (선택) `ssamd.service`(*systemd* service unit)를 생성합니다. |
+| `--gen-apparmor-profile` | (선택) ssamd용 *AppArmor* 프로파일을 생성합니다. |
+| `--ssamd-install-path PATH` | (조건부 필수) 타깃 디바이스의 ssamd 설치 경로를 지정합니다. service unit 또는 *AppArmor* 프로파일을 생성할 때 필요합니다. |
+| `--pkgs-mnt-root PATH` | [`packages_mnt_root`](../reference/daemon-config.ko.md#packages_mnt_root). (필수) 패키지 파일시스템을 마운트할 루트 디렉터리를 지정합니다. |
+| `--bundled-pkgs-dir PATH` | [`bundled_packages_dir`](../reference/daemon-config.ko.md#bundled_packages_dir). (선택) 번들 패키지를 저장할 읽기 전용 디렉터리를 지정합니다. 생략하면 번들 패키지를 사용하지 않습니다. |
+| `--downloaded-pkgs-dir PATH` | [`downloaded_packages_dir`](../reference/daemon-config.ko.md#downloaded_packages_dir). (필수) 런타임에 설치한 패키지를 저장할 읽기·쓰기 디렉터리를 지정합니다. |
+| `--pkgs-data-root PATH` | [`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root). (필수) 패키지 컨테이너의 영속 데이터를 저장할 루트 디렉터리를 지정합니다. |
+| `--pkgs-overlayfs-root PATH` | [`packages_overlayfs_root`](../reference/daemon-config.ko.md#packages_overlayfs_root). (선택) 디버깅·개발용 쓰기 레이어로 사용할 OverlayFS 루트 디렉터리를 지정합니다. 생략하면 OverlayFS를 사용하지 않습니다. |
+| `--pkgs-cgroup NAME` | [`packages_cgroup`](../reference/daemon-config.ko.md#packages_cgroup). (선택) 패키지 컨테이너를 배치할 cgroup을 지정합니다. 생략하면 기본 cgroup을 사용합니다. |
+| `--public-key-file PATH` | [`public_key_file_path`](../reference/daemon-config.ko.md#public_key_file_path). (필수) 패키지 서명을 검증할 공개 키 파일의 경로를 지정합니다. |
+| `--packages-ext EXT` | [`packages_ext`](../reference/daemon-config.ko.md#packages_ext). (선택) 패키지 파일 확장자를 지정합니다. 확장자는 앞의 점 없이 지정하며, 생략하면 기본값 `ssam`을 사용합니다. |
+| `--rpc-allowed-gids LIST` | [`rpc.allowed_gids`](../reference/daemon-config.ko.md#allowed_gids). (선택) 추가로 접근을 허용할 Remocon 클라이언트의 effective GID 목록을 지정합니다. 생략하면 추가 GID를 허용하지 않습니다. |
+| `--bridge-enabled BOOL` | [`network.bridge.enabled`](../reference/daemon-config.ko.md#networkbridge). (선택) 데몬이 컨테이너에 `bridge` 네트워킹을 제공하도록 설정합니다. 생략하면 `bridge` 네트워킹이 비활성화됩니다. |
+| `--bridge-pool-base CIDR` | [`network.bridge.addr_pool.base`](../reference/daemon-config.ko.md#networkbridgeaddr_pool). (선택) `bridge`별 서브넷을 할당할 주소 풀의 기준 CIDR을 지정합니다. 생략하면 데몬 기본값을 사용하며, 사용하려면 `--bridge-enabled`도 지정해야 합니다. |
+| `--bridge-pool-size BITS` | [`network.bridge.addr_pool.size`](../reference/daemon-config.ko.md#networkbridgeaddr_pool). (선택) `bridge`별 서브넷의 prefix 길이를 지정합니다. 생략하면 데몬 기본값을 사용하며, 사용하려면 `--bridge-enabled`도 지정해야 합니다. |
+| `--disable-runtime-integrity BOOL` | [`integrity.disable_runtime_integrity`](../reference/daemon-config.ko.md#disable_runtime_integrity). (선택) 데몬의 런타임 무결성 검사를 비활성화할 때 지정합니다. 생략하면 검사를 활성화합니다. |
 
 예 — 설정, service unit, AppArmor 프로파일을 함께 생성:
 
@@ -304,15 +305,13 @@ $ ssamd/releasedata/gen_ssamd_conf.sh \
       --output-path . \
       --gen-service-unit \
       --gen-apparmor-profile \
+      --ssamd-install-path /usr/bin/ssamd \
       --bundled-pkgs-dir /var/lib/ssamd/bundled \
       --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
       --pkgs-data-root /var/lib/ssamd/data \
       --pkgs-mnt-root /var/run/ssamd/mnt \
-      --public-key-file /etc/ssamd/public.key \
-      --pkgs-cgroup ssamd.slice
+      --public-key-file /etc/ssamd/public.key
 ```
-
-> 생성기는 `[network.bridge]`/`[network.bridge.addr_pool]` 섹션을 항상 생성합니다(기본값 비활성화) — 위 플래그로 값을 지정하거나, 이후 `ssamd.toml`을 직접 편집해 바꾸세요.
 
 정확한 옵션 목록은 `gen_ssamd_conf.sh --help`로 확인하세요.
 

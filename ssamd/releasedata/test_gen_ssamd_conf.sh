@@ -24,6 +24,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEN_CONFIG_SCRIPT="${SCRIPT_DIR}/gen_ssamd_conf.sh"
 TEST_OUTPUT_DIR="${SCRIPT_DIR}/tmp/test_output"
 
+# Keep the required script arguments in the tests; individual cases append
+# overrides. The package extension is included here where tests exercise an
+# explicit override. Omitted overlayfs/cgroup arguments are covered by the
+# generator's empty-value convenience behavior.
+REQUIRED_CONFIG_ARGS=(
+    --ssamd-install-path /usr/bin/ssamd
+    --pkgs-mnt-root /var/run/ssamd/mnt
+    --downloaded-pkgs-dir /var/lib/ssamd/downloaded
+    --pkgs-data-root /var/lib/ssamd/data
+    --public-key-file /etc/ssamd/public.key
+    --packages-ext ssam
+)
+
 # Detect the AppArmor userspace once. AppArmor syntax checks run only when
 # apparmor_parser is present; otherwise they are not executed at all.
 if command -v apparmor_parser >/dev/null 2>&1; then
@@ -179,6 +192,7 @@ test_apparmor_profile_only() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /var/lib/mcontainer/mnt \
         --bundled-pkgs-dir /opt/mcontainer/pkgs \
@@ -216,6 +230,7 @@ test_runtime_config_only() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --pkgs-mnt-root /var/lib/mcontainer/mnt \
         --bundled-pkgs-dir /opt/mcontainer/base-pkgs \
         --downloaded-pkgs-dir /var/lib/mcontainer/packages \
@@ -234,13 +249,8 @@ test_runtime_config_only() {
     verify_file_content "$output_file" "public_key_file_path = \"/usr/share/ssamd/prod.pub.key\"" "Runtime config - public key"
     verify_file_content "$output_file" "packages_cgroup = \"mcontainer.slice\"" "Runtime config - cgroup"
     verify_file_content "$output_file" "packages_ext = \"pkg\"" "Runtime config - extension"
-    verify_file_content "$output_file" "\[network\.bridge\]" "Runtime config - network section"
-    verify_file_content "$output_file" "enabled = false" "Runtime config - default bridge enabled"
-    verify_file_content "$output_file" "\[network\.bridge\.addr_pool\]" "Runtime config - addr_pool section"
-    verify_file_content "$output_file" 'base = "172.20.0.0/16"' "Runtime config - default base"
-    verify_file_content "$output_file" "size = 29" "Runtime config - default size"
-    verify_file_content "$output_file" "\[integrity\]" "Runtime config - integrity section"
-    verify_file_content "$output_file" "disable_runtime_integrity = false" "Runtime config - runtime integrity enabled"
+    verify_file_content_not "$output_file" "\[network\.bridge\]" "Runtime config - omitted network section"
+    verify_file_content_not "$output_file" "\[integrity\]" "Runtime config - omitted integrity section"
     verify_no_placeholders "$output_file" "Runtime config"
 }
 
@@ -255,6 +265,7 @@ test_both_simultaneously() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --ssamd-install-path /opt/ssamd/bin/ssamd \
         --pkgs-mnt-root /var/lib/mcontainer/mnt \
@@ -284,9 +295,9 @@ test_both_simultaneously() {
     verify_no_placeholders "$runtime_output" "Runtime config (simultaneous)"
 }
 
-# Test 4: Runtime config uses default bundled directory when not specified
+# Test 4: Runtime config omits bundled directory when not specified
 test_default_bundled_dir() {
-    print_test_header "Test 4: Runtime Config uses default bundled directory"
+    print_test_header "Test 4: Runtime Config Omits Bundled Directory"
 
     local test_dir="${TEST_OUTPUT_DIR}/test4"
     mkdir -p "$test_dir"
@@ -294,6 +305,7 @@ test_default_bundled_dir() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
         --pkgs-mnt-root /var/lib/mcontainer/mnt \
         --pkgs-data-root /var/lib/mcontainer/data \
@@ -302,7 +314,7 @@ test_default_bundled_dir() {
         --public-key-file /usr/share/ssamd/test.pub.key \
         --packages-ext spkg
 
-    verify_file_content "$output_file" 'bundled_packages_dir = "/var/lib/ssamd/bundled"' "Runtime config - default bundled packages dir"
+    verify_file_content_not "$output_file" 'bundled_packages_dir' "Runtime config - omitted bundled packages dir"
     verify_file_content "$output_file" 'downloaded_packages_dir = "/var/lib/ssamd/downloaded"' "Runtime config - downloaded packages dir"
     verify_no_placeholders "$output_file" "Runtime config without bundled"
 }
@@ -317,6 +329,7 @@ test_empty_bundled_dir() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --bundled-pkgs-dir "" \
         --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
         --pkgs-mnt-root /var/lib/mcontainer/mnt \
@@ -337,6 +350,44 @@ test_error_invalid_install_path() {
         print_result "Error handling - invalid install path" "PASS"
     else
         print_result "Error handling - invalid install path" "FAIL"
+    fi
+}
+
+# Test 5a: Error handling - Invalid path argument values
+test_error_invalid_path_arguments() {
+    print_test_header "Test 5a: Error Handling - Invalid Path Arguments"
+
+    local output rc option
+    local -a absolute_path_options=(
+        --ssamd-install-path
+        --pkgs-mnt-root
+        --bundled-pkgs-dir
+        --downloaded-pkgs-dir
+        --pkgs-data-root
+        --pkgs-overlayfs-root
+        --public-key-file
+    )
+
+    for option in "${absolute_path_options[@]}"; do
+        set +e
+        output=$("$GEN_CONFIG_SCRIPT" "$option" "relative/path" 2>&1)
+        rc=$?
+        set -e
+        if [[ $rc -ne 0 ]] && echo "$output" | grep -q "Argument $option requires an absolute path"; then
+            print_result "Error handling - invalid path for $option" "PASS"
+        else
+            print_result "Error handling - invalid path for $option" "FAIL"
+        fi
+    done
+
+    set +e
+    output=$("$GEN_CONFIG_SCRIPT" --output-path "" 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "Argument --output-path requires a non-empty path"; then
+        print_result "Error handling - empty output path" "PASS"
+    else
+        print_result "Error handling - empty output path" "FAIL"
     fi
 }
 
@@ -399,7 +450,7 @@ test_error_same_pkg_dirs() {
     fi
 
     set +e
-    output=$("$GEN_CONFIG_SCRIPT" --output-path "${TEST_OUTPUT_DIR}/test5d" --bundled-pkgs-dir "/var/lib/ssamd" --downloaded-pkgs-dir "/var/lib/ssamd/pkgs" 2>&1)
+    output=$("$GEN_CONFIG_SCRIPT" --output-path "${TEST_OUTPUT_DIR}/test5d" "${REQUIRED_CONFIG_ARGS[@]}" --bundled-pkgs-dir "/var/lib/ssamd" --downloaded-pkgs-dir "/var/lib/ssamd/pkgs" 2>&1)
     rc=$?
     set -e
     if [[ $rc -eq 0 ]]; then
@@ -409,24 +460,65 @@ test_error_same_pkg_dirs() {
     fi
 }
 
-# Test 6: Default handling - missing configuration fields trigger defaults
+# Test 6: Only explicitly supplied fields are emitted
 test_defaults() {
-    print_test_header "Test 6: Default Handling - Missing Configuration Fields Trigger Defaults"
+    print_test_header "Test 6: Only Explicitly Supplied Fields Are Emitted"
 
     local test_dir="${TEST_OUTPUT_DIR}/test6"
     mkdir -p "$test_dir"
     local output_file="${test_dir}/ssamd.toml"
 
-    # Test defaults
-    "$GEN_CONFIG_SCRIPT" \
-        --output-path "$test_dir"
+    # Missing mandatory fields are rejected instead of being filled by the
+    # generator, so no configuration file should be produced.
+    set +e
+    "$GEN_CONFIG_SCRIPT" --output-path "$test_dir"
+    local rc=$?
+    set -e
+    if [[ $rc -ne 0 && ! -f "$output_file" ]]; then
+        print_result "Missing mandatory fields are rejected" "PASS"
+    else
+        print_result "Missing mandatory fields are rejected" "FAIL"
+    fi
 
-    verify_file_content "$output_file" "/run/ssamd/mnt" "Ssamd default configuration - pkgs-mnt-root"
-    verify_file_content "$output_file" "packages_ext = \"ssam\"" "Ssamd default configuration - packages_ext"
-    verify_file_content_not "$output_file" "rpc_bind_ip" "Ssamd default configuration - no rpc_bind_ip"
-    verify_file_content "$output_file" 'bundled_packages_dir = "/var/lib/ssamd/bundled"' "Ssamd default configuration - bundled dir"
-    verify_file_content "$output_file" 'downloaded_packages_dir = "/var/lib/ssamd/downloaded"' "Ssamd default configuration - downloaded dir"
-    verify_file_content "$output_file" "disable_runtime_integrity = false" "Ssamd default configuration - runtime integrity enabled"
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}"
+    verify_file_content "$output_file" 'packages_overlayfs_root = ""' "Omitted overlayfs field defaults to disabled"
+    verify_file_content "$output_file" 'packages_cgroup = ""' "Omitted cgroup field defaults to disabled"
+    verify_file_content_not "$output_file" "bundled_packages_dir" "Omitted optional common field"
+    verify_file_content_not "$output_file" "\[network\.bridge\]" "Omitted optional network section"
+    verify_file_content_not "$output_file" "\[integrity\]" "Omitted optional integrity section"
+    verify_file_content_not "$output_file" "\[rpc\]" "Omitted optional RPC section"
+
+    local relative_output_dir="${TEST_OUTPUT_DIR}/test6-relative-output"
+    mkdir -p "$relative_output_dir"
+    (
+        cd "$relative_output_dir"
+        "$GEN_CONFIG_SCRIPT" --output-path . "${REQUIRED_CONFIG_ARGS[@]}"
+    )
+    verify_file_content "${relative_output_dir}/ssamd.toml" '\[common\]' \
+        "Relative output path is accepted"
+
+    local explicit_empty_overlay_dir="${TEST_OUTPUT_DIR}/test6-explicit-empty-overlay"
+    mkdir -p "$explicit_empty_overlay_dir"
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$explicit_empty_overlay_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
+        --pkgs-overlayfs-root ""
+    verify_file_content "${explicit_empty_overlay_dir}/ssamd.toml" 'packages_overlayfs_root = ""' \
+        "Explicit empty overlayfs field is accepted"
+
+    local default_ext_dir="${TEST_OUTPUT_DIR}/test6-default-ext"
+    mkdir -p "$default_ext_dir"
+    "$GEN_CONFIG_SCRIPT" \
+        --output-path "$default_ext_dir" \
+        --ssamd-install-path /usr/bin/ssamd \
+        --pkgs-mnt-root /var/run/ssamd/mnt \
+        --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
+        --pkgs-data-root /var/lib/ssamd/data \
+        --public-key-file /etc/ssamd/public.key
+    verify_file_content "${default_ext_dir}/ssamd.toml" 'packages_ext = "ssam"' \
+        "Omitted package extension defaults to ssam"
 }
 
 # Test 6b: runtime package filesystem integrity configuration option
@@ -439,6 +531,7 @@ test_runtime_integrity_option() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --disable-runtime-integrity true
 
     verify_file_content "$output_file" "disable_runtime_integrity = true" "Runtime config - runtime integrity disabled"
@@ -463,24 +556,25 @@ test_rpc_allowed_gids_option() {
     mkdir -p "$test_dir"
     local output_file="${test_dir}/ssamd.toml"
 
-    "$GEN_CONFIG_SCRIPT" --output-path "$test_dir"
-    verify_file_content "$output_file" "\[rpc\]" "RPC config - default section"
-    verify_file_content "$output_file" "allowed_gids = \[\]" "RPC config - default empty list"
-    verify_no_placeholders "$output_file" "RPC config - default"
+    "$GEN_CONFIG_SCRIPT" --output-path "$test_dir" "${REQUIRED_CONFIG_ARGS[@]}"
+    verify_file_content_not "$output_file" "\[rpc\]" "RPC config - omitted section"
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --rpc-allowed-gids 1000,1001
     verify_file_content "$output_file" "allowed_gids = \[1000, 1001\]" "RPC config - configured GIDs"
     verify_no_placeholders "$output_file" "RPC config - configured GIDs"
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --rpc-allowed-gids ""
     verify_file_content "$output_file" "allowed_gids = \[\]" "RPC config - explicit empty list"
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --rpc-allowed-gids 0,4294967295
     verify_file_content "$output_file" "allowed_gids = \[0, 4294967295\]" "RPC config - boundary GIDs"
 
@@ -540,6 +634,7 @@ test_service_unit_only() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-service-unit \
         --ssamd-install-path /opt/ssamd/bin/ssamd \
         --pkgs-mnt-root /var/lib/mcontainer/mnt \
@@ -551,7 +646,7 @@ test_service_unit_only() {
     verify_file_content "$service_output" "\[Unit\]" "Service unit"
     verify_file_content "$service_output" "Description=SSAM Daemon" "Service unit - description"
     verify_file_content "$service_output" "ExecStart=/opt/ssamd/bin/ssamd" "Service unit - ExecStart"
-    verify_file_content "$service_output" "RequiresMountsFor=/tmp /var/lib/ssamd/bundled /var/lib/mcontainer/packages /var/lib/mcontainer/data /var/lib/mcontainer/mnt" "Service unit - RequiresMountsFor"
+    verify_file_content "$service_output" "RequiresMountsFor=/tmp /var/lib/mcontainer/packages /var/lib/mcontainer/data /var/lib/mcontainer/mnt" "Service unit - RequiresMountsFor without bundled dir"
     verify_file_content "$service_output" "Type=notify" "Service unit - Type"
     verify_no_placeholders "$service_output" "Service unit"
 }
@@ -566,6 +661,7 @@ test_service_unit_with_base_dir() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-service-unit \
         --ssamd-install-path /usr/bin/ssamd \
         --pkgs-mnt-root /var/lib/mcontainer/mnt \
@@ -592,6 +688,7 @@ test_all_configs_simultaneously() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --gen-service-unit \
         --ssamd-install-path /opt/ssamd/bin/ssamd \
@@ -626,9 +723,9 @@ test_all_configs_simultaneously() {
     verify_no_placeholders "$runtime_output" "All configs - Runtime config"
 }
 
-# Test 13: Service unit with default values
+# Test 13: Service unit without an optional bundled directory
 test_service_unit_defaults() {
-    print_test_header "Test 13: Service Unit with Default Values"
+    print_test_header "Test 13: Service Unit Without Bundled Directory"
 
     local test_dir="${TEST_OUTPUT_DIR}/test13"
     mkdir -p "$test_dir"
@@ -636,14 +733,16 @@ test_service_unit_defaults() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-service-unit \
+        --ssamd-install-path /usr/bin/ssamd \
         --downloaded-pkgs-dir /var/lib/mcontainer/packages \
         --pkgs-data-root /var/lib/mcontainer/data \
         --public-key-file /usr/share/ssamd/test.key \
         --packages-ext pkg
 
     verify_file_content "$service_output" "ExecStart=/usr/bin/ssamd" "Service unit defaults - ExecStart"
-    verify_file_content "$service_output" "RequiresMountsFor=/tmp /var/lib/ssamd/bundled /var/lib/mcontainer/packages /var/lib/mcontainer/data /var/run/ssamd/mnt" "Service unit defaults - RequiresMountsFor with default mnt root"
+    verify_file_content "$service_output" "RequiresMountsFor=/tmp /var/lib/mcontainer/packages /var/lib/mcontainer/data /var/run/ssamd/mnt" "Service unit without bundled dir - RequiresMountsFor"
     verify_no_placeholders "$service_output" "Service unit with defaults"
 }
 
@@ -657,6 +756,7 @@ test_network_overrides() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --bridge-enabled true \
         --bridge-pool-base 10.10.0.0/16 \
         --bridge-pool-size 28
@@ -750,6 +850,7 @@ test_network_arg_validation() {
     local output_file="${test_dir}/ssamd.toml"
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --bridge-pool-size 29 \
         --bridge-pool-base 10.0.0.0/8 \
         --bridge-enabled true
@@ -767,6 +868,7 @@ test_apparmor_var_run_special_case() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /var/run/ssamd/mnt \
         --downloaded-pkgs-dir /var/lib/mcontainer/packages \
@@ -789,6 +891,7 @@ test_apparmor_run_special_case() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /run/ssamd/mnt \
         --downloaded-pkgs-dir /var/lib/mcontainer/packages \
@@ -811,6 +914,7 @@ test_apparmor_var_run_prefix_collision() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /var/runner/ssamd/mnt \
         --downloaded-pkgs-dir /var/lib/mcontainer/packages \
@@ -836,6 +940,7 @@ test_apparmor_pkgs_mnt_root() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /var/run/ssamd/mnt
 
@@ -844,6 +949,7 @@ test_apparmor_pkgs_mnt_root() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /run/ssamd/mnt
 
@@ -852,6 +958,7 @@ test_apparmor_pkgs_mnt_root() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /lib/ssamd/mnt
 
@@ -860,6 +967,7 @@ test_apparmor_pkgs_mnt_root() {
 
     "$GEN_CONFIG_SCRIPT" \
         --output-path "$test_dir" \
+        "${REQUIRED_CONFIG_ARGS[@]}" \
         --gen-apparmor-profile \
         --pkgs-mnt-root /ssamd
 
@@ -885,6 +993,7 @@ main() {
     test_default_bundled_dir
     test_empty_bundled_dir
     test_error_invalid_install_path
+    test_error_invalid_path_arguments
     test_error_invalid_bundled_pkgs_dir
     test_error_invalid_downloaded_pkgs_dir
     test_error_same_pkg_dirs
