@@ -56,7 +56,7 @@ Because the default action is `SCMP_ACT_ERRNO` (deny), any syscall not on the li
 
 Now the container's `chmod(2)` call is denied — the caller gets an error (`ENOSYS`).
 
-At runtime `ssamd` injects the policy into the container's OCI config.
+At runtime `ssamd` injects the policy into the container's *OCI Runtime config*.
 If the policy has an entry it cannot map, it **fails the package** rather than running it unfiltered.
 
 ---
@@ -105,5 +105,5 @@ When `mac = true`, `ssamd`:
 
 4. Optionally provide a `container-default` profile as the fallback for packages that ship without a dedicated one.
 
-> ⚠️ Naming the profile in `runtime.json`'s `apparmorProfile` field has no effect: at runtime `ssamd` **overwrites that field** in the OCI config with the name derived from the package, so it is ignored.
+> ⚠️ Naming the profile in `runtime.json`'s `apparmorProfile` field has no effect: at runtime `ssamd` **overwrites that field** in the *OCI Runtime config* with the name derived from the package, so it is ignored.
 > To turn MAC off entirely, set `mac = false`.

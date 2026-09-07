@@ -138,7 +138,7 @@ mode = "/var/run/netns/my-netns"
 - **설정하지 않으면(기본설정)** `ssamd`는 root cgroup으로 호스트의 `system.slice`를 사용합니다.
 - **값을 지정하면** 그 경로를 root cgroup으로 사용합니다.
 
-root cgroup이 정해지면 `ssamd`는 각 컨테이너 *OCI Runtime config*의 `cgroupsPath`를 `<packages_cgroup>/<패키지명>.service/container`로 지정합니다.
+root cgroup이 정해지면 `ssamd`는 각 컨테이너 *OCI Runtime config* 의 `cgroupsPath`를 `<packages_cgroup>/<패키지명>.service/container`로 지정합니다.
 이를 통해 모든 패키지 컨테이너가 함께 사용하는 자원의 상한을 제한할 수 있습니다.
 지정한 root cgroup은 **`ssamd` 시작 전에 존재해야** 하며, `ssamd`는 이를 생성하지 않습니다(없으면 데몬이 중단됩니다).
 
@@ -151,7 +151,7 @@ root cgroup으로 *systemd* **slice unit** 을 사용할 수 있습니다.
 예를 들어, root cgroup으로 쓸 slice를 `ssam.slice`로 한 경우:
 - `ssamd.toml`에 `packages_cgroup = "ssam.slice"`로 지정
 - `ssamd`는 각 컨테이너별 *systemd* service unit(`<패키지명>.service`)의 `Slice=`를 `ssam.slice`로 설정
-- `ssamd`는 각 컨테이너별 *OCI Runtime config*의 `cgroupsPath`를 `ssam.slice/<패키지명>.service/container`로 설정
+- `ssamd`는 각 컨테이너별 *OCI Runtime config* 의 `cgroupsPath`를 `ssam.slice/<패키지명>.service/container`로 설정
 
 이 slice는 호스트 시스템에 미리 준비해 둡니다 — 예를 들어 다음과 같이:
 
@@ -171,7 +171,7 @@ EOF
 root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다.
 예를 들어, root cgroup으로 쓸 이름을 `ssam`으로 한 경우:
 - `ssamd.toml`에 `packages_cgroup = "ssam"`으로 지정
-- `ssamd`는 각 컨테이너별 *OCI Runtime config*의 `cgroupsPath`를 `ssam/<패키지명>.service/container`로 설정
+- `ssamd`는 각 컨테이너별 *OCI Runtime config* 의 `cgroupsPath`를 `ssam/<패키지명>.service/container`로 설정
 - `ssamd`는 이 값이 *systemd* slice가 아니므로 각 컨테이너별 *systemd* service unit에 `Slice=`를 설정하지 않고 경고 로그를 출력
 
 이 cgroup은 호스트 시스템에 미리 만들어 둡니다 — 예를 들어 다음과 같이:
@@ -188,7 +188,7 @@ root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다.
 
 패키지가 [`container.storage_limit`](../reference/package-config.ko.md#storage_limit)을 선언하면 `ssamd`는 그 패키지의 데이터 디렉터리에 용량 상한을 적용합니다.
 `ssamd`는 이를 *ext4* **project quota** 로 구현합니다.
-이를 사용하려면 **호스트 시스템의 커널 설정**과 **[`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root)로 설정한 파일시스템**이 각각 다음을 갖춰야 합니다.
+이를 사용하려면 **호스트 시스템의 커널 설정** 과 **[`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root)로 설정한 파일시스템** 이 각각 다음을 갖춰야 합니다.
 
 **커널 설정**
 

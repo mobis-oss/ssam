@@ -139,7 +139,7 @@
 ### `ListPackageInfo`
 
 설치된 하나 이상의 패키지 상세 정보.
-공백만 있는 이름은 무시합니다.
+빈 `package_names` 목록은 설치된 모든 패키지를 반환하며, 공백만 있는 이름은 무시합니다.
 
 - **Request:** [`ListPackageInfoRequest`](#listpackageinforequest)
 - **Response:** [`ListPackageInfoResponse`](#response-messages)

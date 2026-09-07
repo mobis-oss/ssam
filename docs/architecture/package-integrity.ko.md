@@ -176,7 +176,7 @@ flowchart LR
 
 - `ssamd`는 고정된 Linux abstract Unix domain socket `@ssamd`를 통해 [Remocon gRPC 제어 API](../reference/remocon-rpc.ko.md)를 노출하므로 동일 호스트의 동일 network namespace에서 실행되는 process만 접근할 수 있습니다.
 - abstract socket은 파일시스템 권한을 통한 접근 제한이 불가능하므로, 이름을 아는 동일 network namespace 내 어떤 process라도 연결을 시도할 수 있습니다.
-- 반면, `ssamd`는 peer의 effective GID가 데몬의 effective GID와 일치하거나 [설정된 허용 GID 목록](../reference/daemon-config.ko.md#allowed_gids)에 포함되는 경우에만 연결을 허용합니다.
+- 반면, `ssamd`는 peer의 effective GID가 데몬의 effective GID와 일치하거나 [설정된 허용 GID 목록](../reference/daemon-config.ko.md#allowed_gids)에 포함되는 요청만 허용합니다.
 - **허용된 클라이언트로부터의 설치 RPC라 할지라도 호출자 권한 검증과 별도로 패키지 진위 검증이 적용됩니다:** 모든 설치 요청은 패키지 서명·무결성 검증을 통과해야 하며, 검증에 실패한 패키지는 거부되어 설정·실행되지 않습니다.
 
 ---

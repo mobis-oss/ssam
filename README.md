@@ -28,7 +28,7 @@ SSAM fixes each container's configuration at build time. A conventional OCI-base
 
 ## Features
 
-- **Container Execution**: Runs container-native apps as *Systemd* services via an OCI-compatible runtime (`crun`).
+- **Container Execution**: Runs container-native apps as *systemd* services via an OCI-compatible runtime (`crun`).
 - **Continuous Integrity Verification**: Verifies the package filesystem on every read at runtime with Linux `dm-verity`.
 - **Package Management**: Verification, installation, removal, and upgrade of signed packages.
 - **Resource Isolation**: *OCI Runtime* isolation plus *ext4* project quota for data areas shared by multiple container-native apps.

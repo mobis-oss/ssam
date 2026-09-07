@@ -56,7 +56,7 @@ SSAM은 이를 [`container.security.seccomp`](../reference/package-config.ko.md#
 
 이제 컨테이너의 `chmod(2)` 호출은 거부되고, 호출한 프로세스는 오류(`ENOSYS`)를 받습니다.
 
-실행 시점에 `ssamd`가 이 정책을 컨테이너 OCI 설정에 주입합니다.
+실행 시점에 `ssamd`가 이 정책을 컨테이너의 *OCI Runtime config* 에 주입합니다.
 정책에 매핑할 수 없는 항목이 있으면 필터 없이 실행하는 대신 **패키지 기동에 실패합니다**.
 
 ---
@@ -105,4 +105,4 @@ SSAM은 *AppArmor* 프로파일로 이를 적용하며, [`container.security.mac
 
 4. 전용 프로파일 없이 배포되는 패키지를 위해 `container-default` 프로파일을 폴백으로 제공해 둘 수 있습니다.
 
-> ⚠️ `runtime.json`의 `apparmorProfile` 필드에 이름을 직접 적어도, 실행 시 `ssamd`가 패키지명에서 유도한 이름으로 OCI config의 그 필드를 **덮어써 버리므로 무시됩니다.** MAC을 완전히 끄려면 `mac = false`로 설정하세요.
+> ⚠️ `runtime.json`의 `apparmorProfile` 필드에 이름을 직접 적어도, 실행 시 `ssamd`가 패키지명에서 유도한 이름으로 *OCI Runtime config* 의 그 필드를 **덮어써 버리므로 무시됩니다.** MAC을 완전히 끄려면 `mac = false`로 설정하세요.

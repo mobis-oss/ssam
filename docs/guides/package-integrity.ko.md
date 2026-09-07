@@ -27,7 +27,7 @@ SSAM 패키지의 **내용을 신뢰** 하기 위한 세 가지를 다룹니다 
 
 ## Package signing — RSA
 
-SSAM 패키지는 **RSA 개인 키**로 서명되고(`ssam-wrap`), 디바이스에 설치된 **공개 키**로 검증됩니다(`ssamd`).
+SSAM 패키지는 **RSA 개인 키** 로 서명되고(`ssam-wrap`), 디바이스에 설치된 **공개 키** 로 검증됩니다(`ssamd`).
 검증에 실패한 패키지는 로드 단계에서 거부됩니다.
 
 > 📖 서명이 무엇을 보장하는지는 [패키지 무결성 → 신뢰 모델](../architecture/package-integrity.ko.md#trust-model)을 참고하세요.

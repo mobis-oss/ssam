@@ -32,7 +32,7 @@ SSAM은 각 컨테이너의 설정을 빌드 시점에 확정합니다. 기존�
 
 ## Features
 
-- **Container Execution**: *Systemd* 를 활용해 OCI 호환 container runtime (`crun`)으로 container-native 앱을 실행합니다.
+- **Container Execution**: *systemd* 를 활용해 OCI 호환 container runtime (`crun`)으로 container-native 앱을 실행합니다.
 - **Continuous Integrity Verification**: Linux의 `dm-verity`로 패키지 파일시스템을 실행 시점에 읽기마다 검증합니다.
 - **Package Management**: 서명된 패키지의 검증, 설치, 제거, 업그레이드를 지원합니다.
 - **Resource Isolation**: *OCI Runtime* 이 제공하는 리소스 격리에 더해, 복수의 container-native 앱이 공용으로 사용하는 데이터 영역에 대해 *ext4* 파일 시스템의 project quota 설정을 지원합니다.
