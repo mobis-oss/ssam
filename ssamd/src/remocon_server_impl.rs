@@ -373,7 +373,8 @@ impl Remocon for RemoconImpl {
     ) -> Result<Response<ListPackageInfoFromFilesResponse>, Status> {
         log::debug!("Received request to inspect local package files");
         let package_paths = request.into_inner().package_paths;
-        let public_key_path = self.config.public_key_file_path().to_owned();
+        let public_key_path = self.config.public_key_path().to_owned();
+        let verify_signature = !self.config.package_verify_disabled();
         let packages = futures_util::stream::iter(package_paths)
             .then(|package_path| async {
                 let package_path = PathBuf::from(package_path);
@@ -405,6 +406,7 @@ impl Remocon for RemoconImpl {
                     crate::package_manager::parser::parse_package_file(
                         pkg_path,
                         Path::new(&public_key_path),
+                        verify_signature,
                     )
                     .and_then(|r| r.package_file)
                 })

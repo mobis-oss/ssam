@@ -97,7 +97,7 @@ pub(crate) enum PayloadType {
 
 type PayloadOffset = u64;
 type PayloadSize = u64;
-pub(crate) type VerifiedPayloads = BTreeMap<PayloadType, Vec<u8>>;
+pub(crate) type VerifiablePayloadMap = BTreeMap<PayloadType, Vec<u8>>;
 
 #[derive(Debug, Clone, PartialEq, bincode::Encode, bincode::Decode)]
 pub enum Payload {
@@ -110,7 +110,7 @@ pub enum Payload {
 pub(crate) struct Payloads(BTreeMap<PayloadType, Option<Payload>>);
 
 pub(crate) struct PayloadConfig {
-    need_verify: bool,
+    requires_verification: bool,
     filename: String,
 }
 
@@ -167,16 +167,68 @@ impl Payloads {
             .context("Failed to serialize Payloads")
     }
 
-    pub(crate) fn deserialize_from_pkg_verified(
+    pub(crate) fn deserialize_from_pkg(
         pkg_fp: &mut File,
         public_key: impl AsRef<std::path::Path>,
-    ) -> Result<(Self, VerifiedPayloads), PackageParseError> {
+        verify_signature: bool,
+    ) -> Result<(Self, VerifiablePayloadMap), PackageParseError> {
         let deserialized: Self = bincode::decode_from_std_read(pkg_fp, SSAM_SERIALIZATION_CONFIG)
             .map_err(|e| PackageParseError::ParseFailed {
             source: anyhow!(e).context("Failed to decode payload info"),
         })?;
-        let verified = Self::verify(pkg_fp, &deserialized, &public_key)?;
-        Ok((deserialized, verified))
+
+        let file_size = pkg_fp
+            .metadata()
+            .context("Querying file metadata for payload validation")
+            .map_err(|source| PackageParseError::Io {
+                message: "Failed to get package file metadata.".to_string(),
+                source,
+            })?
+            .len();
+        let payloads_for_verification = Self::process_payloads(
+            pkg_fp,
+            &deserialized,
+            public_key,
+            file_size,
+            verify_signature,
+        )?;
+        Ok((deserialized, payloads_for_verification))
+    }
+
+    fn read_payloads_for_verification(
+        pkg_fp: &mut File,
+        ssam_payloads: &Self,
+        file_size: u64,
+    ) -> Result<VerifiablePayloadMap, PackageParseError> {
+        let mut payloads_for_verification = VerifiablePayloadMap::new();
+
+        for (payload_type, payload) in ssam_payloads {
+            let payload_conf = SSAM_PAYLOAD_CONFIGURATION
+                .get(payload_type)
+                .ok_or_else(|| PackageParseError::ParseFailed {
+                    source: anyhow!("Unknown payload type: {payload_type}"),
+                })?;
+            if !payload_conf.requires_verification() {
+                continue;
+            }
+            let Some(Payload::Internal((offset, size))) = payload else {
+                return Err(PackageParseError::ParseFailed {
+                    source: anyhow!("Expected internal payload for {payload_type}"),
+                });
+            };
+            let size = usize::try_from(*size)
+                .with_context(|| {
+                    format!("Payload size {size} for {payload_type} exceeds addressable range")
+                })
+                .map_err(|source| PackageParseError::Io {
+                    message: format!("Payload size too large for {payload_type}"),
+                    source,
+                })?;
+            let data = read_payload(pkg_fp, *offset, size, file_size, MAX_VERIFY_PAYLOAD_SIZE)?;
+            payloads_for_verification.insert(*payload_type, data);
+        }
+
+        Ok(payloads_for_verification)
     }
 
     pub(crate) fn sign(&mut self, private_key: impl AsRef<Path>) -> Result<()> {
@@ -189,7 +241,7 @@ impl Payloads {
                         "Failed to sign: Unable to find payload configuration for {payload_type}"
                     )
                 })?
-                .need_verify()
+                .requires_verification()
             {
                 if let Some(Payload::Data(data)) = payload {
                     hasher.update(data);
@@ -214,19 +266,18 @@ impl Payloads {
         Ok(())
     }
 
-    fn verify(
+    fn process_payloads(
         pkg_fp: &mut File,
         ssam_payloads: &Self,
         public_key: impl AsRef<Path>,
-    ) -> Result<VerifiedPayloads, PackageParseError> {
-        let file_size = pkg_fp
-            .metadata()
-            .context("Querying file metadata for payload size validation")
-            .map_err(|source| PackageParseError::Io {
-                message: "Failed to get package file metadata.".to_string(),
-                source,
-            })?
-            .len();
+        file_size: u64,
+        verify_signature: bool,
+    ) -> Result<VerifiablePayloadMap, PackageParseError> {
+        let payloads_for_verification =
+            Self::read_payloads_for_verification(pkg_fp, ssam_payloads, file_size)?;
+        if !verify_signature {
+            return Ok(payloads_for_verification);
+        }
 
         let public_key = RsaPublicKey::read_public_key_pem_file(&public_key).map_err(|e| {
             PackageParseError::ParseFailed {
@@ -251,38 +302,8 @@ impl Payloads {
         }
 
         let mut hasher = Sha256::new();
-        let mut verified = VerifiedPayloads::new();
-        for (payload_type, payload) in ssam_payloads {
-            let payload_conf = SSAM_PAYLOAD_CONFIGURATION
-                .get(payload_type)
-                .ok_or_else(|| PackageParseError::ParseFailed {
-                    source: anyhow!("Unknown payload type: {payload_type}"),
-                })?;
-            if !payload_conf.need_verify() {
-                continue;
-            }
-            let payload = payload
-                .as_ref()
-                .ok_or_else(|| PackageParseError::ParseFailed {
-                    source: anyhow!("Missing payload for {payload_type}"),
-                })?;
-            if let Payload::Internal((offset, size)) = payload {
-                let size = usize::try_from(*size)
-                    .with_context(|| {
-                        format!("Payload size {size} for {payload_type} exceeds addressable range")
-                    })
-                    .map_err(|source| PackageParseError::Io {
-                        message: format!("Payload size too large for {payload_type}"),
-                        source,
-                    })?;
-                let buf = read_payload(pkg_fp, *offset, size, file_size, MAX_VERIFY_PAYLOAD_SIZE)?;
-                hasher.update(&buf);
-                verified.insert(*payload_type, buf);
-            } else {
-                return Err(PackageParseError::ParseFailed {
-                    source: anyhow!("Expected internal payload for {payload_type}"),
-                });
-            }
+        for payload in payloads_for_verification.values() {
+            hasher.update(payload);
         }
 
         let digest = hasher.finalize().to_vec();
@@ -296,7 +317,7 @@ impl Payloads {
         public_key
             .verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &signature)
             .map_err(|_| PackageParseError::SignatureVerificationFailed)?;
-        Ok(verified)
+        Ok(payloads_for_verification)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&PayloadType, &Option<Payload>)> {
@@ -323,15 +344,15 @@ impl<'a> IntoIterator for &'a Payloads {
 }
 
 impl PayloadConfig {
-    fn new(need_verification: bool, filename: &str) -> Self {
+    fn new(requires_verification: bool, filename: &str) -> Self {
         PayloadConfig {
-            need_verify: need_verification,
+            requires_verification,
             filename: filename.to_string(),
         }
     }
 
-    pub(crate) fn need_verify(&self) -> bool {
-        self.need_verify
+    pub(crate) fn requires_verification(&self) -> bool {
+        self.requires_verification
     }
 
     pub(crate) fn filename(&self) -> &str {

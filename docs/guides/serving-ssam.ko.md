@@ -96,30 +96,36 @@ $ cargo build -p ssamd --release --target aarch64-unknown-linux-musl
 
 | 디렉터리 | 역할 | 존재하지 않는 경우 |
 | --- | --- | --- |
-| `bundled_packages_dir` | 읽기 전용, 사전 설치 패키지 | 데몬 실패 |
-| `downloaded_packages_dir` | 읽기·쓰기, 런타임 설치 패키지 | 자동 생성 |
-| `packages_data_root` | 패키지별 영속 데이터 (+ 쿼터) | 자동 생성 |
-| `packages_mnt_root` | 검증된 패키지 파일시스템 이미지가 마운트되는 곳 | 자동 생성 |
-| `packages_overlayfs_root` | 오버레이 파일시스템 루트 (선택) | 자동 생성 |
+| `package.dir.builtin` | 읽기 전용, 사전 설치 패키지 | 설정 시 미리 존재해야 함 |
+| `package.dir.downloaded` | 읽기·쓰기, 런타임 설치 패키지 | 설정 시 자동 생성 |
+| `package.dir.data` | 패키지별 영속 데이터 (+ 쿼터) | 자동 생성 |
+| `package.dir.oci_bundle` | 패키지별 OCI bundle root | 자동 생성 |
+| `debug.pkgfs_overlay_dir` | 쓰기 가능한 오버레이 파일시스템 루트 (선택) | startup 전에 준비; 첫 package mount 시 `upper/`와 `work/` 자동 생성 |
 
-표의 `bundled_packages_dir`는 미리 존재해야 하고 `ssamd`는 이를 생성하지 않습니다.
-나머지는 없으면 기동 시 자동 생성되지만, **모두 미리 생성해 두기를 권장** 합니다 — 운영 환경에서는 이 디렉터리들을 특정 파일시스템의 마운트 포인트로 두는 경우가 많고(예: `packages_data_root`는 *ext4* project quota를 지원하는 파일시스템을 마운트하는 것을 전제로 합니다), 마운트 지점이 놓이는 상위 경로가 읽기 전용이면 `ssamd`가 실행 시점에 그 디렉터리를 만들려다 권한 오류로 실패할 수 있기 때문입니다.
+`package.dir.builtin`과 `package.dir.downloaded`는 선택 package source입니다.
+두 source 중 하나는 비어 있지 않아야 합니다.
+`package.dir.builtin`은 설정한 경우 미리 존재해야 하며 `ssamd`가 생성하지 않습니다.
+`ssamd`는 `package.dir.downloaded`, `package.dir.data`, `package.dir.oci_bundle`이 없으면 startup 시 생성합니다.
+`debug.pkgfs_overlay_dir`는 startup 전에 쓰기 가능한 overlay root로 준비해야 합니다.
+첫 package mount 시 `ssamd`가 이 root 아래에 package별 `upper/`와 `work/` 디렉터리를 생성합니다.
+전용 파티션이나 mount point를 사용할 경우에는 `ssamd`가 첫 package를 mount하기 전에 해당 파일시스템을 mount해야 합니다.
+`package.dir.data`가 놓인 파일시스템은 storage limit에 *ext4* project quota를 제공해야 합니다.
 
 예를 들어 다음 경로로 준비합니다:
 
 ```console
 # mkdir -p \
-      /var/lib/ssamd/bundled \
+      /var/lib/ssamd/builtin \
       /var/lib/ssamd/downloaded \
       /var/lib/ssamd/data \
-      /var/run/ssamd/mnt
+      /var/run/ssamd/oci-bundle
 ```
 
-`bundled_packages_dir` 에는 기기에 미리 넣어 둘 패키지를 배치합니다.
+`package.dir.builtin`에는 기기에 미리 넣어 둘 패키지를 배치합니다.
 예를 들어 [SSAM 만들기 가이드](wrapping-a-ssam.ko.md)로 만든 SSAM 패키지를 이 디렉터리에 복사해 둡니다:
 
 ```console
-# cp helloworld.ssam /var/lib/ssamd/bundled/
+# cp helloworld.ssam /var/lib/ssamd/builtin/
 ```
 
 ---
@@ -150,33 +156,56 @@ $ cargo build -p ssamd --release --target aarch64-unknown-linux-musl
 ```console
 $ ssamd/releasedata/gen_ssamd_conf.sh \
       --output-path . \
-      --bundled-pkgs-dir /var/lib/ssamd/bundled \
+      --builtin-pkgs-dir /var/lib/ssamd/builtin \
       --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
       --pkgs-data-root /var/lib/ssamd/data \
-      --pkgs-mnt-root /var/run/ssamd/mnt \
+      --oci-bundle-dir /var/run/ssamd/oci-bundle \
       --public-key-file /etc/ssamd/public.key
 ```
 
 생성되는 `ssamd.toml`은 다음과 같으며, 직접 작성해도 됩니다:
 
 ```toml
-[common]
-bundled_packages_dir    = "/var/lib/ssamd/bundled"
-downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-packages_data_root      = "/var/lib/ssamd/data"
-packages_overlayfs_root = ""
-packages_mnt_root       = "/var/run/ssamd/mnt"
-public_key_file_path    = "/etc/ssamd/public.key"
-packages_cgroup         = ""
-packages_ext            = "ssam"
+[package]
+extension = "ssam"
+cgroup = ""
+public_key = "/etc/ssamd/public.key"
+
+[package.dir]
+builtin = "/var/lib/ssamd/builtin"
+downloaded = "/var/lib/ssamd/downloaded"
+oci_bundle = "/var/run/ssamd/oci-bundle"
+data = "/var/lib/ssamd/data"
+
+[debug]
+pkgfs_overlay_dir = ""
+disable_pkgfs_integrity = false
+disable_package_verify = false
+
+[network.bridge]
+enabled = false
+
+[network.bridge.addr_pool]
+base = "172.20.0.0/16"
+size = 29
+
+[rpc]
+allowed_gids = []
 ```
 
-`[common]`의 모든 키(`bundled_packages_dir` 제외)는 반드시 존재해야 합니다.
+`package.dir.builtin`과 `package.dir.downloaded` 중 하나는 비어 있지 않아야 합니다.
+`package.dir.oci_bundle`과 `package.dir.data`는 비어 있지 않아야 합니다.
 
-빈 값으로 둘 수 있는 다음 키는 **선택 기능** 의 스위치이며, 준비 방법은 [Optional configuration](#optional-configuration)에서 설명합니다:
+다음 키는 선택 기능을 제어하며, 각 키에는 TOML 타입에 맞는 값을 지정해야 합니다.
+문자열 키는 빈 문자열로 지정하거나 생략할 수 있습니다.
+boolean 키는 `true` 또는 `false`로 지정하거나 생략해 기본값을 사용할 수 있습니다.
+boolean 키에 빈 값이나 `""`을 지정하면 유효하지 않은 TOML이 되어 `ssamd`가 시작되지 않습니다.
+이 설정을 준비하는 방법은 [Optional configuration](#optional-configuration)에서 설명합니다:
 
-- `packages_cgroup` — 비우면 컨테이너를 전용 cgroup slice에 배치하지 않습니다.
-- `packages_overlayfs_root` — 비우면 오버레이가 비활성(운영 기본값)입니다.
+- `package.cgroup` — 빈 문자열로 지정하거나 생략하면 컨테이너를 전용 cgroup slice에 배치하지 않습니다.
+- `debug.pkgfs_overlay_dir` — 빈 문자열로 지정하거나 생략하면 오버레이가 비활성(운영 기본값)입니다.
+- `debug.disable_pkgfs_integrity` — `true`이면 런타임 *dm-verity* 검증을 끄고, `false`이면 검증을 유지하며, 키를 생략하면 `false`를 사용합니다.
+- `debug.disable_package_verify` — `true`이면 패키지 서명 검증을 끄고, `false`이면 검증을 유지하며, 키를 생략하면 `false`를 사용합니다.
 
 > 📖 각 키의 의미와 기본값, 그리고 그 밖의 모든 설정 항목은 [`ssamd.toml` 설정 레퍼런스](../reference/daemon-config.ko.md)를, 헬퍼의 모든 옵션은 [Generating configuration](#generating-configuration-with-gen_ssamd_confsh)을 참고하세요.
 
@@ -233,16 +262,16 @@ systemd[1]: helloworld.service: Deactivated successfully.
 
 ### Storage quota (`storage_limit`)
 
-패키지의 `container.storage_limit`을 강제하려면 `packages_data_root`가 놓인 파일시스템이 *ext4* project quota를 지원해야 합니다.
+패키지의 `container.storage_limit`을 강제하려면 `package.dir.data`가 놓인 파일시스템이 *ext4* project quota를 지원해야 합니다.
 
 > 📖 요건과 설정은 [컨테이너 격리 → Storage quota](container-isolation.ko.md#storage-quota-storage_limit)를 참고하세요.
 
-### Container cgroup (`packages_cgroup`)
+### Container cgroup (`package.cgroup`)
 
-`packages_cgroup`을 지정하면 `ssamd`가 각 컨테이너를 지정한 cgroup 아래에 배치합니다.
+`package.cgroup`을 지정하면 `ssamd`가 각 컨테이너를 지정한 cgroup 아래에 배치합니다.
 지정한 cgroup은 `ssamd` 시작 전에 존재해야 합니다.
 
-> 📖 systemd slice / 별개 cgroup 설정 방법은 [컨테이너 격리 → Container cgroup](container-isolation.ko.md#container-cgroup-packages_cgroup)을 참고하세요.
+> 📖 systemd slice / 별개 cgroup 설정 방법은 [컨테이너 격리 → Container cgroup](container-isolation.ko.md#container-cgroup-packagecgroup)을 참고하세요.
 
 ### AppArmor confinement for `ssamd`
 
@@ -282,21 +311,22 @@ enabled = true
 | --- | --- |
 | `--output-path PATH` | (선택) 생성될 파일의 위치를 지정합니다 (기본: 현재 디렉터리). |
 | `--gen-service-unit` | (선택) `ssamd.service`(*systemd* service unit)를 생성합니다. |
-| `--gen-apparmor-profile` | (선택) ssamd용 *AppArmor* 프로파일을 생성합니다. |
-| `--ssamd-install-path PATH` | (조건부 필수) 타깃 디바이스의 ssamd 설치 경로를 지정합니다. service unit 또는 *AppArmor* 프로파일을 생성할 때 필요합니다. |
-| `--pkgs-mnt-root PATH` | [`packages_mnt_root`](../reference/daemon-config.ko.md#packages_mnt_root). (필수) 패키지 파일시스템을 마운트할 루트 디렉터리를 지정합니다. |
-| `--bundled-pkgs-dir PATH` | [`bundled_packages_dir`](../reference/daemon-config.ko.md#bundled_packages_dir). (선택) 번들 패키지를 저장할 읽기 전용 디렉터리를 지정합니다. 생략하면 번들 패키지를 사용하지 않습니다. |
-| `--downloaded-pkgs-dir PATH` | [`downloaded_packages_dir`](../reference/daemon-config.ko.md#downloaded_packages_dir). (필수) 런타임에 설치한 패키지를 저장할 읽기·쓰기 디렉터리를 지정합니다. |
-| `--pkgs-data-root PATH` | [`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root). (필수) 패키지 컨테이너의 영속 데이터를 저장할 루트 디렉터리를 지정합니다. |
-| `--pkgs-overlayfs-root PATH` | [`packages_overlayfs_root`](../reference/daemon-config.ko.md#packages_overlayfs_root). (선택) 디버깅·개발용 쓰기 레이어로 사용할 OverlayFS 루트 디렉터리를 지정합니다. 생략하면 OverlayFS를 사용하지 않습니다. |
-| `--pkgs-cgroup NAME` | [`packages_cgroup`](../reference/daemon-config.ko.md#packages_cgroup). (선택) 패키지 컨테이너를 배치할 cgroup을 지정합니다. 생략하면 기본 cgroup을 사용합니다. |
-| `--public-key-file PATH` | [`public_key_file_path`](../reference/daemon-config.ko.md#public_key_file_path). (필수) 패키지 서명을 검증할 공개 키 파일의 경로를 지정합니다. |
-| `--packages-ext EXT` | [`packages_ext`](../reference/daemon-config.ko.md#packages_ext). (선택) 패키지 파일 확장자를 지정합니다. 확장자는 앞의 점 없이 지정하며, 생략하면 기본값 `ssam`을 사용합니다. |
-| `--rpc-allowed-gids LIST` | [`rpc.allowed_gids`](../reference/daemon-config.ko.md#allowed_gids). (선택) 추가로 접근을 허용할 Remocon 클라이언트의 effective GID 목록을 지정합니다. 생략하면 추가 GID를 허용하지 않습니다. |
-| `--bridge-enabled BOOL` | [`network.bridge.enabled`](../reference/daemon-config.ko.md#networkbridge). (선택) 데몬이 컨테이너에 `bridge` 네트워킹을 제공하도록 설정합니다. 생략하면 `bridge` 네트워킹이 비활성화됩니다. |
-| `--bridge-pool-base CIDR` | [`network.bridge.addr_pool.base`](../reference/daemon-config.ko.md#networkbridgeaddr_pool). (선택) `bridge`별 서브넷을 할당할 주소 풀의 기준 CIDR을 지정합니다. 생략하면 데몬 기본값을 사용하며, 사용하려면 `--bridge-enabled`도 지정해야 합니다. |
-| `--bridge-pool-size BITS` | [`network.bridge.addr_pool.size`](../reference/daemon-config.ko.md#networkbridgeaddr_pool). (선택) `bridge`별 서브넷의 prefix 길이를 지정합니다. 생략하면 데몬 기본값을 사용하며, 사용하려면 `--bridge-enabled`도 지정해야 합니다. |
-| `--disable-runtime-integrity BOOL` | [`integrity.disable_runtime_integrity`](../reference/daemon-config.ko.md#disable_runtime_integrity). (선택) 데몬의 런타임 무결성 검사를 비활성화할 때 지정합니다. 생략하면 검사를 활성화합니다. |
+| `--gen-apparmor-profile` | (선택) `ssamd`용 *AppArmor* 프로파일을 생성합니다. |
+| `--ssamd-install-path PATH` | (조건부 필수) `ssamd` 설치 경로를 지정합니다. service unit 또는 *AppArmor* 프로파일을 생성할 때 필요합니다. |
+| `--oci-bundle-dir PATH` | (필수) 패키지 OCI bundle root인 absolute `package.dir.oci_bundle` 경로를 지정합니다. |
+| `--builtin-pkgs-dir PATH` | (선택) builtin 패키지용 읽기 전용 디렉터리인 `package.dir.builtin`을 지정합니다. builtin 패키지를 사용하지 않으면 생략합니다. |
+| `--downloaded-pkgs-dir PATH` | (선택) downloaded 패키지용 읽기·쓰기 디렉터리인 `package.dir.downloaded`를 지정합니다. downloaded 패키지를 사용하지 않으면 생략합니다. 두 package source 중 하나는 필요합니다. |
+| `--pkgs-data-root PATH` | (필수) 패키지 영속 데이터 루트인 `package.dir.data`를 지정합니다. |
+| `--pkgs-overlayfs-root PATH` | (선택) 쓰기 가능한 overlay root인 `debug.pkgfs_overlay_dir`를 지정합니다. 생략하면 overlay를 사용하지 않습니다. |
+| `--pkgs-cgroup NAME` | (선택) `package.cgroup`을 지정합니다. 생략하면 기본 cgroup을 사용합니다. |
+| `--public-key-file PATH` | (선택) `package.public_key`를 지정합니다. 생략하면 `/etc/ssamd/public.key`를 사용하며, 빈 값을 지정하려면 `--disable-package-verify true`도 필요합니다. |
+| `--packages-ext EXT` | (선택) 앞의 점을 제외한 `package.extension`을 지정합니다. 생략하면 기본값 `ssam`을 사용합니다. |
+| `--rpc-allowed-gids LIST` | (선택) 추가 Remocon 클라이언트에 허용할 effective GID인 `rpc.allowed_gids`를 지정합니다. 생략하면 추가 GID를 허용하지 않습니다. |
+| `--bridge-enabled BOOL` | (선택) `network.bridge.enabled`를 설정합니다. 생략하면 bridge 네트워킹을 비활성화합니다. |
+| `--bridge-pool-base CIDR` | (선택) `network.bridge.addr_pool.base`를 설정합니다. `--bridge-enabled`가 필요합니다. |
+| `--bridge-pool-size BITS` | (선택) `network.bridge.addr_pool.size`를 설정합니다. `--bridge-enabled`가 필요합니다. |
+| `--disable-runtime-integrity BOOL` | (선택) `debug.disable_pkgfs_integrity`를 설정합니다. 생략하면 package filesystem integrity를 활성화합니다. |
+| `--disable-package-verify BOOL` | (선택) `debug.disable_package_verify`를 설정합니다. 생략하면 package signature verification을 활성화합니다. |
 
 예 — 설정, service unit, AppArmor 프로파일을 함께 생성:
 
@@ -306,10 +336,10 @@ $ ssamd/releasedata/gen_ssamd_conf.sh \
       --gen-service-unit \
       --gen-apparmor-profile \
       --ssamd-install-path /usr/bin/ssamd \
-      --bundled-pkgs-dir /var/lib/ssamd/bundled \
+      --builtin-pkgs-dir /var/lib/ssamd/builtin \
       --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
       --pkgs-data-root /var/lib/ssamd/data \
-      --pkgs-mnt-root /var/run/ssamd/mnt \
+      --oci-bundle-dir /var/run/ssamd/oci-bundle \
       --public-key-file /etc/ssamd/public.key
 ```
 
@@ -322,9 +352,9 @@ $ ssamd/releasedata/gen_ssamd_conf.sh \
 | 증상 | 원인 / 해결 |
 | --- | --- |
 | 기동 시 `Failed to read config file ...` | 바이너리 디렉터리에 `ssamd.toml`이 없거나 읽을 수 없습니다. |
-| `Failed to parse config file ...` | 필수 `[common]` 키가 없거나 형식이 잘못되었습니다. [레퍼런스](../reference/daemon-config.ko.md#common)와 대조하세요. |
-| `Cgroup ... does not exist` | `packages_cgroup`이 설정되었으나 기동 전에 cgroup/slice가 생성되지 않았습니다. 생성하거나([Optional configuration](#optional-configuration) 참조) 필드를 비워 두세요. |
-| 모든 패키지가 서명/검증 오류를 표시 | `public_key_file_path`가 패키지 서명에 사용된 키와 일치하지 않습니다. |
+| `Failed to parse config file ...` | 필수 package 설정이 없거나 형식이 잘못되었습니다. [레퍼런스](../reference/daemon-config.ko.md#package)와 대조하세요. |
+| `Cgroup ... does not exist` | `package.cgroup`이 설정되었으나 기동 전에 cgroup/slice가 생성되지 않았습니다. 생성하거나([Optional configuration](#optional-configuration) 참조) 필드를 비워 두세요. |
+| 모든 패키지가 서명/검증 오류를 표시 | `package.public_key`가 패키지 서명에 사용된 키와 일치하지 않습니다. |
 | `bridge` 모드 패키지가 `bridge network mode requested but the daemon network is disabled`로 실패 | `[network.bridge]` 섹션이 없거나 `enabled = false` 입니다. 추가/활성화하세요([Networking](#networking) 참조). |
 | 패키지 컨테이너가 `journalctl`에 나타나지 않음 | 컨테이너의 `service_type`과, 타깃에 systemd/`crun`이 있는지 확인하세요. |
 

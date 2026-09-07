@@ -370,8 +370,9 @@ impl PackageTransitioner for DefaultPackageTransitioner {
     async fn teardown(&self) -> anyhow::Result<()> {
         log::debug!("Teardown package {}", self.package_name);
 
-        if let Some(executor) = self.executor.cell.get()
-            && let Err(e) = executor.clone().teardown().await
+        let executor = self.executor.cell.get().cloned();
+        if let Some(executor_ref) = &executor
+            && let Err(e) = executor_ref.teardown().await
         {
             log::warn!(
                 "{}: executor teardown failed (continuing with unmount): {e:#}",
@@ -404,7 +405,16 @@ impl PackageTransitioner for DefaultPackageTransitioner {
 
         self.pkgfs_handle
             .unmount()
-            .with_context(|| format!("{}: Failed to unmount package fs", self.package_name))
+            .with_context(|| format!("{}: Failed to unmount package fs", self.package_name))?;
+
+        if let Some(executor) = executor {
+            executor
+                .cleanup()
+                .await
+                .with_context(|| format!("{}: Failed to clean up OCI bundle", self.package_name))?;
+        }
+
+        Ok(())
     }
 
     async fn wipe_data(&self) -> anyhow::Result<()> {

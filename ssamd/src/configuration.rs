@@ -9,10 +9,13 @@ use std::path::{Path, PathBuf};
 /// Per-bridge subnet size used when `[network.bridge] size` is omitted.
 pub(crate) const DEFAULT_SUBNET_SIZE: u8 = 29;
 
-/// Address pool base CIDR used when `[network.bridge] base` is omitted — RFC1918 private space.
+/// Address pool base CIDR used when `[network.bridge] base` is omitted.
 pub(crate) const DEFAULT_POOL_BASE: &str = "172.20.0.0/16";
 
-/// Get the default config file path (same directory as the ssamd binary)
+const DEFAULT_PACKAGE_EXTENSION: &str = "ssam";
+const DEFAULT_PUBLIC_KEY_PATH: &str = "/etc/ssamd/public.key";
+
+/// Get the default config file path (same directory as the ssamd binary).
 pub(crate) fn default_config_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -20,70 +23,108 @@ pub(crate) fn default_config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./ssamd.toml"))
 }
 
-pub(crate) fn runtime_bundle_root() -> PathBuf {
-    std::env::temp_dir().join(".ssamd")
-}
-
-/// Common runtime configuration structure that matches build-time config values
+/// Package source, runtime bundle, and package data directories.
 #[derive(Debug, Clone, Deserialize)]
-pub struct Common {
-    /// Bundled (read-only) package directory path; empty means no bundled packages.
+#[serde(deny_unknown_fields)]
+pub struct PackageDirConfig {
+    /// Optional read-only package source.
     #[serde(default)]
-    pub bundled_packages_dir: String,
+    pub builtin: String,
 
-    /// Downloaded (read-write) package directory path (required, must not be empty)
-    pub downloaded_packages_dir: String,
+    /// Optional read-write package source.
+    #[serde(default)]
+    pub downloaded: String,
 
-    /// Package data root directory (required)
-    pub packages_data_root: String,
+    /// Root for versioned OCI bundles.
+    #[serde(rename = "oci_bundle")]
+    pub oci_bundle_root: String,
 
-    /// Package overlay filesystem root (required)
-    pub packages_overlayfs_root: String,
-
-    /// Package mount root directory (required)
-    pub packages_mnt_root: String,
-
-    /// Public key file path (required)
-    pub public_key_file_path: String,
-
-    /// Package cgroup (required)
-    pub packages_cgroup: String,
-
-    /// Package file extension (required)
-    pub packages_ext: String,
+    /// Root for package data directories.
+    pub data: String,
 }
 
-/// Daemon-global network configuration, parsed from the optional `[network]` TOML section
+/// Package configuration parsed from `[package]`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageConfig {
+    /// Package file extension without a dot.
+    #[serde(default = "default_package_extension")]
+    pub extension: String,
+
+    /// Cgroup used for package processes.
+    #[serde(default)]
+    pub cgroup: String,
+
+    /// Public key used for package signature verification.
+    #[serde(default = "default_public_key_path")]
+    pub public_key: String,
+
+    /// Package directory settings.
+    pub dir: PackageDirConfig,
+}
+
+fn default_package_extension() -> String {
+    DEFAULT_PACKAGE_EXTENSION.to_owned()
+}
+
+fn default_public_key_path() -> String {
+    DEFAULT_PUBLIC_KEY_PATH.to_owned()
+}
+
+/// Debug-only package runtime settings parsed from `[debug]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebugConfig {
+    /// Optional package filesystem overlay root.
+    #[serde(default)]
+    pub pkgfs_overlay_dir: String,
+
+    /// Disable dm-verity package filesystem enforcement.
+    #[serde(default)]
+    pub disable_pkgfs_integrity: bool,
+
+    /// Disable package signature verification while retaining format checks.
+    #[serde(default)]
+    pub disable_package_verify: bool,
+}
+
+/// Daemon-global network configuration, parsed from the optional `[network]` section.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
-    /// Per-container bridge networking (`[network.bridge]`); `None` when absent.
+    /// Per-container bridge networking; `None` when absent.
+    #[serde(default)]
     pub bridge: Option<BridgeConfig>,
 }
 
 /// Per-container bridge networking config, parsed from `[network.bridge]`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeConfig {
-    /// Whether the daemon-managed bridge network is enabled. Gates only bridge
-    /// networking; host/none container network modes work regardless.
+    /// Whether the daemon-managed bridge network is enabled. Defaults to false.
+    #[serde(default)]
     pub enabled: bool,
 
-    /// Address pool bridges carve per-container subnets from
-    /// (`[network.bridge.addr_pool]`); `None` → built-in default.
+    /// Address pool bridges carve per-container subnets from.
+    #[serde(default)]
     pub addr_pool: Option<PoolConfig>,
 }
 
 /// Address pool definition, parsed from `[network.bridge.addr_pool]`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PoolConfig {
-    /// Pool base CIDR (e.g. "172.20.0.0/16"); `None` → default (172.20.0.0/16).
+    /// Pool base CIDR.
+    #[serde(default)]
     pub base: Option<String>,
 
-    /// Per-bridge subnet size (prefix length); `None` → default (29).
+    /// Per-bridge subnet size.
+    #[serde(default)]
     pub size: Option<u8>,
 }
 
 impl BridgeConfig {
-    /// The per-bridge subnet size, from the pool or the default.
+    /// Return the configured or default per-bridge subnet size.
     pub(crate) fn size(&self) -> u8 {
         self.addr_pool
             .as_ref()
@@ -91,7 +132,7 @@ impl BridgeConfig {
             .unwrap_or(DEFAULT_SUBNET_SIZE)
     }
 
-    /// The address pool base CIDR, from the pool or the default.
+    /// Return the configured or default address pool base.
     pub(crate) fn base(&self) -> &str {
         self.addr_pool
             .as_ref()
@@ -99,14 +140,7 @@ impl BridgeConfig {
             .unwrap_or(DEFAULT_POOL_BASE)
     }
 
-    /// Check the bridge settings are usable, so a bad `[network.bridge]` section
-    /// fails when the config loads instead of at the first container attach.
-    ///
-    /// # Errors
-    ///
-    /// Fails if `base` is not a valid IPv4 CIDR, the pool is too small to hold one
-    /// `/size` subnet, or `size` is longer than /30 (e.g. /31 or /32), which
-    /// leaves no usable host address.
+    /// Check that bridge settings are usable.
     pub(crate) fn validate(&self) -> Result<()> {
         let pool: Ipv4Net = self
             .base()
@@ -125,34 +159,28 @@ impl BridgeConfig {
     }
 }
 
-/// Integrity-related runtime configuration parsed from `[integrity]`.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct IntegrityConfig {
-    /// Whether runtime package filesystem integrity checks are disabled.
-    #[serde(default)]
-    pub disable_runtime_integrity: bool,
-}
-
 /// RPC authorization configuration parsed from `[rpc]`.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RpcConfig {
     /// Additional peer effective GIDs allowed to access the RPC server.
     #[serde(default)]
     pub allowed_gids: Vec<u32>,
 }
 
-/// Configuration manager that holds the runtime configuration
+/// Configuration manager that holds the runtime configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Configuration {
-    common: Common,
+    package: PackageConfig,
 
-    /// Optional network section — `None` when `[network]` is absent from the config file
+    /// Optional network section.
     #[serde(default)]
     network: Option<NetworkConfig>,
 
-    /// Runtime package filesystem integrity configuration.
+    /// Debug package settings.
     #[serde(default)]
-    integrity: IntegrityConfig,
+    debug: DebugConfig,
 
     /// RPC authorization configuration.
     #[serde(default)]
@@ -160,25 +188,25 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    /// Build a configuration from its runtime sections.
+    /// Build a configuration from the current TOML sections.
     #[must_use]
-    pub fn new(common: Common, network: Option<NetworkConfig>, integrity: IntegrityConfig) -> Self {
+    pub fn new(package: PackageConfig, network: Option<NetworkConfig>, debug: DebugConfig) -> Self {
         Self {
-            common,
+            package,
             network,
-            integrity,
+            debug,
             rpc: RpcConfig::default(),
         }
     }
 
-    /// Load configuration from a file path
+    /// Load and validate configuration from a TOML file.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read, parsed, or contains an invalid bridge configuration.
+    /// Returns an error when the file cannot be read, parsed, or fails package
+    /// or network validation.
     pub fn load_from_path<P: AsRef<Path>>(config_path: P) -> Result<Self> {
         let config_path = config_path.as_ref();
-
         let config_content = std::fs::read_to_string(config_path).with_context(|| {
             format!(
                 "Failed to read config file: {}. Please ensure the file exists and is readable.",
@@ -186,12 +214,14 @@ impl Configuration {
             )
         })?;
 
-        // All required fields must be present in TOML, otherwise it will fail
         let config: Self = toml::from_str(&config_content).with_context(|| {
             format!(
-                "Failed to parse config file: {}. Ensure all required fields are present in [common] section.",
+                "Failed to parse config file: {}. Ensure package settings are present in [package] and [package.dir].",
                 config_path.display()
             )
+        })?;
+        config.validate().with_context(|| {
+            format!("Invalid package configuration in {}", config_path.display())
         })?;
 
         if let Some(bridge) = config.network.as_ref().and_then(|n| n.bridge.as_ref()) {
@@ -204,71 +234,101 @@ impl Configuration {
             "Successfully loaded runtime configuration from '{}'",
             config_path.display()
         );
-
         Ok(config)
     }
 
-    /// Get bundled packages directory path as a borrowed reference
-    pub(crate) fn bundled_packages_dir(&self) -> &str {
-        &self.common.bundled_packages_dir
+    fn validate(&self) -> Result<()> {
+        let dirs = &self.package.dir;
+        anyhow::ensure!(
+            !dirs.oci_bundle_root.trim().is_empty(),
+            "package.dir.oci_bundle must not be empty"
+        );
+        anyhow::ensure!(
+            Path::new(&dirs.oci_bundle_root).is_absolute(),
+            "package.dir.oci_bundle must be an absolute path"
+        );
+        anyhow::ensure!(
+            !dirs.data.trim().is_empty(),
+            "package.dir.data must not be empty"
+        );
+        anyhow::ensure!(
+            !dirs.builtin.trim().is_empty() || !dirs.downloaded.trim().is_empty(),
+            "At least one of package.dir.builtin or package.dir.downloaded must be configured"
+        );
+        anyhow::ensure!(
+            self.debug.disable_package_verify || !self.package.public_key.trim().is_empty(),
+            "package.public_key must not be empty when package verification is enabled"
+        );
+        Ok(())
     }
 
-    /// Get downloaded packages directory path as a borrowed reference
+    /// Return builtin package source, empty when not configured.
+    pub(crate) fn builtin_packages_dir(&self) -> &str {
+        &self.package.dir.builtin
+    }
+
+    /// Return downloaded package source, empty when not configured.
     #[must_use]
     pub fn downloaded_packages_dir(&self) -> &str {
-        &self.common.downloaded_packages_dir
+        &self.package.dir.downloaded
     }
 
-    /// Get packages data root directory path as a borrowed reference
+    /// Return the OCI bundle root.
+    #[must_use]
+    pub fn oci_bundle_root(&self) -> &str {
+        &self.package.dir.oci_bundle_root
+    }
+
+    /// Return the package data root.
     #[must_use]
     pub fn packages_data_root(&self) -> &str {
-        &self.common.packages_data_root
+        &self.package.dir.data
     }
 
-    /// Get packages overlayfs root directory path as a borrowed reference
+    /// Return the optional package filesystem overlay root.
     #[must_use]
-    pub fn packages_overlayfs_root(&self) -> &str {
-        &self.common.packages_overlayfs_root
+    pub fn pkgfs_overlay_dir(&self) -> &str {
+        &self.debug.pkgfs_overlay_dir
     }
 
-    /// Get packages mount root directory path as a borrowed reference
+    /// Return the package public key path.
     #[must_use]
-    pub fn packages_mnt_root(&self) -> &str {
-        &self.common.packages_mnt_root
+    pub fn public_key_path(&self) -> &str {
+        &self.package.public_key
     }
 
-    /// Get public key file path as a borrowed reference
-    #[must_use]
-    pub fn public_key_file_path(&self) -> &str {
-        &self.common.public_key_file_path
-    }
-
-    /// Get packages cgroup as a borrowed reference
+    /// Return the package cgroup.
     #[must_use]
     pub fn packages_cgroup(&self) -> &str {
-        &self.common.packages_cgroup
+        &self.package.cgroup
     }
 
-    /// Get packages file extension as a borrowed reference
+    /// Return the package file extension.
     #[must_use]
     pub fn packages_ext(&self) -> &str {
-        &self.common.packages_ext
+        &self.package.extension
     }
 
-    /// Get daemon network configuration (`None` when `[network]` section is absent)
+    /// Return daemon network configuration.
     pub(crate) fn network_config(&self) -> Option<&NetworkConfig> {
         self.network.as_ref()
     }
 
-    /// Get bridge networking config (`None` when `[network.bridge]` is absent).
+    /// Return bridge networking configuration.
     pub(crate) fn bridge_config(&self) -> Option<&BridgeConfig> {
         self.network_config()?.bridge.as_ref()
     }
 
-    /// Whether runtime package filesystem integrity is disabled.
+    /// Return whether package filesystem integrity is disabled.
     #[must_use]
-    pub fn runtime_integrity_disabled(&self) -> bool {
-        self.integrity.disable_runtime_integrity
+    pub fn pkgfs_integrity_disabled(&self) -> bool {
+        self.debug.disable_pkgfs_integrity
+    }
+
+    /// Return whether package signature verification is disabled.
+    #[must_use]
+    pub fn package_verify_disabled(&self) -> bool {
+        self.debug.disable_package_verify
     }
 
     /// Get additional RPC peer effective GIDs.
@@ -287,524 +347,174 @@ pub(crate) mod tests {
 
     pub(crate) fn test_configuration() -> Arc<Configuration> {
         test_configuration_with_package_dirs(
-            Path::new("/var/lib/ssamd/bundled"),
+            Path::new("/var/lib/ssamd/builtin"),
             Path::new("/var/lib/ssamd/downloaded"),
         )
     }
 
     pub(crate) fn test_configuration_with_package_dirs(
-        bundled_dir: &Path,
+        builtin_dir: &Path,
         downloaded_dir: &Path,
     ) -> Arc<Configuration> {
         Arc::new(Configuration::new(
-            Common {
-                bundled_packages_dir: bundled_dir
-                    .to_str()
-                    .expect("bundled test directory contains non-UTF-8 characters")
-                    .to_owned(),
-                downloaded_packages_dir: downloaded_dir
-                    .to_str()
-                    .expect("downloaded test directory contains non-UTF-8 characters")
-                    .to_owned(),
-                packages_data_root: "/var/lib/ssamd/data".to_owned(),
-                packages_overlayfs_root: String::new(),
-                packages_mnt_root: "/var/lib/ssamd/mnt".to_owned(),
-                public_key_file_path: "/var/lib/ssamd/keys/test.pub.key".to_owned(),
-                packages_cgroup: String::new(),
-                packages_ext: "ssam".to_owned(),
+            PackageConfig {
+                extension: DEFAULT_PACKAGE_EXTENSION.to_owned(),
+                cgroup: String::new(),
+                public_key: "/var/lib/ssamd/keys/test.pub.key".to_owned(),
+                dir: PackageDirConfig {
+                    builtin: builtin_dir
+                        .to_str()
+                        .expect("builtin test directory contains non-UTF-8 characters")
+                        .to_owned(),
+                    downloaded: downloaded_dir
+                        .to_str()
+                        .expect("downloaded test directory contains non-UTF-8 characters")
+                        .to_owned(),
+                    oci_bundle_root: "/var/lib/ssamd/oci-bundle".to_owned(),
+                    data: "/var/lib/ssamd/data".to_owned(),
+                },
             },
             Some(NetworkConfig {
                 bridge: Some(BridgeConfig {
                     enabled: false,
                     addr_pool: Some(PoolConfig {
-                        base: Some("172.20.0.0/16".to_owned()),
-                        size: Some(29),
+                        base: Some(DEFAULT_POOL_BASE.to_owned()),
+                        size: Some(DEFAULT_SUBNET_SIZE),
                     }),
                 }),
             }),
-            IntegrityConfig {
-                disable_runtime_integrity: false,
-            },
+            DebugConfig::default(),
         ))
     }
 
-    /// Helper function to create a complete test configuration file
-    fn create_test_config_file() -> NamedTempFile {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/var/lib/ssamd/bundled"
-            downloaded_packages_dir = "/test/packages"
-            packages_data_root = "/test/data"
-            packages_overlayfs_root = "/test/overlay"
-            packages_mnt_root = "/test/mnt"
-            public_key_file_path = "/test/key.pub"
-            packages_cgroup = "test.slice"
-            packages_ext = "tpkg"
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-        temp_file
-    }
-
-    fn create_test_config_file_with_rpc(allowed_gids: &str) -> NamedTempFile {
-        let mut temp_file = create_test_config_file();
-        writeln!(temp_file, "\n[rpc]\nallowed_gids = [{allowed_gids}]").unwrap();
-        temp_file.flush().unwrap();
-        temp_file
+    fn write_config(content: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+        file
     }
 
     #[test]
-    fn test_no_config_file() {
-        // Should return error when TOML file does not exist
-        let config = Configuration::load_from_path("/nonexistent/ssamd.toml");
-        assert!(config.is_err());
-    }
+    fn complete_new_configuration_parses() {
+        let file = write_config(
+            r#"
+            [package]
+            extension = "tpkg"
+            cgroup = "custom.slice"
+            public_key = "/custom/key.pub"
 
-    #[test]
-    fn test_valid_config_file() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/custom/base"
-            downloaded_packages_dir = "/custom/packages"
-            packages_data_root = "/custom/data"
-            packages_overlayfs_root = "/custom/overlay"
-            packages_mnt_root = "/custom/mnt"
-            public_key_file_path = "/custom/key.pub"
-            packages_cgroup = "custom.slice"
-            packages_ext = "cpkg"
+            [package.dir]
+            builtin = "/custom/base"
+            downloaded = "/custom/packages"
+            oci_bundle = "/custom/bundle"
+            data = "/custom/data"
+
+            [debug]
+            pkgfs_overlay_dir = "/custom/overlay"
+            disable_pkgfs_integrity = true
+            disable_package_verify = false
 
             [network.bridge]
             enabled = true
 
-            [network.bridge.addr_pool]
-            base = "172.20.0.0/16"
-            size = 29
-
-            [integrity]
-            disable_runtime_integrity = false
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path());
-        assert!(config.is_ok());
-        let config = config.unwrap();
-        assert_eq!(config.bundled_packages_dir(), "/custom/base");
+            [rpc]
+            allowed_gids = [1000, 1001]
+        "#,
+        );
+        let config = Configuration::load_from_path(file.path()).unwrap();
+        assert_eq!(config.builtin_packages_dir(), "/custom/base");
         assert_eq!(config.downloaded_packages_dir(), "/custom/packages");
-        let bridge = config.bridge_config().unwrap();
-        assert!(bridge.enabled);
-        let pool = bridge.addr_pool.as_ref().unwrap();
-        assert_eq!(pool.base.as_deref(), Some("172.20.0.0/16"));
-        assert_eq!(pool.size, Some(29));
-        assert!(!config.runtime_integrity_disabled());
-    }
-
-    #[test]
-    fn test_missing_bundled_dir_defaults_to_empty() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            downloaded_packages_dir = "/custom/packages"
-            packages_data_root = "/custom/data"
-            packages_overlayfs_root = "/custom/overlay"
-            packages_mnt_root = "/custom/mnt"
-            public_key_file_path = "/custom/key.pub"
-            packages_cgroup = "custom.slice"
-            packages_ext = "cpkg"
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-        assert!(config.bundled_packages_dir().is_empty());
-    }
-
-    #[test]
-    fn test_rpc_allowed_gids_defaults_to_empty() {
-        let temp_file = create_test_config_file();
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-
-        assert!(config.rpc_allowed_gids().is_empty());
-    }
-
-    #[test]
-    fn test_rpc_allowed_gids_loads_values() {
-        let temp_file = create_test_config_file_with_rpc("1000, 1001");
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-
+        assert_eq!(config.oci_bundle_root(), "/custom/bundle");
+        assert_eq!(config.packages_data_root(), "/custom/data");
+        assert!(config.pkgfs_integrity_disabled());
         assert_eq!(config.rpc_allowed_gids(), &[1000, 1001]);
     }
 
     #[test]
-    fn test_rpc_allowed_gids_empty_list() {
-        let temp_file = create_test_config_file_with_rpc("");
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-
-        assert!(config.rpc_allowed_gids().is_empty());
+    fn package_defaults_apply() {
+        let file = write_config(
+            r#"
+            [package.dir]
+            builtin = "/custom/base"
+            oci_bundle = "/custom/bundle"
+            data = "/custom/data"
+        "#,
+        );
+        let config = Configuration::load_from_path(file.path()).unwrap();
+        assert_eq!(config.packages_ext(), DEFAULT_PACKAGE_EXTENSION);
+        assert!(config.packages_cgroup().is_empty());
+        assert_eq!(config.public_key_path(), DEFAULT_PUBLIC_KEY_PATH);
+        assert!(!config.pkgfs_integrity_disabled());
+        assert!(!config.package_verify_disabled());
     }
 
     #[test]
-    fn test_invalid_rpc_allowed_gids() {
-        for value in ["-1", "\"1000\"", "4294967296"] {
-            let temp_file = create_test_config_file_with_rpc(value);
-            assert!(
-                Configuration::load_from_path(temp_file.path()).is_err(),
-                "invalid GID should be rejected: {value}"
-            );
+    fn builtin_only_and_downloaded_only_parse() {
+        for (builtin, downloaded) in [("/custom/base", ""), ("", "/custom/packages")] {
+            let file = write_config(&format!(
+                "[package.dir]\nbuiltin = {builtin:?}\ndownloaded = {downloaded:?}\noci_bundle = \"/custom/bundle\"\ndata = \"/custom/data\"\n"
+            ));
+            assert!(Configuration::load_from_path(file.path()).is_ok());
         }
     }
 
     #[test]
-    fn test_integrity_table_absent_defaults_to_enabled() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/custom/base"
-            downloaded_packages_dir = "/custom/packages"
-            packages_data_root = "/custom/data"
-            packages_overlayfs_root = "/custom/overlay"
-            packages_mnt_root = "/custom/mnt"
-            public_key_file_path = "/custom/key.pub"
-            packages_cgroup = "custom.slice"
-            packages_ext = "cpkg"
-
-            [network.bridge]
-            enabled = true
-
-            [network.bridge.addr_pool]
-            base = "172.20.0.0/16"
-            size = 29
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-        assert!(!config.runtime_integrity_disabled());
-    }
-
-    #[test]
-    fn test_invalid_toml() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let invalid_content = r"
-            [common]
-            downloaded_packages_dir = [this is not valid toml
-        ";
-        temp_file.write_all(invalid_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path());
-        assert!(config.is_err());
-    }
-
-    #[test]
-    fn test_partial_config() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            downloaded_packages_dir = "/custom/packages"
-            # Other fields are not specified - should fail due to missing required fields
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path());
-        // Should fail because required fields are missing
-        assert!(config.is_err());
-        let err = config.unwrap_err();
-        assert!(err.to_string().contains("Failed to parse config file"));
-    }
-
-    #[test]
-    fn test_configuration_with_all_fields() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/test/base"
-            downloaded_packages_dir = "/test/packages"
-            packages_data_root = "/test/data"
-            packages_overlayfs_root = "/test/overlay"
-            packages_mnt_root = "/test/mnt"
-            public_key_file_path = "/test/key.pub"
-            packages_cgroup = "test.slice"
-            packages_ext = "tpkg"
-
-            [integrity]
-            disable_runtime_integrity = true
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-
-        assert_eq!(config.bundled_packages_dir(), "/test/base");
-        assert_eq!(config.downloaded_packages_dir(), "/test/packages");
-        assert_eq!(config.packages_data_root(), "/test/data");
-        assert_eq!(config.packages_overlayfs_root(), "/test/overlay");
-        assert_eq!(config.packages_mnt_root(), "/test/mnt");
-        assert_eq!(config.public_key_file_path(), "/test/key.pub");
-        assert_eq!(config.packages_cgroup(), "test.slice");
-        assert_eq!(config.packages_ext(), "tpkg");
-        assert!(config.runtime_integrity_disabled());
-    }
-
-    #[test]
-    fn test_integrity_field_defaults_to_enabled() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/test/base"
-            downloaded_packages_dir = "/test/packages"
-            packages_data_root = "/test/data"
-            packages_overlayfs_root = "/test/overlay"
-            packages_mnt_root = "/test/mnt"
-            public_key_file_path = "/test/key.pub"
-            packages_cgroup = "test.slice"
-            packages_ext = "tpkg"
-
-            [integrity]
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-        assert!(!config.runtime_integrity_disabled());
-    }
-
-    #[test]
-    fn test_invalid_disable_runtime_integrity_type() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/test/base"
-            downloaded_packages_dir = "/test/packages"
-            packages_data_root = "/test/data"
-            packages_overlayfs_root = "/test/overlay"
-            packages_mnt_root = "/test/mnt"
-            public_key_file_path = "/test/key.pub"
-            packages_cgroup = "test.slice"
-            packages_ext = "tpkg"
-
-            [integrity]
-            disable_runtime_integrity = "true"
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        assert!(Configuration::load_from_path(temp_file.path()).is_err());
-    }
-
-    #[test]
-    fn test_configuration_getter_operations() {
-        let temp_file = create_test_config_file();
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-
-        let dir = config.downloaded_packages_dir();
-        assert_eq!(dir.len(), "/test/packages".len());
-        assert_eq!(dir.to_uppercase(), "/TEST/PACKAGES");
-        assert!(std::path::Path::new(dir).is_absolute());
-    }
-
-    #[test]
-    fn test_configuration_direct_access() {
-        let temp_file = create_test_config_file();
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-
-        let base_dir: &str = config.bundled_packages_dir();
-        assert_eq!(base_dir, "/var/lib/ssamd/bundled");
-
-        let dir: &str = config.downloaded_packages_dir();
-        assert_eq!(dir, "/test/packages");
-
-        let data_root: &str = config.packages_data_root();
-        assert_eq!(data_root, "/test/data");
-    }
-
-    #[test]
-    fn test_getter_no_allocation() {
-        let temp_file = create_test_config_file();
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-
-        let dir1 = config.downloaded_packages_dir();
-        let dir2 = config.downloaded_packages_dir();
-
-        assert_eq!(dir1, dir2);
-        assert_eq!(dir1, "/test/packages");
-    }
-
-    #[test]
-    fn test_configuration_clone() {
-        let temp_file = create_test_config_file();
-        let config1 = Configuration::load_from_path(temp_file.path()).unwrap();
-        let config2 = config1.clone();
-
-        assert_eq!(
-            config1.downloaded_packages_dir(),
-            config2.downloaded_packages_dir()
-        );
-        assert_eq!(
-            config1.bundled_packages_dir(),
-            config2.bundled_packages_dir()
-        );
-    }
-
-    #[test]
-    fn test_network_config_present() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/var/lib/ssamd/bundled"
-            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-            packages_data_root = "/var/lib/ssamd/data"
-            packages_overlayfs_root = ""
-            packages_mnt_root = "/var/lib/ssamd/mnt"
-            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
-            packages_cgroup = ""
-            packages_ext = "ssam"
-
-            [network.bridge]
-            enabled = true
-
-            [network.bridge.addr_pool]
-            base = "172.20.0.0/16"
-            size = 29
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-        let net = config.network_config();
-        assert!(net.is_some());
-        let bridge = net.unwrap().bridge.as_ref().unwrap();
-        assert!(bridge.enabled);
-        let pool = bridge.addr_pool.as_ref().unwrap();
-        assert_eq!(pool.base.as_deref(), Some("172.20.0.0/16"));
-        assert_eq!(pool.size, Some(29));
-    }
-
-    #[test]
-    fn test_network_config_absent() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/var/lib/ssamd/bundled"
-            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-            packages_data_root = "/var/lib/ssamd/data"
-            packages_overlayfs_root = ""
-            packages_mnt_root = "/var/lib/ssamd/mnt"
-            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
-            packages_cgroup = ""
-            packages_ext = "ssam"
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-        assert!(config.network_config().is_none());
-    }
-
-    #[test]
-    fn test_network_config_optional_fields_none_when_omitted() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/var/lib/ssamd/bundled"
-            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-            packages_data_root = "/var/lib/ssamd/data"
-            packages_overlayfs_root = ""
-            packages_mnt_root = "/var/lib/ssamd/mnt"
-            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
-            packages_cgroup = ""
-            packages_ext = "ssam"
-
-            [network.bridge]
-            enabled = true
-
-            [network.bridge.addr_pool]
-            base = "172.20.0.0/16"
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        let config = Configuration::load_from_path(temp_file.path()).unwrap();
-        let bridge = config.bridge_config().unwrap();
-        assert_eq!(bridge.addr_pool.as_ref().unwrap().size, None);
-    }
-
-    fn net_cfg(base: &str, size: Option<u8>) -> BridgeConfig {
-        BridgeConfig {
-            enabled: true,
-            addr_pool: Some(PoolConfig {
-                base: Some(base.to_owned()),
-                size,
-            }),
+    fn required_package_paths_and_source_are_validated() {
+        for config in [
+            "[package.dir]\nbuiltin = \"/custom/base\"\ndata = \"/custom/data\"\n",
+            "[package.dir]\nbuiltin = \"/custom/base\"\noci_bundle = \"/custom/bundle\"\n",
+            "[package.dir]\nbuiltin = \"\"\ndownloaded = \"\"\noci_bundle = \"/custom/bundle\"\ndata = \"/custom/data\"\n",
+        ] {
+            let file = write_config(config);
+            assert!(Configuration::load_from_path(file.path()).is_err());
         }
     }
 
     #[test]
-    fn network_validate_accepts_valid() {
-        assert!(net_cfg("172.20.0.0/16", Some(29)).validate().is_ok());
-        // An omitted size defaults to /29, still valid inside a /16.
-        assert!(net_cfg("172.20.0.0/16", None).validate().is_ok());
+    fn relative_oci_bundle_path_is_rejected() {
+        let file = write_config(
+            "[package.dir]\nbuiltin = \"/custom/base\"\noci_bundle = \"relative/bundle\"\ndata = \"/custom/data\"\n",
+        );
+        assert!(Configuration::load_from_path(file.path()).is_err());
     }
 
     #[test]
-    fn base_defaults_when_omitted() {
-        // No pool at all: base()/size() fall back to the built-in defaults.
-        let bridge = BridgeConfig {
-            enabled: true,
-            addr_pool: None,
-        };
-        assert_eq!(bridge.base(), DEFAULT_POOL_BASE);
-        assert!(bridge.validate().is_ok());
+    fn empty_public_key_requires_disabled_verification() {
+        let enabled = write_config(
+            "[package]\npublic_key = \"\"\n[package.dir]\nbuiltin = \"/custom/base\"\noci_bundle = \"/custom/bundle\"\ndata = \"/custom/data\"\n",
+        );
+        assert!(Configuration::load_from_path(enabled.path()).is_err());
+
+        let disabled = write_config(
+            "[package]\npublic_key = \"\"\n[package.dir]\nbuiltin = \"/custom/base\"\noci_bundle = \"/custom/bundle\"\ndata = \"/custom/data\"\n[debug]\ndisable_package_verify = true\n",
+        );
+        assert!(Configuration::load_from_path(disabled.path()).is_ok());
     }
 
     #[test]
-    fn network_validate_rejects_bad_base() {
-        let err = net_cfg("not-a-pool", Some(29)).validate().unwrap_err();
-        assert!(err.to_string().contains("base"));
+    fn old_schema_is_rejected() {
+        let file = write_config(
+            "[common]\ndownloaded_packages_dir = \"/custom/packages\"\npackages_data_root = \"/custom/data\"\npackages_mnt_root = \"/custom/bundle\"\npublic_key_file_path = \"/custom/key.pub\"\npackages_ext = \"ssam\"\npackages_cgroup = \"\"\npackages_overlayfs_root = \"\"\n",
+        );
+        assert!(Configuration::load_from_path(file.path()).is_err());
     }
 
     #[test]
-    fn network_validate_rejects_pool_too_small_for_subnet() {
-        // A /30 pool cannot hold a /29 subnet.
-        let err = net_cfg("10.0.0.0/30", Some(29)).validate().unwrap_err();
-        assert!(err.to_string().contains("too small"));
+    fn bridge_validation_and_rpc_parsing_remain_available() {
+        let file = write_config(
+            "[package.dir]\nbuiltin = \"/custom/base\"\noci_bundle = \"/custom/bundle\"\ndata = \"/custom/data\"\n[network.bridge]\nenabled = true\n[network.bridge.addr_pool]\nbase = \"172.20.0.0/16\"\nsize = 29\n[rpc]\nallowed_gids = [1000]\n",
+        );
+        let config = Configuration::load_from_path(file.path()).unwrap();
+        assert!(config.bridge_config().is_some_and(|bridge| bridge.enabled));
+        assert_eq!(config.rpc_allowed_gids(), &[1000]);
     }
 
     #[test]
-    fn network_validate_rejects_prefix_with_no_host() {
-        // /31 leaves no usable host address.
-        let err = net_cfg("10.0.0.0/16", Some(31)).validate().unwrap_err();
-        assert!(err.to_string().contains("usable host"));
-    }
-
-    #[test]
-    fn load_rejects_invalid_network_section() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let config_content = r#"
-            [common]
-            bundled_packages_dir = "/var/lib/ssamd/bundled"
-            downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-            packages_data_root = "/var/lib/ssamd/data"
-            packages_overlayfs_root = ""
-            packages_mnt_root = "/var/lib/ssamd/mnt"
-            public_key_file_path = "/var/lib/ssamd/keys/test.pub.key"
-            packages_cgroup = ""
-            packages_ext = "ssam"
-
-            [network.bridge]
-            enabled = true
-
-            [network.bridge.addr_pool]
-            base = "10.0.0.0/30"
-            size = 29
-        "#;
-        temp_file.write_all(config_content.as_bytes()).unwrap();
-        temp_file.flush().unwrap();
-
-        // A pool too small for one subnet must fail at load, not at first attach.
-        assert!(Configuration::load_from_path(temp_file.path()).is_err());
+    fn bridge_enabled_defaults_to_false_with_address_pool() {
+        let file = write_config(
+            "[package.dir]\nbuiltin = \"/custom/base\"\noci_bundle = \"/custom/bundle\"\ndata = \"/custom/data\"\n[network.bridge.addr_pool]\nbase = \"172.20.0.0/16\"\nsize = 29\n",
+        );
+        let config = Configuration::load_from_path(file.path()).unwrap();
+        assert!(config.bridge_config().is_some_and(|bridge| !bridge.enabled));
     }
 }

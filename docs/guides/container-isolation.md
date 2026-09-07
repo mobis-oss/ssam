@@ -20,7 +20,7 @@ This guide covers how to set them up.
    - [No networking](#no-networking)
    - [Bridge networking](#bridge-networking)
    - [Using predefined networking](#using-predefined-networking)
-2. [Container cgroup](#container-cgroup-packages_cgroup)
+2. [Container cgroup](#container-cgroup-packagecgroup)
 3. [Storage quota](#storage-quota-storage_limit)
 
 ---
@@ -90,7 +90,7 @@ size = 29                       # per-bridge subnet prefix (default: 29)
 
 Bridge mode also needs the host's `bridge` / `veth` kernel features.
 
-> 📖 For all keys see the [`[network]` reference](../reference/daemon-config.md#network); for the operational walkthrough — enabling the bridge on a device and applying it — see [Serving SSAM → Networking](serving-ssam.md#networking).
+> 📖 For all keys see the [`[network.bridge]` reference](../reference/daemon-config.md#networkbridge); for the operational walkthrough — enabling the bridge on a device and applying it — see [Serving SSAM → Networking](serving-ssam.md#networking).
 
 #### Per-package configuration
 
@@ -130,14 +130,14 @@ mode = "/var/run/netns/my-netns"
 
 ---
 
-## Container cgroup (`packages_cgroup`)
+## Container cgroup (`package.cgroup`)
 
-[`packages_cgroup`](../reference/daemon-config.md#packages_cgroup) in `ssamd.toml` sets the **root cgroup** all package containers are placed under.
+[`package.cgroup`](../reference/daemon-config.md#cgroup) in `ssamd.toml` sets the **root cgroup** all package containers are placed under.
 
 - **Left unset (empty, the default)**, `ssamd` uses the host's `system.slice` as the root cgroup.
 - **Set to a value**, `ssamd` uses that path as the root cgroup.
 
-Once the root cgroup is decided, `ssamd` sets each container's *OCI Runtime config* `cgroupsPath` to `<packages_cgroup>/<package-name>.service/container` — letting you cap the resources all package containers use together.
+Once the root cgroup is decided, `ssamd` sets each container's *OCI Runtime config* `cgroupsPath` to `<package.cgroup>/<package-name>.service/container` — letting you cap the resources all package containers use together.
 The root cgroup **must exist before `ssamd` starts**; `ssamd` does not create it (the daemon aborts if it is missing).
 
 There are two ways to set it.
@@ -147,7 +147,7 @@ Either way, the host prepares the root cgroup in advance and `ssamd.toml` points
 
 You can use a *systemd* **slice unit** as the root cgroup.
 For example, with `ssam.slice` as the slice to use as the root cgroup:
-- set `packages_cgroup = "ssam.slice"` in `ssamd.toml`
+- set `cgroup = "ssam.slice"` under `[package]` in `ssamd.toml`
 - `ssamd` sets each container's service unit (`<package-name>.service`) `Slice=` to `ssam.slice`
 - `ssamd` sets each container's *OCI Runtime config* `cgroupsPath` to `ssam.slice/<package-name>.service/container`
 
@@ -168,7 +168,7 @@ EOF
 
 You can also create a cgroup directly and use it as the root.
 For example, with `ssam` as the name to use as the root cgroup:
-- set `packages_cgroup = "ssam"` in `ssamd.toml`
+- set `cgroup = "ssam"` under `[package]` in `ssamd.toml`
 - `ssamd` sets each container's *OCI Runtime config* `cgroupsPath` to `ssam/<package-name>.service/container`
 - since this value is not a *systemd* slice, `ssamd` does not set `Slice=` on the service unit and logs a warning
 
@@ -186,7 +186,7 @@ Prepare the cgroup on the host in advance — for example:
 
 When a package declares [`container.storage_limit`](../reference/package-config.md#storage_limit), `ssamd` applies a size cap to that package's data directory.
 `ssamd` implements this with *ext4* **project quota**.
-To use it, the **host system's kernel configuration** and the **filesystem set as [`packages_data_root`](../reference/daemon-config.md#packages_data_root)** must each provide the following:
+To use it, the **host system's kernel configuration** and the **filesystem set as [`package.dir.data`](../reference/daemon-config.md#data)** must each provide the following:
 
 **Kernel configuration**
 

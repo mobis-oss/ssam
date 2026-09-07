@@ -4,8 +4,8 @@
 pub mod error;
 pub mod ssam_pkg_info;
 pub mod ssam_pkg_metadata;
+pub mod ssam_pkg_oci_runtime_config;
 pub(crate) mod ssam_pkg_payload;
-pub mod ssam_pkg_runtime_config;
 pub mod ssam_pkg_seccomp;
 mod verity;
 
@@ -71,10 +71,10 @@ use crate::config::{PackageConfigSpec, SSAM_SERIALIZATION_CONFIG};
 use crate::superblock::FsType;
 use anyhow::{Context, Result, anyhow, bail};
 use ssam_pkg_metadata::PackageMetadata;
+use ssam_pkg_oci_runtime_config::OciRuntimeConfig;
 use ssam_pkg_payload::Payloads;
-use ssam_pkg_payload::VerifiedPayloads;
+use ssam_pkg_payload::VerifiablePayloadMap;
 use ssam_pkg_payload::{Payload, PayloadType, SSAM_PAYLOAD_CONFIGURATION};
-use ssam_pkg_runtime_config::PackageRuntimeConfig;
 pub use ssam_pkg_seccomp::PackageSeccompPolicy;
 use std::fs;
 use std::fs::OpenOptions;
@@ -164,7 +164,7 @@ fn write_footer(pkg_fp: &mut File) -> Result<()> {
 #[derive(Debug)]
 pub struct PackageFile {
     metadata: PackageMetadata,
-    runtime_config: PackageRuntimeConfig,
+    oci_runtime_config: OciRuntimeConfig,
     seccomp_policy: PackageSeccompPolicy,
     payloads: Payloads,
 }
@@ -230,13 +230,13 @@ impl PackageFilesystem {
 impl PackageFile {
     fn new(
         metadata: PackageMetadata,
-        runtime_config: PackageRuntimeConfig,
+        oci_runtime_config: OciRuntimeConfig,
         seccomp_policy: PackageSeccompPolicy,
         payloads: Payloads,
     ) -> Self {
         PackageFile {
             metadata,
-            runtime_config,
+            oci_runtime_config,
             seccomp_policy,
             payloads,
         }
@@ -250,8 +250,8 @@ impl PackageFile {
 
     /// Returns the runtime config for this package.
     #[must_use]
-    pub fn runtime_config(&self) -> &PackageRuntimeConfig {
-        &self.runtime_config
+    pub fn oci_runtime_config(&self) -> &OciRuntimeConfig {
+        &self.oci_runtime_config
     }
 
     /// Returns the seccomp policy for this package.
@@ -286,7 +286,7 @@ impl PackageFile {
     /// seccomp policy, or creating the package metadata fails.
     pub fn from_source(
         package_config_file: impl AsRef<Path>,
-        runtime_config: impl AsRef<Path>,
+        oci_runtime_config: impl AsRef<Path>,
         seccomp_policy: impl AsRef<Path>,
         pkgfs: &PackageFilesystem,
     ) -> Result<Self> {
@@ -304,11 +304,11 @@ impl PackageFile {
                 )
             })?;
 
-        let runtime_config =
-            PackageRuntimeConfig::from_file(&runtime_config).with_context(|| {
+        let oci_runtime_config =
+            OciRuntimeConfig::from_file(&oci_runtime_config).with_context(|| {
                 format!(
                     "Unable to initialize package runtime config from {}",
-                    runtime_config.as_ref().display(),
+                    oci_runtime_config.as_ref().display(),
                 )
             })?;
 
@@ -336,22 +336,23 @@ impl PackageFile {
 
         Ok(PackageFile {
             metadata,
-            runtime_config,
+            oci_runtime_config,
             seccomp_policy,
             payloads: ssam_payloads,
         })
     }
 
-    /// Opens and verifies an SSAM package file, then parses its embedded payloads
-    /// (metadata, runtime config, and seccomp policy) after signature verification.
+    /// Opens and parses an SSAM package file according to the requested verification policy.
+    /// The public key is used only when `verify_signature` is true.
     ///
     /// # Errors
     ///
-    /// Returns an error if opening the package file, verifying the signature, or parsing
+    /// Returns an error if opening the package file, validating the package, or parsing
     /// any of the embedded payloads (metadata, runtime config, seccomp policy) fails.
-    pub fn from_file_verified(
+    pub fn from_file(
         package_file: impl AsRef<std::path::Path>,
         public_key: impl AsRef<std::path::Path>,
+        verify_signature: bool,
     ) -> Result<PackageFile, PackageParseError> {
         let package_file = package_file.as_ref();
         let mut pkg_fp = OpenOptions::new()
@@ -382,29 +383,30 @@ impl PackageFile {
             });
         }
 
-        let (ssam_payloads, verified) = Self::load_payloads_info(&mut pkg_fp, &public_key)?;
+        let (ssam_payloads, parsed) =
+            Self::load_payloads_info(&mut pkg_fp, &public_key, verify_signature)?;
 
         let mut builder = PackageFileBuilder::new();
         let metadata_bytes =
-            verified
+            parsed
                 .get(&PayloadType::Metadata)
                 .ok_or_else(|| PackageParseError::ParseFailed {
-                    source: anyhow!("Missing verified metadata payload"),
+                    source: anyhow!("Missing metadata payload"),
                 })?;
         builder.set_metadata(PackageMetadata::deserialize(&mut Cursor::new(
             metadata_bytes.as_slice(),
         ))?);
-        let runtime_bytes = verified.get(&PayloadType::RuntimeConfig).ok_or_else(|| {
+        let runtime_bytes = parsed.get(&PayloadType::RuntimeConfig).ok_or_else(|| {
             PackageParseError::ParseFailed {
-                source: anyhow!("Missing verified runtime config payload"),
+                source: anyhow!("Missing runtime config payload"),
             }
         })?;
-        builder.set_runtime_config(PackageRuntimeConfig::deserialize(&mut Cursor::new(
+        builder.set_oci_runtime_config(OciRuntimeConfig::deserialize(&mut Cursor::new(
             runtime_bytes.as_slice(),
         ))?);
-        let seccomp_bytes = verified.get(&PayloadType::SeccompPolicy).ok_or_else(|| {
+        let seccomp_bytes = parsed.get(&PayloadType::SeccompPolicy).ok_or_else(|| {
             PackageParseError::ParseFailed {
-                source: anyhow!("Missing verified seccomp payload"),
+                source: anyhow!("Missing seccomp payload"),
             }
         })?;
         builder.set_seccomp_policy(PackageSeccompPolicy::deserialize(&mut Cursor::new(
@@ -442,9 +444,9 @@ impl PackageFile {
             .set_mut(
                 PayloadType::RuntimeConfig,
                 Some(Payload::Data(
-                    self.runtime_config
+                    self.oci_runtime_config
                         .serialize()
-                        .context("Failed to serialize PackageRuntimeConfig")?,
+                        .context("Failed to serialize OciRuntimeConfig")?,
                 )),
             )
             .set_mut(
@@ -584,8 +586,9 @@ impl PackageFile {
 
     fn load_payloads_info(
         pkg_fp: &mut File,
-        public_key: impl AsRef<std::path::Path>,
-    ) -> Result<(Payloads, VerifiedPayloads), PackageParseError> {
+        public_key: impl AsRef<Path>,
+        verify_signature: bool,
+    ) -> Result<(Payloads, VerifiablePayloadMap), PackageParseError> {
         verify_footer(pkg_fp)?;
 
         let pkg_file_size = pkg_fp
@@ -638,7 +641,7 @@ impl PackageFile {
                 source,
             })?;
 
-        Payloads::deserialize_from_pkg_verified(pkg_fp, &public_key)
+        Payloads::deserialize_from_pkg(pkg_fp, public_key, verify_signature)
     }
 }
 
@@ -658,7 +661,7 @@ impl PackageFilesystem {
 
 struct PackageFileBuilder {
     metadata: Option<PackageMetadata>,
-    runtime_config: Option<PackageRuntimeConfig>,
+    oci_runtime_config: Option<OciRuntimeConfig>,
     seccomp_policy: Option<PackageSeccompPolicy>,
     payloads: Option<Payloads>,
 }
@@ -668,7 +671,7 @@ impl PackageFileBuilder {
     fn new() -> Self {
         PackageFileBuilder {
             metadata: None,
-            runtime_config: None,
+            oci_runtime_config: None,
             seccomp_policy: None,
             payloads: None,
         }
@@ -678,8 +681,8 @@ impl PackageFileBuilder {
         self.metadata = Some(metadata);
     }
 
-    fn set_runtime_config(&mut self, runtime_config: PackageRuntimeConfig) {
-        self.runtime_config = Some(runtime_config);
+    fn set_oci_runtime_config(&mut self, oci_runtime_config: OciRuntimeConfig) {
+        self.oci_runtime_config = Some(oci_runtime_config);
     }
 
     fn set_seccomp_policy(&mut self, seccomp_policy: PackageSeccompPolicy) {
@@ -691,9 +694,9 @@ impl PackageFileBuilder {
     }
 
     fn build(self) -> Result<PackageFile, PackageParseError> {
-        let (Some(metadata), Some(runtime_config), Some(seccomp_policy), Some(payloads)) = (
+        let (Some(metadata), Some(oci_runtime_config), Some(seccomp_policy), Some(payloads)) = (
             self.metadata,
-            self.runtime_config,
+            self.oci_runtime_config,
             self.seccomp_policy,
             self.payloads,
         ) else {
@@ -704,7 +707,7 @@ impl PackageFileBuilder {
 
         Ok(PackageFile::new(
             metadata,
-            runtime_config,
+            oci_runtime_config,
             seccomp_policy,
             payloads,
         ))
@@ -766,7 +769,7 @@ pub(crate) mod tests {
         assert_eq!(config.service.service_type, "notify");
     }
 
-    fn create_test_runtime_config(output_file: impl AsRef<Path>) {
+    fn create_test_oci_runtime_config(output_file: impl AsRef<Path>) {
         let content = r#"{
             "ociVersion": "1.0.0",
             "process": {
@@ -869,17 +872,17 @@ pub(crate) mod tests {
         .unwrap();
 
         let temp_dir = tempdir().unwrap();
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init();
 
-        let package_file = PackageFile::new(metadata, runtime_config, seccomp_policy, payloads);
+        let package_file = PackageFile::new(metadata, oci_runtime_config, seccomp_policy, payloads);
 
         assert_eq!(package_file.metadata().package.name, "test_package");
-        assert_eq!(package_file.runtime_config().version(), "1.0.0");
+        assert_eq!(package_file.oci_runtime_config().version(), "1.0.0");
     }
 
     #[test]
@@ -892,14 +895,14 @@ pub(crate) mod tests {
         .unwrap();
 
         let temp_dir = tempdir().unwrap();
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init();
 
-        let package_file = PackageFile::new(metadata, runtime_config, seccomp_policy, payloads);
+        let package_file = PackageFile::new(metadata, oci_runtime_config, seccomp_policy, payloads);
 
         let retrieved_metadata = package_file.metadata();
         assert_eq!(retrieved_metadata.package.name, "test_package");
@@ -911,7 +914,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_ssam_package_file_runtime_config_access() {
+    fn test_ssam_package_file_oci_runtime_config_access() {
         let metadata = PackageMetadata::new(
             create_test_package_config(),
             FsType::Erofs,
@@ -920,18 +923,21 @@ pub(crate) mod tests {
         .unwrap();
 
         let temp_dir = tempdir().unwrap();
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init();
 
-        let package_file = PackageFile::new(metadata, runtime_config, seccomp_policy, payloads);
+        let package_file = PackageFile::new(metadata, oci_runtime_config, seccomp_policy, payloads);
 
-        let retrieved_runtime_config = package_file.runtime_config();
-        assert_eq!(retrieved_runtime_config.version(), "1.0.0");
-        assert_eq!(retrieved_runtime_config.hostname().as_deref(), Some("test"));
+        let retrieved_oci_runtime_config = package_file.oci_runtime_config();
+        assert_eq!(retrieved_oci_runtime_config.version(), "1.0.0");
+        assert_eq!(
+            retrieved_oci_runtime_config.hostname().as_deref(),
+            Some("test")
+        );
     }
 
     #[test]
@@ -944,14 +950,14 @@ pub(crate) mod tests {
         .unwrap();
 
         let temp_dir = tempdir().unwrap();
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init(); // Empty payloads
 
-        let package_file = PackageFile::new(metadata, runtime_config, seccomp_policy, payloads);
+        let package_file = PackageFile::new(metadata, oci_runtime_config, seccomp_policy, payloads);
 
         let result = package_file.pkgfs();
         assert!(result.is_err());
@@ -968,10 +974,10 @@ pub(crate) mod tests {
         .unwrap();
 
         let temp_dir = tempdir().unwrap();
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
 
         let payloads = Payloads::init().set_mut(
@@ -979,7 +985,7 @@ pub(crate) mod tests {
             Some(Payload::Data(b"pkgfs_data".to_vec())),
         );
 
-        let package_file = PackageFile::new(metadata, runtime_config, seccomp_policy, payloads);
+        let package_file = PackageFile::new(metadata, oci_runtime_config, seccomp_policy, payloads);
 
         let result = package_file.pkgfs();
         assert!(result.is_ok());
@@ -1001,8 +1007,8 @@ pub(crate) mod tests {
         create_test_package_config_file(&package_config_path);
 
         // Create runtime config file
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
         // Create seccomp policy file
         let seccomp_policy_path = temp_dir.path().join("seccomp.json");
@@ -1022,7 +1028,7 @@ pub(crate) mod tests {
 
         let result = PackageFile::from_source(
             &package_config_path,
-            &runtime_config_path,
+            &oci_runtime_config_path,
             &seccomp_policy_path,
             &pkgfs,
         );
@@ -1032,7 +1038,7 @@ pub(crate) mod tests {
 
         assert_eq!(package_file.metadata().package.name, "test_package");
         assert_eq!(package_file.metadata().container.storage_limit, Some(2000));
-        assert_eq!(package_file.runtime_config().version(), "1.0.0");
+        assert_eq!(package_file.oci_runtime_config().version(), "1.0.0");
         assert_eq!(
             package_file.metadata().pkgfs_verity_info().hash_offset,
             expected_hash_offset
@@ -1047,8 +1053,8 @@ pub(crate) mod tests {
         let package_config_path = temp_dir.path().join("package.toml");
         fs::write(&package_config_path, "invalid toml content").unwrap();
 
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
         let seccomp_policy_path = temp_dir.path().join("seccomp.json");
         create_test_seccomp_policy_file(&seccomp_policy_path);
@@ -1057,7 +1063,7 @@ pub(crate) mod tests {
 
         let result = PackageFile::from_source(
             &package_config_path,
-            &runtime_config_path,
+            &oci_runtime_config_path,
             &seccomp_policy_path,
             &pkgfs,
         );
@@ -1075,8 +1081,8 @@ pub(crate) mod tests {
     fn test_ssam_package_file_from_source_missing_file() {
         let temp_dir = tempdir().unwrap();
         let nonexistent_path = temp_dir.path().join("nonexistent.toml");
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
         let seccomp_policy_path = temp_dir.path().join("seccomp.json");
         create_test_seccomp_policy_file(&seccomp_policy_path);
@@ -1085,7 +1091,7 @@ pub(crate) mod tests {
 
         let result = PackageFile::from_source(
             &nonexistent_path,
-            &runtime_config_path,
+            &oci_runtime_config_path,
             &seccomp_policy_path,
             &pkgfs,
         );
@@ -1128,7 +1134,7 @@ pub(crate) mod tests {
     fn test_ssam_package_file_builder_new() {
         let builder = PackageFileBuilder::new();
         assert!(builder.metadata.is_none());
-        assert!(builder.runtime_config.is_none());
+        assert!(builder.oci_runtime_config.is_none());
         assert!(builder.payloads.is_none());
     }
 
@@ -1147,16 +1153,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_ssam_package_file_builder_set_runtime_config() {
+    fn test_ssam_package_file_builder_set_oci_runtime_config() {
         let temp_dir = tempdir().unwrap();
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
         let mut builder = PackageFileBuilder::new();
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
 
-        builder.set_runtime_config(runtime_config);
-        assert!(builder.runtime_config.is_some());
+        builder.set_oci_runtime_config(oci_runtime_config);
+        assert!(builder.oci_runtime_config.is_some());
     }
 
     #[test]
@@ -1184,8 +1190,8 @@ pub(crate) mod tests {
     #[test]
     fn test_ssam_package_file_builder_build_success() {
         let temp_dir = tempdir().unwrap();
-        let runtime_config_path = temp_dir.path().join("runtime.json");
-        create_test_runtime_config(&runtime_config_path);
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
         let mut builder = PackageFileBuilder::new();
 
@@ -1195,12 +1201,12 @@ pub(crate) mod tests {
             make_verity("test_hash", 0),
         )
         .unwrap();
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init();
 
         builder.set_metadata(metadata);
-        builder.set_runtime_config(runtime_config);
+        builder.set_oci_runtime_config(oci_runtime_config);
         builder.set_seccomp_policy(seccomp_policy);
         builder.set_payloads(payloads);
 
@@ -1223,7 +1229,7 @@ pub(crate) mod tests {
     fn test_sign_verify() {
         let temp_dir = tempdir().unwrap();
         let output_package_file = temp_dir.path().join("test_package.ssam");
-        let runtime_config_path = temp_dir.path().join("runtime.json");
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
         let private1_key_path = temp_dir.path().join("private_key1.pem");
         let public1_key_path = temp_dir.path().join("public_key1.pem");
         let private2_key_path = temp_dir.path().join("private_key2.pem");
@@ -1238,11 +1244,11 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        create_test_runtime_config(&runtime_config_path);
+        create_test_oci_runtime_config(&oci_runtime_config_path);
 
         let pkgfs = temp_dir.path().join("pkgfs.img");
         std::fs::write(&pkgfs, b"pkgfs_data").unwrap();
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init().set_mut(
             PayloadType::PackageFilesystem,
@@ -1251,7 +1257,7 @@ pub(crate) mod tests {
 
         let mut package_file = PackageFileBuilder::new();
         package_file.set_metadata(metadata.clone());
-        package_file.set_runtime_config(runtime_config.clone());
+        package_file.set_oci_runtime_config(oci_runtime_config.clone());
         package_file.set_seccomp_policy(seccomp_policy.clone());
         package_file.set_payloads(payloads.clone());
 
@@ -1263,21 +1269,35 @@ pub(crate) mod tests {
         assert!(result.is_ok());
 
         let package_file =
-            PackageFile::from_file_verified(&output_package_file, public1_key_path).unwrap();
+            PackageFile::from_file(&output_package_file, &public1_key_path, true).unwrap();
 
         assert_eq!(package_file.metadata().package.name, "test_package");
-        assert_eq!(package_file.runtime_config().version(), "1.0.0");
+        assert_eq!(package_file.oci_runtime_config().version(), "1.0.0");
         check_test_package_config(package_file.metadata());
 
-        let package_file = PackageFile::from_file_verified(&output_package_file, public2_key_path);
+        let unverified =
+            PackageFile::from_file(&output_package_file, &public1_key_path, false).unwrap();
+        assert_eq!(unverified.metadata().package.name, "test_package");
+        assert_eq!(unverified.oci_runtime_config().version(), "1.0.0");
+
+        let package_file = PackageFile::from_file(&output_package_file, &public2_key_path, true);
         assert!(package_file.is_err());
     }
 
     #[test]
-    fn test_from_file_verified_parses_from_verified_bytes() {
+    fn test_from_file_rejects_malformed_input() {
+        let temp_dir = tempdir().unwrap();
+        let malformed = temp_dir.path().join("malformed.ssam");
+        let public_key_path = temp_dir.path().join("pub.pem");
+        fs::write(&malformed, b"not an ssam package").unwrap();
+        assert!(PackageFile::from_file(&malformed, &public_key_path, false).is_err());
+    }
+
+    #[test]
+    fn test_from_file_parses_from_verified_bytes() {
         let temp_dir = tempdir().unwrap();
         let output_package_file = temp_dir.path().join("test_package.ssam");
-        let runtime_config_path = temp_dir.path().join("runtime.json");
+        let oci_runtime_config_path = temp_dir.path().join("runtime.json");
         let private_key_path = temp_dir.path().join("private_key.pem");
         let public_key_path = temp_dir.path().join("public_key.pem");
         create_test_keys(&private_key_path, &public_key_path);
@@ -1289,10 +1309,10 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        create_test_runtime_config(&runtime_config_path);
+        create_test_oci_runtime_config(&oci_runtime_config_path);
         let pkgfs = temp_dir.path().join("pkgfs.img");
         std::fs::write(&pkgfs, b"pkgfs_data").unwrap();
-        let runtime_config = PackageRuntimeConfig::from_file(&runtime_config_path).unwrap();
+        let oci_runtime_config = OciRuntimeConfig::from_file(&oci_runtime_config_path).unwrap();
         let seccomp_policy = create_test_seccomp_policy();
         let payloads = Payloads::init().set_mut(
             PayloadType::PackageFilesystem,
@@ -1301,7 +1321,7 @@ pub(crate) mod tests {
 
         let mut package_file = PackageFileBuilder::new();
         package_file.set_metadata(metadata);
-        package_file.set_runtime_config(runtime_config);
+        package_file.set_oci_runtime_config(oci_runtime_config);
         package_file.set_seccomp_policy(seccomp_policy);
         package_file.set_payloads(payloads);
 
@@ -1312,15 +1332,15 @@ pub(crate) mod tests {
             .unwrap();
 
         let package_file =
-            PackageFile::from_file_verified(&output_package_file, public_key_path).unwrap();
+            PackageFile::from_file(&output_package_file, &public_key_path, true).unwrap();
 
         assert_eq!(package_file.metadata().package.name, "test_package");
-        assert_eq!(package_file.runtime_config().version(), "1.0.0");
+        assert_eq!(package_file.oci_runtime_config().version(), "1.0.0");
         assert!(package_file.seccomp_policy().as_str().is_ok());
     }
 
     #[test]
-    fn test_from_file_verified_rejects_fifo() {
+    fn test_from_file_rejects_fifo() {
         let temp_dir = tempdir().unwrap();
         let fifo_path = temp_dir.path().join("test.fifo");
         let public_key_path = temp_dir.path().join("pub.pem");
@@ -1334,7 +1354,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let result = PackageFile::from_file_verified(&fifo_path, &public_key_path);
+        let result = PackageFile::from_file(&fifo_path, &public_key_path, true);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1346,13 +1366,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_from_file_verified_rejects_special_file() {
+    fn test_from_file_rejects_special_file() {
         let temp_dir = tempdir().unwrap();
         let public_key_path = temp_dir.path().join("pub.pem");
         let private_key_path = temp_dir.path().join("priv.pem");
         create_test_keys(&private_key_path, &public_key_path);
 
-        let result = PackageFile::from_file_verified(Path::new("/dev/null"), &public_key_path);
+        let result = PackageFile::from_file(Path::new("/dev/null"), &public_key_path, true);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1547,7 +1567,7 @@ pub(crate) mod tests {
         }
 
         let mut file = File::open(&test_file_path).unwrap();
-        let result = PackageFile::load_payloads_info(&mut file, &public_key_path);
+        let result = PackageFile::load_payloads_info(&mut file, &public_key_path, true);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1585,7 +1605,7 @@ pub(crate) mod tests {
         }
 
         let mut file = File::open(&test_file_path).unwrap();
-        let result = PackageFile::load_payloads_info(&mut file, &public_key_path);
+        let result = PackageFile::load_payloads_info(&mut file, &public_key_path, true);
 
         assert!(result.is_err());
         let err = result.unwrap_err();

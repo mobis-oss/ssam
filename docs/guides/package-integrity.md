@@ -7,7 +7,7 @@
 This guide covers three ways to **trust a SSAM package's contents** — that it is authentic, intact, and unchanging.
 It describes how operators and package authors configure each:
 
-- **Package signing** — only trusted packages load.
+- **Package signing** — only packages with valid signatures load when verification is enabled.
 - **Filesystem integrity** — block tampering is caught continuously at runtime.
 - **Read-only filesystem** — the filesystem itself is immutable.
 
@@ -27,8 +27,15 @@ It describes how operators and package authors configure each:
 
 ## Package signing — RSA
 
-A SSAM package is signed with an **RSA private key** (`ssam-wrap`) and verified against the **public key** installed on the device (`ssamd`).
+A SSAM package is signed with an **RSA private key** (`ssam-wrap`) and verified against the **public key** installed on the device (`ssamd`) when package signature verification is enabled.
 A package that fails verification is rejected at load.
+
+> ⚠️ [`debug.disable_package_verify`](../reference/daemon-config.md#disable_package_verify) is a development/debug-only exception.
+> Its default is `false`.
+> When it is `true`, `ssamd` skips RSA signature verification and the public-key file existence check.
+> Packages can therefore load without a public key.
+> Package format and payload structure checks still run.
+> Keep this setting set to `false` in production.
 
 > 📖 For what the signature guarantees, see [Package Integrity → Trust model](../architecture/package-integrity.md#trust-model).
 
@@ -53,10 +60,10 @@ $ openssl genpkey -algorithm RSA -out private_key.pem -pkeyopt rsa_keygen_bits:2
 $ openssl rsa -in private_key.pem -pubout -out public_key.pem
 ```
 
-Use the generated keys as follows:
+For the default verified configuration, use the generated keys as follows:
 
 - Use the private key (`private_key.pem`) to sign packages via `ssam-wrap --private-key`.
-- Install the public key (`public_key.pem`) on the device and point the daemon config `ssamd.toml`'s [`public_key_file_path`](../reference/daemon-config.md#public_key_file_path) at it.
+- Install the public key (`public_key.pem`) on the device and point the daemon config `ssamd.toml`'s [`package.public_key`](../reference/daemon-config.md#public_key) at it.
 
 ### Protecting the private key
 
@@ -65,7 +72,7 @@ Keep it in an HSM or a restricted CI secret, and **never ship it to a device**.
 
 ### Protecting the trust chain
 
-Verifying a signature rests on two things — the **public key** it is checked against, and the **`ssamd` binary** that does the checking.
+When package signature verification is enabled, trust in a signature rests on two things — the **public key** it is checked against, and the **`ssamd` binary** that does the checking.
 If either is tampered with, a forged package can pass, so protect both:
 
 - **The public key** — the only trust anchor `ssamd` relies on.
@@ -73,7 +80,7 @@ If either is tampered with, a forged package can pass, so protect both:
 - **The `ssamd` binary** — the component that performs verification.
   If it is replaced with an `ssamd` whose checks are defeated, a bad signature still passes.
 
-Keep both on a **read-only, secure-boot-protected path** and minimize write access.
+When package signature verification is enabled, keep both on a **read-only, secure-boot-protected path** and minimize write access.
 On platforms with secure boot, arrange that trust to extend from the boot chain through `ssamd` and the public key — the platform verifies the boot chain, that integrity protects the signed rootfs holding the `ssamd` binary and the read-only path the public key sits on, and an untampered `ssamd` uses the public key as the trust anchor to verify package signatures:
 
 ```mermaid
@@ -81,7 +88,7 @@ flowchart LR
   SB["Platform secure boot"]
   BOOT[/"Signed kernel · rootfs"/]
   PK[/"Public key<br/>(read-only path)"/]
-  D["ssamd"]
+  D["ssamd<br/>(signature verification enabled)"]
   PKG(["Trusted package"])
 
   SB ==>|"verifies boot chain"| BOOT
@@ -118,10 +125,13 @@ It needs these kernel options:
 **Operational configuration.** Block verification is on by default and needs no extra setup.
 Two things are on the operator, though:
 
-- Leave `ssamd.toml`'s [`packages_overlayfs_root`](../reference/daemon-config.md#packages_overlayfs_root) **empty**.
+- Leave `ssamd.toml`'s [`debug.pkgfs_overlay_dir`](../reference/daemon-config.md#pkgfs_overlay_dir) **empty**.
   Setting it layers a writable overlay on top, which effectively defeats the integrity *dm-verity* guarantees — that overlay is for debugging/development, so keep it empty in production.
-- [`[integrity].disable_runtime_integrity`](../reference/daemon-config.md#integrity) is a **debugging-only** switch that turns off runtime block verification (signature verification still applies).
-  Use the default (`false`) in production.
+> ⚠️ [`debug.disable_pkgfs_integrity`](../reference/daemon-config.md#disable_pkgfs_integrity) is a **debugging-only** exception.
+> Set it to `true` to skip creating the *dm-verity* target and mount the package filesystem directly from its loop device.
+> The base package filesystem remains read-only, while block-level tamper detection is disabled.
+> Package signature verification remains controlled independently by [`debug.disable_package_verify`](../reference/daemon-config.md#disable_package_verify).
+> Keep the default (`false`) in production.
 
 ---
 

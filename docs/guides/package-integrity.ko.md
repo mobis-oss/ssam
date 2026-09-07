@@ -7,7 +7,7 @@
 SSAM 패키지의 **내용을 신뢰** 하기 위한 세 가지를 다룹니다 — 진짜인지, 온전한지, 바뀌지 않는지.
 이 문서는 각각을 운영자와 패키지 작성자가 **어떻게 설정하는지** 설명합니다:
 
-- **패키지 서명** — 신뢰할 수 있는 패키지만 로드합니다.
+- **패키지 서명** — 검증이 활성화된 경우 유효한 서명이 있는 패키지만 로드합니다.
 - **파일시스템 무결성** — 실행 중 블록 변조를 지속적으로 감지합니다.
 - **읽기 전용 파일시스템** — 파일시스템 자체를 불변으로 만듭니다.
 
@@ -27,8 +27,15 @@ SSAM 패키지의 **내용을 신뢰** 하기 위한 세 가지를 다룹니다 
 
 ## Package signing — RSA
 
-SSAM 패키지는 **RSA 개인 키** 로 서명되고(`ssam-wrap`), 디바이스에 설치된 **공개 키** 로 검증됩니다(`ssamd`).
+SSAM 패키지는 **RSA 개인 키** 로 서명되고(`ssam-wrap`), 패키지 서명 검증이 활성화된 경우 디바이스에 설치된 **공개 키** 로 검증됩니다(`ssamd`).
 검증에 실패한 패키지는 로드 단계에서 거부됩니다.
+
+> ⚠️ [`debug.disable_package_verify`](../reference/daemon-config.ko.md#disable_package_verify)는 개발·디버그 전용 예외 설정입니다.
+> 기본값은 `false`입니다.
+> `true`로 설정하면 `ssamd`가 RSA 서명 검증과 공개 키 파일 존재 검사를 건너뜁니다.
+> 따라서 공개 키 없이도 패키지를 로드할 수 있습니다.
+> 패키지 포맷과 payload 구조 검사는 계속 수행됩니다.
+> 운영 환경에서는 이 설정을 `false`로 유지하세요.
 
 > 📖 서명이 무엇을 보장하는지는 [패키지 무결성 → 신뢰 모델](../architecture/package-integrity.ko.md#trust-model)을 참고하세요.
 
@@ -53,10 +60,10 @@ $ openssl genpkey -algorithm RSA -out private_key.pem -pkeyopt rsa_keygen_bits:2
 $ openssl rsa -in private_key.pem -pubout -out public_key.pem
 ```
 
-생성한 키는 다음과 같이 사용합니다:
+기본 검증 구성에서는 생성한 키를 다음과 같이 사용합니다:
 
 - 개인 키(`private_key.pem`)는 `ssam-wrap --private-key`로 패키지 서명에 씁니다.
-- 공개 키(`public_key.pem`)는 디바이스에 설치하고, 데몬 설정 `ssamd.toml`의 [`public_key_file_path`](../reference/daemon-config.ko.md#public_key_file_path)로 지정합니다.
+- 공개 키(`public_key.pem`)는 디바이스에 설치하고, 데몬 설정 `ssamd.toml`의 [`package.public_key`](../reference/daemon-config.ko.md#public_key)로 지정합니다.
 
 ### 개인 키 보호
 
@@ -65,7 +72,7 @@ HSM이나 접근이 제한된 CI 시크릿에 보관하고, **디바이스로는
 
 ### 신뢰 체인 보호
 
-서명 검증의 신뢰는 두 가지에 달려 있습니다 — 검증 기준인 **공개 키** 와, 검증을 실제로 수행하는 **`ssamd` 바이너리** 입니다.
+패키지 서명 검증이 활성화된 경우 서명에 대한 신뢰는 두 가지에 달려 있습니다 — 검증 기준인 **공개 키** 와, 검증을 실제로 수행하는 **`ssamd` 바이너리** 입니다.
 둘 중 하나라도 조작되면 위조 패키지가 통과할 수 있으므로 둘 다 보호해야 합니다:
 
 - **공개 키** — `ssamd`가 신뢰하는 유일한 신뢰 앵커입니다.
@@ -73,7 +80,7 @@ HSM이나 접근이 제한된 CI 시크릿에 보관하고, **디바이스로는
 - **`ssamd` 바이너리** — 서명 검증을 수행하는 주체입니다.
   검증이 무력화된 `ssamd`로 바꿔치기되면 서명이 틀려도 통과합니다.
 
-둘 다 **읽기 전용·시큐어 부트로 보호되는 경로** 에 두고 쓰기 권한을 최소화하세요.
+패키지 서명 검증이 활성화된 경우 둘 다 **읽기 전용·시큐어 부트로 보호되는 경로** 에 두고 쓰기 권한을 최소화하세요.
 시큐어 부트를 지원하는 플랫폼에서는 그 신뢰가 부트체인에서 `ssamd`와 공개 키까지 이어지도록 구성합니다 — 플랫폼이 부트체인을 검증하고, 그 무결성이 `ssamd` 바이너리를 담은 서명된 rootfs와 공개 키가 놓인 읽기 전용 경로를 보호하며, 조작되지 않은 `ssamd`가 공개 키를 신뢰 앵커로 삼아 패키지 서명을 검증합니다:
 
 ```mermaid
@@ -81,7 +88,7 @@ flowchart LR
   SB["플랫폼 시큐어 부트"]
   BOOT[/"서명된 커널 · rootfs"/]
   PK[/"공개 키<br/>(읽기 전용 경로)"/]
-  D["ssamd"]
+  D["ssamd<br/>(서명 검증 활성화)"]
   PKG(["신뢰된 패키지"])
 
   SB ==>|"부트체인 검증"| BOOT
@@ -118,10 +125,13 @@ flowchart LR
 **운영 설정.** 블록 검증은 기본으로 켜져 있어 별도 설정이 없어도 됩니다.
 다만 다음 두 가지에 주의하세요:
 
-- `ssamd.toml`의 [`packages_overlayfs_root`](../reference/daemon-config.ko.md#packages_overlayfs_root)를 **빈 값** 으로 두세요.
+- `ssamd.toml`의 [`debug.pkgfs_overlay_dir`](../reference/daemon-config.ko.md#pkgfs_overlay_dir)를 **빈 값** 으로 두세요.
   값을 지정하면 쓰기 가능한 overlay가 얹혀 *dm-verity* 무결성이 사실상 무력화됩니다 — 이 overlay는 **디버깅·개발용** 이므로 운영에서는 비웁니다.
-- [`[integrity].disable_runtime_integrity`](../reference/daemon-config.ko.md#integrity)는 런타임 블록 검증을 끄는 **디버깅용 스위치** 입니다(꺼도 서명 검증은 유지됩니다).
-  운영에서는 기본값(`false`)을 쓰세요.
+> ⚠️ [`debug.disable_pkgfs_integrity`](../reference/daemon-config.ko.md#disable_pkgfs_integrity)는 **디버깅 전용** 예외 설정입니다.
+> `true`로 설정하면 *dm-verity* 대상을 만들지 않고 package filesystem을 loop device에서 직접 마운트합니다.
+> 기본 package filesystem은 읽기 전용으로 유지되지만 블록 단위 변조 감지는 꺼집니다.
+> 패키지 서명 검증은 [`debug.disable_package_verify`](../reference/daemon-config.ko.md#disable_package_verify)로 별도로 제어합니다.
+> 운영 환경에서는 기본값(`false`)을 유지하세요.
 
 ---
 

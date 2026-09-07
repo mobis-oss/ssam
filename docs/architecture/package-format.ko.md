@@ -122,7 +122,7 @@ digest = SHA256( metadata_bytes ‖ runtime_config_bytes ‖ seccomp_bytes )
 ```
 
 `signature.sig`와 `filesystem.img`는 다이제스트에 **포함되지 않습니다**.
-서명에는 `ssam-wrap`에 제공된 개인 키를, 검증에는 `ssamd`에 설정된 공개 키를 사용합니다(`ssamd.toml`의 `public_key_file_path`).
+서명에는 `ssam-wrap`에 제공된 개인 키를, 검증에는 `ssamd`에 설정된 공개 키를 사용합니다(`ssamd.toml`의 `package.public_key`).
 
 ### How the filesystem image is protected
 

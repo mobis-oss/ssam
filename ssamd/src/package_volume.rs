@@ -32,6 +32,7 @@ pub trait PackageFileInfo {
     /// Returns an error if the package file does not contain a valid filesystem payload.
     fn pkgfs(&self) -> anyhow::Result<libssam::ssam_package::PackageFilesystem>;
     fn get_package_name(&self) -> &str;
+    fn get_package_version(&self) -> &str;
     fn get_container_data_dirs(&self) -> Option<&String>;
     fn get_container_storage_limit(&self) -> Option<&i64>;
 }
@@ -43,6 +44,10 @@ impl PackageFileInfo for PackageFile {
 
     fn get_package_name(&self) -> &str {
         self.metadata().get_package_name()
+    }
+
+    fn get_package_version(&self) -> &str {
+        self.metadata().get_package_version()
     }
 
     fn get_container_data_dirs(&self) -> Option<&String> {
@@ -72,9 +77,9 @@ impl PackageVolumeMetadata {
         let pkgfs_meta = PackageFsMetadata::new_with_roots(
             path,
             pkg_file,
-            config.packages_mnt_root(),
-            config.packages_overlayfs_root(),
-            config.runtime_integrity_disabled(),
+            config.oci_bundle_root(),
+            config.pkgfs_overlay_dir(),
+            config.pkgfs_integrity_disabled(),
         )?;
         let data_meta = DataDirMetadata::new(pkg_file, config.packages_data_root())?;
         let package_name = pkg_file.get_package_name().to_owned();

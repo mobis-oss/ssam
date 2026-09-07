@@ -112,7 +112,7 @@ let response = client.list_package_info(request).await?;
 > - Use the code-generated `ApiVersion` enum value rather than hardcoding its numeric value.
 > - A request whose version doesn't match the one the server requires is rejected with gRPC `FAILED_PRECONDITION`.
 
-> ⚠️ The caller's effective GID must match the daemon's effective GID or be in the daemon's [allowed-GID list](../reference/daemon-config.md#allowed_gids); otherwise `ssamd` rejects the RPC with gRPC `PermissionDenied` at the `SO_PEERCRED` check.
+> ⚠️ The caller's effective GID must match the daemon's effective GID or be in the daemon's [allowed-GID list](../reference/daemon-config.md#rpc); otherwise `ssamd` rejects the RPC with gRPC `PermissionDenied` at the `SO_PEERCRED` check.
 
 > ⚠️ A method that takes `package_names` — including `ListPackageInfo` — targets **every** installed package when this list is sent empty (`[]`).
 > This is dangerous for a **destructive** method like `WipePackageData`, so add a separate confirmation or safety guard.

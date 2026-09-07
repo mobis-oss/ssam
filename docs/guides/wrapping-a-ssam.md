@@ -298,10 +298,10 @@ On success it prints the package name, service type, the signing key used, and t
 
 ### Step 8 — Install and run
 
-Copy the resulting SSAM package into the [bundled-packages directory](../reference/daemon-config.md#bundled_packages_dir) on the host where `ssamd` runs, then restart `ssamd`:
+Copy the resulting SSAM package into the [builtin package directory](../reference/daemon-config.md#builtin) on the host where `ssamd` runs, then restart `ssamd`:
 
 ```console
-# cp myapp.ssam /var/lib/ssamd/bundled/
+# cp myapp.ssam /var/lib/ssamd/builtin/
 # systemctl restart ssamd
 ```
 

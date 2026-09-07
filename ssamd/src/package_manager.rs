@@ -32,19 +32,19 @@ pub mod parser;
 mod pkg_file;
 mod store;
 
-pub(crate) fn resolve_bundled_dir(bundled_dir_str: &str) -> anyhow::Result<Option<PathBuf>> {
-    if bundled_dir_str.is_empty() {
+pub(crate) fn resolve_builtin_dir(builtin_dir_str: &str) -> anyhow::Result<Option<PathBuf>> {
+    if builtin_dir_str.trim().is_empty() {
         return Ok(None);
     }
 
-    let bundled_dir = Path::new(bundled_dir_str)
+    let builtin_dir = Path::new(builtin_dir_str)
         .canonicalize()
-        .with_context(|| format!("Failed to canonicalize bundled_dir: {bundled_dir_str}"))?;
+        .with_context(|| format!("Failed to canonicalize builtin_dir: {builtin_dir_str}"))?;
     anyhow::ensure!(
-        bundled_dir.is_dir(),
-        "Bundled packages path is not a directory: {bundled_dir_str}"
+        builtin_dir.is_dir(),
+        "Builtin packages path is not a directory: {builtin_dir_str}"
     );
-    Ok(Some(bundled_dir))
+    Ok(Some(builtin_dir))
 }
 
 #[async_trait]
@@ -187,8 +187,8 @@ use pkg_file::DefaultPackageFileBackend;
 #[derive(Actor)]
 pub struct PackageManagerActor {
     config: Arc<Configuration>,
-    bundled_dir: Option<PathBuf>,
-    downloaded_dir: PathBuf,
+    builtin_dir: Option<PathBuf>,
+    downloaded_dir: Option<PathBuf>,
     package_store: PackageStore<HashMapPackageStore<Package>>,
     transaction_actor: ActorRef<PackageTransactionActor>,
 }
@@ -257,7 +257,7 @@ impl PackageManagerActor {
     /// # Errors
     ///
     /// Returns an error if the network manager fails to initialize, the
-    /// downloaded directory is invalid, a configured bundled directory cannot
+    /// downloaded directory is invalid, a configured builtin directory cannot
     /// be canonicalized or is not a directory, the directories resolve to the
     /// same path, or loading packages fails.
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
@@ -279,27 +279,35 @@ impl PackageManagerActor {
             .transpose()
             .context("Failed to initialize NetworkManager from [network.bridge] config")?;
 
-        // Canonical paths ensure that is_bundled_package() performs reliable
+        // Canonical paths ensure that is_builtin_package() performs reliable
         // path comparisons even when the configuration contains symlinks.
-        let bundled_dir = resolve_bundled_dir(config.bundled_packages_dir())?;
+        let builtin_dir = resolve_builtin_dir(config.builtin_packages_dir())?;
         let downloaded_dir_str = config.downloaded_packages_dir();
-        anyhow::ensure!(
-            !downloaded_dir_str.is_empty(),
-            "downloaded_packages_dir must not be empty"
-        );
-        let downloaded_dir = Path::new(downloaded_dir_str)
-            .canonicalize()
-            .with_context(|| {
-                format!("Failed to canonicalize downloaded_dir: {downloaded_dir_str}")
-            })?;
-        anyhow::ensure!(
-            downloaded_dir.is_dir(),
-            "Downloaded packages path is not a directory: {downloaded_dir_str}"
-        );
-        if let Some(bundled_dir) = bundled_dir.as_ref() {
+        let downloaded_dir = if downloaded_dir_str.trim().is_empty() {
+            None
+        } else {
+            let downloaded_dir =
+                Path::new(downloaded_dir_str)
+                    .canonicalize()
+                    .with_context(|| {
+                        format!("Failed to canonicalize downloaded_dir: {downloaded_dir_str}")
+                    })?;
             anyhow::ensure!(
-                bundled_dir != &downloaded_dir,
-                "bundled_dir ({bundled_dir:?}) and downloaded_dir ({downloaded_dir:?}) resolve to the same directory",
+                downloaded_dir.is_dir(),
+                "Downloaded packages path is not a directory: {downloaded_dir_str}"
+            );
+            Some(downloaded_dir)
+        };
+        anyhow::ensure!(
+            builtin_dir.is_some() || downloaded_dir.is_some(),
+            "At least one package source must be configured"
+        );
+        if let (Some(builtin_dir), Some(downloaded_dir)) =
+            (builtin_dir.as_ref(), downloaded_dir.as_ref())
+        {
+            anyhow::ensure!(
+                builtin_dir != downloaded_dir,
+                "builtin_dir ({builtin_dir:?}) and downloaded_dir ({downloaded_dir:?}) resolve to the same directory",
             );
         }
 
@@ -317,7 +325,7 @@ impl PackageManagerActor {
 
         let pm = PackageManagerActor {
             config,
-            bundled_dir,
+            builtin_dir,
             downloaded_dir,
             package_store,
             transaction_actor,
@@ -352,42 +360,49 @@ impl PackageManagerActor {
                 .ok()
         };
 
-        // Pre-scan downloaded dir to identify packages that will override bundled.
-        // This avoids fully loading bundled packages only to discard them in Phase 2.
-        let downloaded_results = parser::parse_packages_from_dir(
-            &self.downloaded_dir,
-            self.config.packages_ext(),
-            Path::new(self.config.public_key_file_path()),
-        )
-        .await;
+        // Pre-scan downloaded dir to identify packages that will override builtin.
+        // This avoids fully loading builtin packages only to discard them in Phase 2.
+        let downloaded_results = match &self.downloaded_dir {
+            Some(downloaded_dir) => {
+                parser::parse_packages_from_dir_with_verification(
+                    downloaded_dir,
+                    self.config.packages_ext(),
+                    Path::new(self.config.public_key_path()),
+                    !self.config.package_verify_disabled(),
+                )
+                .await
+            }
+            None => Vec::new(),
+        };
         let downloaded_parsed: Vec<_> = downloaded_results
             .into_iter()
             .filter_map(filter_parsed)
             .collect();
-        // Downloaded packages always take priority over bundled — even broken ones.
+        // Downloaded packages always take priority over builtin — even broken ones.
         let overridden_names: HashSet<&str> = downloaded_parsed
             .iter()
             .map(|p| p.package_name.as_str())
             .collect();
 
-        if let Some(bundled_dir) = &self.bundled_dir {
-            // Phase 1: load bundled packages. Record all bundled paths but skip full load
+        if let Some(builtin_dir) = &self.builtin_dir {
+            // Phase 1: load builtin packages. Record all builtin paths but skip full load
             // for packages that have a downloaded counterpart (valid or broken).
-            let bundled_packages = parser::parse_packages_from_dir(
-                bundled_dir,
+            let builtin_packages = parser::parse_packages_from_dir_with_verification(
+                builtin_dir,
                 self.config.packages_ext(),
-                Path::new(self.config.public_key_file_path()),
+                Path::new(self.config.public_key_path()),
+                !self.config.package_verify_disabled(),
             )
             .await
             .into_iter()
             .filter_map(filter_parsed);
-            for parsed in bundled_packages {
+            for parsed in builtin_packages {
                 self.package_store
-                    .insert_bundled_path(parsed.package_name.clone(), parsed.path.clone())
+                    .insert_builtin_path(parsed.package_name.clone(), parsed.path.clone())
                     .await;
                 if overridden_names.contains(parsed.package_name.as_str()) {
                     log::debug!(
-                        "Deferring bundled '{}': downloaded override exists",
+                        "Deferring builtin '{}': downloaded override exists",
                         parsed.package_name
                     );
                     continue;
@@ -396,12 +411,12 @@ impl PackageManagerActor {
             }
         }
 
-        // Phase 2: load downloaded packages (overrides bundled on name collision).
+        // Phase 2: load downloaded packages (overrides builtin on name collision).
         for parsed in downloaded_parsed {
             let name = parsed.package_name.clone();
             self.load_parsed_package(parsed).await?;
-            if self.package_store.get_bundled_path(&name).await.is_some() {
-                log::info!("Downloaded package '{name}' overrides bundled version");
+            if self.package_store.get_builtin_path(&name).await.is_some() {
+                log::info!("Downloaded package '{name}' overrides builtin version");
             }
         }
 
@@ -477,19 +492,19 @@ impl PackageManagerActor {
             .canonicalize()
             .with_context(|| format!("Cannot resolve source path: {path:?}"))?;
 
-        if src_canon.starts_with(&self.downloaded_dir) {
+        if let Some(downloaded_dir) = &self.downloaded_dir
+            && src_canon.starts_with(downloaded_dir)
+        {
             return Err(anyhow::anyhow!(
-                "Source file {:?} is inside the downloaded package directory {:?}; install from an external path",
-                path,
-                self.downloaded_dir
+                "Source file {path:?} is inside the downloaded package directory {downloaded_dir:?}; install from an external path"
             ));
         }
 
-        if let Some(bundled_dir) = &self.bundled_dir
-            && src_canon.starts_with(bundled_dir)
+        if let Some(builtin_dir) = &self.builtin_dir
+            && src_canon.starts_with(builtin_dir)
         {
             return Err(anyhow::anyhow!(
-                "Source file {path:?} is inside the bundled package directory {bundled_dir:?}; install from an external path"
+                "Source file {path:?} is inside the builtin package directory {builtin_dir:?}; install from an external path"
             ));
         }
 
@@ -526,9 +541,7 @@ impl PackageManagerActor {
             "Invalid package name: {package_name}"
         );
 
-        let packages_ext = self.config.packages_ext();
-        let dest_filename = format!("{package_name}.{packages_ext}");
-        let dest = self.downloaded_dir.join(&dest_filename);
+        let dest = self.downloaded_package_path(&package_name)?;
 
         let volume_meta = PackageVolumeMetadata::new(&dest, &package_file, self.config.as_ref())
             .context("Failed to create volume metadata")?;
@@ -542,6 +555,13 @@ impl PackageManagerActor {
         })
     }
 
+    fn downloaded_package_path(&self, package_name: &str) -> anyhow::Result<PathBuf> {
+        let downloaded_dir = self.downloaded_dir.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Package installation requires package.dir.downloaded to be configured")
+        })?;
+        Ok(downloaded_dir.join(format!("{package_name}.{}", self.config.packages_ext())))
+    }
+
     async fn store_package(&self, package_name: String, package: Arc<Package>) {
         log::debug!("Stored package: {package_name}");
         let _ = self.package_store.insert(package_name, package).await;
@@ -550,9 +570,13 @@ impl PackageManagerActor {
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
     #[allow(clippy::unnecessary_debug_formatting)]
     async fn recover_package(&self, package_path: &Path) -> anyhow::Result<Arc<Package>> {
-        let parse_result = parser::parse_package(package_path, self.config.public_key_file_path())
-            .await
-            .with_context(|| format!("Failed to re-parse package at {package_path:?}"))?;
+        let parse_result = parser::parse_package(
+            package_path,
+            self.config.public_key_path(),
+            !self.config.package_verify_disabled(),
+        )
+        .await
+        .with_context(|| format!("Failed to re-parse package at {package_path:?}"))?;
         let package_file = parse_result
             .package_file
             .with_context(|| format!("Failed to re-parse package at {package_path:?}"))?;
@@ -606,10 +630,10 @@ impl PackageManagerActor {
             .context("Failed to communicate with PackageTransactionActor")?
     }
 
-    fn is_bundled_package(&self, path: &Path) -> bool {
-        self.bundled_dir
+    fn is_builtin_package(&self, path: &Path) -> bool {
+        self.builtin_dir
             .as_deref()
-            .is_some_and(|bundled_dir| path.parent() == Some(bundled_dir))
+            .is_some_and(|builtin_dir| path.parent() == Some(builtin_dir))
     }
 
     async fn remove_package(&self, package_name: &str, purge: bool) -> anyhow::Result<()> {
@@ -618,8 +642,8 @@ impl PackageManagerActor {
             let package_path = package.get_package_file_path().to_path_buf();
 
             anyhow::ensure!(
-                !self.is_bundled_package(&package_path),
-                "Cannot remove bundled package '{package_name}': system-provided"
+                !self.is_builtin_package(&package_path),
+                "Cannot remove builtin package '{package_name}': system-provided"
             );
 
             self.teardown(&package, package_name)
@@ -655,34 +679,34 @@ impl PackageManagerActor {
                 .await
                 .context("Failed to remove package file")?;
 
-            if let Some(bundled_path) = self.package_store.get_bundled_path(package_name).await {
+            if let Some(builtin_path) = self.package_store.get_builtin_path(package_name).await {
                 log::info!(
-                    "Restoring bundled package '{package_name}' after removing downloaded override"
+                    "Restoring builtin package '{package_name}' after removing downloaded override"
                 );
-                self.try_recover(package_name, &bundled_path).await;
+                self.try_recover(package_name, &builtin_path).await;
                 if self.package_store.get(package_name).await.is_none() {
                     log::warn!(
-                        "Bundled restoration incomplete for '{package_name}'; \
+                        "Builtin restoration incomplete for '{package_name}'; \
                          package will be restored on next daemon reload"
                     );
                 }
             }
         } else if let Some(broken_info) = self.package_store.get_broken(package_name).await {
             anyhow::ensure!(
-                !self.is_bundled_package(Path::new(&broken_info.package_path)),
-                "Cannot remove broken bundled package '{package_name}': system-provided"
+                !self.is_builtin_package(Path::new(&broken_info.package_path)),
+                "Cannot remove broken builtin package '{package_name}': system-provided"
             );
             self.package_store.remove_broken(package_name).await;
             self.remove_package_file(Path::new(&broken_info.package_path))
                 .await
                 .context("Failed to remove broken package file")?;
 
-            if let Some(bundled_path) = self.package_store.get_bundled_path(package_name).await {
+            if let Some(builtin_path) = self.package_store.get_builtin_path(package_name).await {
                 log::info!(
-                    "Restoring bundled package '{package_name}' \
+                    "Restoring builtin package '{package_name}' \
                      after removing broken downloaded override"
                 );
-                self.try_recover(package_name, &bundled_path).await;
+                self.try_recover(package_name, &builtin_path).await;
             }
         } else {
             return Err(PackageNotFound(package_name.to_owned()).into());
@@ -771,9 +795,13 @@ impl PackageManagerActor {
             .with_context(|| format!("Failed to install package from file: {path:?}"))?;
 
         log::info!("Parsing package file: {path:?}");
-        let parsed_package = parser::parse_package(&path, self.config.public_key_file_path())
-            .await
-            .with_context(|| format!("Failed to parse package from file {path:?}"))?;
+        let parsed_package = parser::parse_package(
+            &path,
+            self.config.public_key_path(),
+            !self.config.package_verify_disabled(),
+        )
+        .await
+        .with_context(|| format!("Failed to parse package from file {path:?}"))?;
 
         let orig_pkg = self.package_store.get(&parsed_package.package_name).await;
         let prepared =
@@ -786,14 +814,14 @@ impl PackageManagerActor {
 
         if let Some(existing) = orig_pkg {
             let installed_path = existing.get_package_file_path().to_path_buf();
-            let is_bundled = self.is_bundled_package(&installed_path);
+            let is_builtin = self.is_builtin_package(&installed_path);
             existing
                 .prepare_upgrade()
                 .await
                 .with_context(|| format!("Cannot prepare upgrade for package({package_name})"))?;
 
-            let mode = if is_bundled {
-                InstallMode::UpgradeBundled
+            let mode = if is_builtin {
+                InstallMode::UpgradeBuiltin
             } else {
                 InstallMode::UpgradeDownloaded {
                     installed_path: installed_path.clone(),
@@ -954,13 +982,13 @@ pub mod message {
 #[cfg(test)]
 impl PackageManagerActor {
     fn new_with_fs_ops(
-        bundled_dir: PathBuf,
+        builtin_dir: PathBuf,
         downloaded_dir: PathBuf,
         fs_ops: impl pkg_file::PackageFileBackend + 'static,
     ) -> Self {
         let package_store = PackageStore::new(HashMapPackageStore::new());
         let config = crate::configuration::tests::test_configuration_with_package_dirs(
-            &bundled_dir,
+            &builtin_dir,
             &downloaded_dir,
         );
         let (volume_manager_ref, _) =
@@ -970,8 +998,8 @@ impl PackageManagerActor {
         let (transaction_actor, _) = rsactor::spawn::<PackageTransactionActor>(actor);
         PackageManagerActor {
             config,
-            bundled_dir: Some(bundled_dir),
-            downloaded_dir,
+            builtin_dir: Some(builtin_dir),
+            downloaded_dir: Some(downloaded_dir),
             package_store,
             transaction_actor,
         }
@@ -1007,6 +1035,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_install_requires_downloaded_dir() {
+        let (_tracker, ops) = tracker_and_ops();
+        let downloaded_dir = tempfile::tempdir().expect("create downloaded directory");
+        let mut package_manager = PackageManagerActor::new_with_fs_ops(
+            PathBuf::from("/nonexistent/builtin"),
+            downloaded_dir.path().to_path_buf(),
+            ops,
+        );
+        package_manager.downloaded_dir = None;
+
+        let error = package_manager
+            .downloaded_package_path("test-package")
+            .expect_err("builtin-only manager must reject package installation");
+        assert!(
+            error
+                .to_string()
+                .contains("Package installation requires package.dir.downloaded to be configured")
+        );
+    }
+
     type CallLog<T> = Arc<Mutex<Vec<T>>>;
 
     fn new_call_log<T>() -> CallLog<T> {
@@ -1014,7 +1063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_allows_empty_bundled_dir() {
+    async fn test_new_allows_empty_builtin_dir() {
         let downloaded_dir = tempfile::tempdir().expect("create downloaded directory");
         let config = crate::configuration::tests::test_configuration_with_package_dirs(
             Path::new(""),
@@ -1023,71 +1072,91 @@ mod tests {
 
         assert!(
             PackageManagerActor::new(config).await.is_ok(),
-            "empty bundled directory should be allowed"
+            "empty builtin directory should be allowed"
         );
     }
 
     #[tokio::test]
-    async fn test_new_rejects_empty_downloaded_dir() {
-        let bundled_dir = tempfile::tempdir().expect("create bundled directory");
+    async fn test_new_allows_empty_downloaded_dir() {
+        let builtin_dir = tempfile::tempdir().expect("create builtin directory");
         let config = crate::configuration::tests::test_configuration_with_package_dirs(
-            bundled_dir.path(),
+            builtin_dir.path(),
             Path::new(""),
         );
 
-        let error = PackageManagerActor::new(config)
-            .await
-            .err()
-            .expect("empty downloaded directory should be rejected");
+        assert!(PackageManagerActor::new(config).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_new_ignores_whitespace_builtin_dir() {
+        let downloaded_dir = tempfile::tempdir().expect("create downloaded directory");
+        let config = crate::configuration::tests::test_configuration_with_package_dirs(
+            Path::new("   "),
+            downloaded_dir.path(),
+        );
+
         assert!(
-            error
-                .to_string()
-                .contains("downloaded_packages_dir must not be empty")
+            PackageManagerActor::new(config).await.is_ok(),
+            "whitespace-only builtin directory should be ignored"
         );
     }
 
     #[tokio::test]
-    async fn test_new_rejects_nonexistent_bundled_dir() {
+    async fn test_new_ignores_whitespace_downloaded_dir() {
+        let builtin_dir = tempfile::tempdir().expect("create builtin directory");
+        let config = crate::configuration::tests::test_configuration_with_package_dirs(
+            builtin_dir.path(),
+            Path::new("   "),
+        );
+
+        assert!(
+            PackageManagerActor::new(config).await.is_ok(),
+            "whitespace-only downloaded directory should be ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_rejects_nonexistent_builtin_dir() {
         let tmp = tempfile::tempdir().expect("create temporary directory");
-        let bundled_dir = tmp.path().join("no_such_dir");
+        let builtin_dir = tmp.path().join("no_such_dir");
         let downloaded_dir = tempfile::tempdir().expect("create downloaded directory");
         let config = crate::configuration::tests::test_configuration_with_package_dirs(
-            &bundled_dir,
+            &builtin_dir,
             downloaded_dir.path(),
         );
 
         assert!(
             PackageManagerActor::new(config).await.is_err(),
-            "nonexistent bundled directory should be rejected"
+            "nonexistent builtin directory should be rejected"
         );
     }
 
     #[tokio::test]
-    async fn test_new_rejects_bundled_file_path() {
-        let bundled_file = tempfile::NamedTempFile::new().expect("create bundled file");
+    async fn test_new_rejects_builtin_file_path() {
+        let builtin_file = tempfile::NamedTempFile::new().expect("create builtin file");
         let downloaded_dir = tempfile::tempdir().expect("create downloaded directory");
         let config = crate::configuration::tests::test_configuration_with_package_dirs(
-            bundled_file.path(),
+            builtin_file.path(),
             downloaded_dir.path(),
         );
 
         let error = PackageManagerActor::new(config)
             .await
             .err()
-            .expect("bundled file path should be rejected");
+            .expect("builtin file path should be rejected");
         assert!(
             error
                 .to_string()
-                .contains("Bundled packages path is not a directory")
+                .contains("Builtin packages path is not a directory")
         );
     }
 
     #[tokio::test]
     async fn test_new_rejects_downloaded_file_path() {
-        let bundled_dir = tempfile::tempdir().expect("create bundled directory");
+        let builtin_dir = tempfile::tempdir().expect("create builtin directory");
         let downloaded_file = tempfile::NamedTempFile::new().expect("create downloaded file");
         let config = crate::configuration::tests::test_configuration_with_package_dirs(
-            bundled_dir.path(),
+            builtin_dir.path(),
             downloaded_file.path(),
         );
 
@@ -1100,6 +1169,21 @@ mod tests {
                 .to_string()
                 .contains("Downloaded packages path is not a directory")
         );
+    }
+
+    #[tokio::test]
+    async fn test_new_rejects_equal_package_sources() {
+        let source_dir = tempfile::tempdir().expect("create package source directory");
+        let config = crate::configuration::tests::test_configuration_with_package_dirs(
+            source_dir.path(),
+            source_dir.path(),
+        );
+
+        let error = PackageManagerActor::new(config)
+            .await
+            .err()
+            .expect("equal package sources should be rejected");
+        assert!(error.to_string().contains("resolve to the same directory"));
     }
 
     #[derive(Clone)]
@@ -1162,7 +1246,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
         (
             PackageManagerActor::new_with_fs_ops(
-                PathBuf::from("/nonexistent/bundled"),
+                PathBuf::from("/nonexistent/builtin"),
                 tmp.path().to_path_buf(),
                 ops,
             ),
@@ -1186,7 +1270,7 @@ mod tests {
         std::fs::write(&internal_source, b"fake").expect("write test file");
 
         let pm = PackageManagerActor::new_with_fs_ops(
-            PathBuf::from("/nonexistent/bundled"),
+            PathBuf::from("/nonexistent/builtin"),
             tmp.path().to_path_buf(),
             ops,
         );
@@ -1200,25 +1284,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_install_rejects_source_inside_bundled_dir() {
+    async fn test_install_rejects_source_inside_builtin_dir() {
         let (_tracker, ops) = tracker_and_ops();
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
-        let bundled = tmp.path().join("bundled");
+        let builtin = tmp.path().join("builtin");
         let downloaded = tmp.path().join("downloaded");
-        std::fs::create_dir_all(&bundled).expect("create bundled dir");
+        std::fs::create_dir_all(&builtin).expect("create builtin dir");
         std::fs::create_dir_all(&downloaded).expect("create downloaded dir");
 
         let pkg_filename = "test-pkg.ssam";
-        let internal_source = bundled.join(pkg_filename);
+        let internal_source = builtin.join(pkg_filename);
         std::fs::write(&internal_source, b"fake").expect("write test file");
 
-        let pm = PackageManagerActor::new_with_fs_ops(bundled.clone(), downloaded, ops);
+        let pm = PackageManagerActor::new_with_fs_ops(builtin.clone(), downloaded, ops);
         let result = pm.ensure_external_source(&internal_source);
         assert!(result.is_err());
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(
-            err_msg.contains("inside the bundled package directory"),
-            "expected source-in-bundled-dir error, got: {err_msg}"
+            err_msg.contains("inside the builtin package directory"),
+            "expected source-in-builtin-dir error, got: {err_msg}"
         );
     }
 
@@ -1258,24 +1342,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_is_bundled_package_detection() {
+    async fn test_is_builtin_package_detection() {
         let (_, ops) = tracker_and_ops();
         let (pm, _tmp) = make_pm(ops);
-        assert!(pm.is_bundled_package(Path::new("/nonexistent/bundled/pkg.ssam")));
-        assert!(!pm.is_bundled_package(Path::new("/tmp/downloaded/pkg.ssam")));
-        assert!(!pm.is_bundled_package(Path::new("/nonexistent/bundled-extra/pkg.ssam")));
+        assert!(pm.is_builtin_package(Path::new("/nonexistent/builtin/pkg.ssam")));
+        assert!(!pm.is_builtin_package(Path::new("/tmp/downloaded/pkg.ssam")));
+        assert!(!pm.is_builtin_package(Path::new("/nonexistent/builtin-extra/pkg.ssam")));
     }
 
     #[tokio::test]
-    async fn test_remove_broken_bundled_package_is_rejected() {
+    async fn test_remove_broken_builtin_package_is_rejected() {
         let (_tracker, ops) = tracker_and_ops();
         let (pm, _tmp) = make_pm(ops);
 
         pm.package_store
             .insert_broken(
-                "broken-bundled-pkg".to_string(),
+                "broken-builtin-pkg".to_string(),
                 BrokenPackageInfo {
-                    package_path: "/nonexistent/bundled/broken-bundled-pkg.ssam".to_string(),
+                    package_path: "/nonexistent/builtin/broken-builtin-pkg.ssam".to_string(),
                     broken_info: libssam::ssam_package::ssam_pkg_info::BrokenReason::new(
                         "parse failure",
                         "mock broken package for testing",
@@ -1284,15 +1368,15 @@ mod tests {
             )
             .await;
 
-        let result = pm.remove_package("broken-bundled-pkg", true).await;
+        let result = pm.remove_package("broken-builtin-pkg", true).await;
         assert!(
             result.is_err(),
-            "should reject removal of broken bundled package"
+            "should reject removal of broken builtin package"
         );
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(
-            err_msg.contains("Cannot remove broken bundled package"),
-            "expected bundled rejection error, got: {err_msg}"
+            err_msg.contains("Cannot remove broken builtin package"),
+            "expected builtin rejection error, got: {err_msg}"
         );
     }
 
@@ -1329,15 +1413,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_broken_downloaded_restores_bundled() {
+    async fn test_remove_broken_downloaded_restores_builtin() {
         let (tracker, ops) = tracker_and_ops();
         let (pm, _tmp) = make_pm(ops);
 
         let broken_dl_path = "/tmp/downloaded/shared-pkg.ssam";
-        let bundled_path = PathBuf::from("/nonexistent/bundled/shared-pkg.ssam");
+        let builtin_path = PathBuf::from("/nonexistent/builtin/shared-pkg.ssam");
 
         pm.package_store
-            .insert_bundled_path("shared-pkg".to_string(), bundled_path.clone())
+            .insert_builtin_path("shared-pkg".to_string(), builtin_path.clone())
             .await;
 
         pm.package_store
@@ -1370,10 +1454,10 @@ mod tests {
 
         assert!(
             pm.package_store
-                .get_bundled_path("shared-pkg")
+                .get_builtin_path("shared-pkg")
                 .await
                 .is_some(),
-            "bundled_path should persist after removing the downloaded override"
+            "builtin_path should persist after removing the downloaded override"
         );
     }
 
@@ -1382,11 +1466,11 @@ mod tests {
         use tempfile::TempDir;
 
         async fn setup_package_manager() -> (PackageManager, TempDir, TempDir) {
-            let bundled_dir = TempDir::new().expect("bundled temp dir");
+            let builtin_dir = TempDir::new().expect("builtin temp dir");
             let downloaded_dir = TempDir::new().expect("downloaded temp dir");
 
             let config = crate::configuration::tests::test_configuration_with_package_dirs(
-                bundled_dir.path(),
+                builtin_dir.path(),
                 downloaded_dir.path(),
             );
             let actor = PackageManagerActor::new(config)
@@ -1396,7 +1480,7 @@ mod tests {
             let (actor_ref, _) = rsactor::spawn::<PackageManagerActor>(actor);
             let package_manager = PackageManager::new(actor_ref);
 
-            (package_manager, bundled_dir, downloaded_dir)
+            (package_manager, builtin_dir, downloaded_dir)
         }
 
         #[tokio::test]

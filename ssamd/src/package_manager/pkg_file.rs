@@ -133,7 +133,7 @@ pub(crate) mod message {
 
     pub(crate) enum InstallMode {
         Fresh,
-        UpgradeBundled,
+        UpgradeBuiltin,
         UpgradeDownloaded { installed_path: PathBuf },
     }
 
@@ -245,7 +245,7 @@ impl PackageTransactionActor {
                     format!("File rollback failed (rename {bp:?} → {installed_path:?})")
                 })
             }
-            InstallMode::UpgradeBundled | InstallMode::Fresh => self
+            InstallMode::UpgradeBuiltin | InstallMode::Fresh => self
                 .remove_file_if_exists(dest)
                 .with_context(|| format!("File rollback failed (remove {dest:?})"))
                 .map(|_| ()),
@@ -302,7 +302,7 @@ impl PackageTransactionActor {
         let data_backup_path = (remove_data
             && matches!(
                 mode,
-                InstallMode::UpgradeBundled | InstallMode::UpgradeDownloaded { .. }
+                InstallMode::UpgradeBuiltin | InstallMode::UpgradeDownloaded { .. }
             ))
         .then(|| {
             Self::backup_data_dir(&data_dir_path).inspect_err(|_| {
@@ -390,7 +390,7 @@ mod tests {
     use super::PackageFileBackend;
     use super::message::{Install, InstallMode};
     use super::*;
-    use crate::configuration::IntegrityConfig;
+    use crate::configuration::{DebugConfig, PackageConfig, PackageDirConfig};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -500,19 +500,22 @@ service_type = "simple"
         let dest = PathBuf::from("/tmp/dest.ssam");
         let mock_pkg = create_test_volume_pkg();
         let config = Configuration::new(
-            crate::configuration::Common {
-                bundled_packages_dir: String::new(),
-                downloaded_packages_dir: String::new(),
-                packages_data_root: "/tmp".to_owned(),
-                packages_overlayfs_root: String::new(),
-                packages_mnt_root: "/test/pkgfs".to_owned(),
-                public_key_file_path: String::new(),
-                packages_cgroup: String::new(),
-                packages_ext: "ssam".to_owned(),
+            PackageConfig {
+                extension: "ssam".to_owned(),
+                cgroup: String::new(),
+                public_key: String::new(),
+                dir: PackageDirConfig {
+                    builtin: String::new(),
+                    downloaded: String::new(),
+                    oci_bundle_root: "/test/pkgfs".to_owned(),
+                    data: "/tmp".to_owned(),
+                },
             },
             None,
-            IntegrityConfig {
-                disable_runtime_integrity: false,
+            DebugConfig {
+                pkgfs_overlay_dir: String::new(),
+                disable_pkgfs_integrity: false,
+                disable_package_verify: true,
             },
         );
         let volume_meta =
@@ -610,7 +613,7 @@ service_type = "simple"
     }
 
     #[tokio::test]
-    async fn test_copy_failure_rolls_back_non_bundled_backup() {
+    async fn test_copy_failure_rolls_back_non_builtin_backup() {
         let ops = MockTrackingPackageFile::new().with_copy_fails();
         let renames = Arc::clone(&ops.renames);
         let actor_ref = spawn_actor(ops);
@@ -640,7 +643,7 @@ service_type = "simple"
     }
 
     #[tokio::test]
-    async fn test_copy_failure_removes_dest_for_bundled_backup() {
+    async fn test_copy_failure_removes_dest_for_builtin_backup() {
         let ops = MockTrackingPackageFile::new().with_copy_fails();
         let removals = Arc::clone(&ops.removals);
         let renames = Arc::clone(&ops.renames);
@@ -652,7 +655,7 @@ service_type = "simple"
             .ask(Install {
                 info,
                 remove_data: false,
-                mode: InstallMode::UpgradeBundled,
+                mode: InstallMode::UpgradeBuiltin,
             })
             .await
             .expect("actor communication");
@@ -660,7 +663,7 @@ service_type = "simple"
         assert!(result.is_err());
 
         let renames = renames.lock().unwrap();
-        assert!(renames.is_empty(), "bundled backup should not rename");
+        assert!(renames.is_empty(), "builtin backup should not rename");
 
         let removals = removals.lock().unwrap();
         assert_eq!(removals.len(), 1);
@@ -709,7 +712,7 @@ service_type = "simple"
     }
 
     #[tokio::test]
-    async fn test_purge_failure_rolls_back_non_bundled_backup() {
+    async fn test_purge_failure_rolls_back_non_builtin_backup() {
         let ops = MockTrackingPackageFile::new();
         let renames = Arc::clone(&ops.renames);
         let actor_ref = spawn_actor_with_dead_volume_manager(ops);
@@ -739,7 +742,7 @@ service_type = "simple"
     }
 
     #[tokio::test]
-    async fn test_acquire_failure_rolls_back_non_bundled_backup() {
+    async fn test_acquire_failure_rolls_back_non_builtin_backup() {
         let ops = MockTrackingPackageFile::new();
         let renames = Arc::clone(&ops.renames);
         let actor_ref = spawn_actor_with_dead_volume_manager(ops);

@@ -299,10 +299,10 @@ $ ssam-wrap --private-key ~/ssam/keys/private_key.pem \
 
 ### Step 8 — Install and run
 
-생성된 SSAM 패키지를 `ssamd`가 실행될 호스트 시스템의 [bundled 패키지 디렉터리](../reference/daemon-config.ko.md#bundled_packages_dir)로 복사한 뒤 `ssamd`를 재시작합니다:
+생성된 SSAM 패키지를 `ssamd`가 실행될 호스트 시스템의 [builtin package 디렉터리](../reference/daemon-config.ko.md#builtin)로 복사한 뒤 `ssamd`를 재시작합니다:
 
 ```console
-# cp myapp.ssam /var/lib/ssamd/bundled/
+# cp myapp.ssam /var/lib/ssamd/builtin/
 # systemctl restart ssamd
 ```
 

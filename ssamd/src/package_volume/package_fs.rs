@@ -30,23 +30,29 @@ impl PackageFsMetadata {
     pub(super) fn new_with_roots<F: PackageFileInfo + ?Sized>(
         path: impl AsRef<Path>,
         package_file: &F,
-        mnt_root: &str,
-        packages_overlayfs_root: &str,
+        oci_bundle_root: &str,
+        pkgfs_overlay_root: &str,
         dm_verity_disabled: bool,
     ) -> anyhow::Result<Self> {
         let package_path = path.as_ref().to_path_buf();
         let pkgfs_info = package_file.pkgfs()?;
         let package_name = package_file.get_package_name();
+        let version = package_file.get_package_version();
         anyhow::ensure!(
             utils::is_safe_path_segment(package_name),
             "Unsafe package name rejected: {package_name}"
         );
-        let mount_point = Path::new(mnt_root).join(package_name);
+        anyhow::ensure!(
+            utils::is_safe_path_segment(version),
+            "Unsafe package version rejected: {version}"
+        );
+        let bundle_name = format!("{package_name}_{version}");
+        let mount_point = Path::new(oci_bundle_root).join(bundle_name).join("pkgfs");
 
-        let overlayfs_root = if packages_overlayfs_root.is_empty() {
+        let overlayfs_root = if pkgfs_overlay_root.is_empty() {
             PathBuf::new()
         } else {
-            Path::new(packages_overlayfs_root).join(package_name)
+            Path::new(pkgfs_overlay_root).join(package_name)
         };
 
         let fstype = pkgfs_info.pkgfs_type();
@@ -179,7 +185,11 @@ pub(crate) mod tests {
             path: impl AsRef<Path>,
             package_file: &F,
         ) -> anyhow::Result<Self> {
-            Self::new_with_roots(path, package_file, "/test/pkgfs", "", false)
+            let path = path.as_ref();
+            let root = path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("test bundle root is not valid UTF-8"))?;
+            Self::new_with_roots(path, package_file, root, "", false)
         }
     }
 
@@ -270,6 +280,7 @@ pub(crate) mod tests {
 
         pub(crate) struct MockPackageFile {
             pub(crate) package_name: String,
+            pub(crate) package_version: String,
             pub(crate) pkgfs: PackageFilesystem,
         }
 
@@ -293,6 +304,10 @@ pub(crate) mod tests {
 
             fn get_package_name(&self) -> &str {
                 self.get_package_name()
+            }
+
+            fn get_package_version(&self) -> &str {
+                &self.package_version
             }
 
             fn get_container_data_dirs(&self) -> Option<&String> {
@@ -320,6 +335,7 @@ pub(crate) mod tests {
         pub(crate) fn create_test_ssam_package_file_without_config() -> MockPackageFile {
             MockPackageFile {
                 package_name: "test-package".to_string(),
+                package_version: "1.0.0".to_string(),
                 pkgfs: PackageFilesystem::new(
                     1024,
                     8192 + 2048,
@@ -341,10 +357,12 @@ pub(crate) mod tests {
 
             // Verify the basic fields
             assert_eq!(pkgfs_meta.path, test_path);
-            let mnt_root = "/test/pkgfs";
+            let oci_bundle_root = "/test/package/path";
             assert_eq!(
                 pkgfs_meta.mount_point,
-                Path::new(mnt_root).join("test-package")
+                Path::new(oci_bundle_root)
+                    .join("test-package_1.0.0")
+                    .join("pkgfs")
             );
 
             assert_eq!(format!("{}", pkgfs_meta.packagefs_info.fstype), "ext4");
@@ -463,21 +481,25 @@ pub(crate) mod tests {
         }
 
         #[test]
-        fn test_package_fs_metadata_with_special_characters_in_name() {
+        fn test_package_fs_metadata_separates_hyphenated_name_and_version() {
             let test_path = PathBuf::from("/test/package/path");
 
-            let mut pkg_file = create_test_ssam_package_file();
-            pkg_file.package_name = "test-package_v1.0.1".to_string();
+            let mnt_root = "/test/package/path";
+            for (package_name, package_version, bundle_name) in [
+                ("abc-1.0.0", "1.0.0", "abc-1.0.0_1.0.0"),
+                ("abc", "1.0.0-rc.1", "abc_1.0.0-rc.1"),
+            ] {
+                let mut pkg_file = create_test_ssam_package_file();
+                pkg_file.package_name = package_name.to_string();
+                pkg_file.package_version = package_version.to_string();
 
-            let result = PackageFsMetadata::new_for_test(&test_path, &pkg_file);
-            assert!(result.is_ok());
-
-            let pkgfs_meta = result.unwrap();
-            let mnt_root = "/test/pkgfs";
-            assert_eq!(
-                pkgfs_meta.mount_point,
-                Path::new(mnt_root).join("test-package_v1.0.1")
-            );
+                let pkgfs_meta = PackageFsMetadata::new_for_test(&test_path, &pkg_file)
+                    .expect("package filesystem metadata should be created");
+                assert_eq!(
+                    pkgfs_meta.mount_point,
+                    Path::new(mnt_root).join(bundle_name).join("pkgfs")
+                );
+            }
         }
     }
 

@@ -102,7 +102,7 @@ Docker의 `hello-world` 이미지를 활용하는 예시입니다.
 `ssam-wrap`은 기본적으로 `arm64` 이미지를 사용합니다 — x86-64 개발 머신이라면 [`--src-oci-arch amd64`](docs/reference/ssam-wrap.ko.md#options)를 설정하세요.
 
 ```console
-$ mkdir -p ~/ssam/{bundled,downloaded,mnt,data}
+$ mkdir -p ~/ssam/{builtin,downloaded,oci-bundle,data}
 $ mkdir -p ~/ssam/docker-helloworld && cd ~/ssam/docker-helloworld
 $ ssam-wrap --prepare docker-helloworld --pkgfs-src docker://docker.io/hello-world:latest .
 ```
@@ -123,7 +123,7 @@ Docker 이미지로부터 생성된 패키지 파일시스템도 필요하면 �
 $ mkdir -p pkgfs/etc
 $ cp /etc/resolv.conf pkgfs/etc/
 $ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output docker-helloworld.ssam .
-$ cp docker-helloworld.ssam ~/ssam/bundled/
+$ cp docker-helloworld.ssam ~/ssam/builtin/
 ```
 
 **처음부터 빌드**
@@ -162,7 +162,7 @@ $ cp app/target/x86_64-unknown-linux-musl/release/helloworld pkgfs/
 
 ```console
 $ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output helloworld.ssam .
-$ cp helloworld.ssam ~/ssam/bundled/
+$ cp helloworld.ssam ~/ssam/builtin/
 ```
 
 > 📖 패키지 생성에 대한 자세한 사항은 [SSAM 패키지 만들기](docs/guides/wrapping-a-ssam.ko.md)를 참고해 주세요.
@@ -170,14 +170,14 @@ $ cp helloworld.ssam ~/ssam/bundled/
 ### 4. Configure and start the daemon
 
 SSAM 데몬 실행파일 — `ssamd`는 동일한 위치에 존재하는 설정파일 — `ssamd.toml`을 읽어들여서 동작합니다.
-그러므로 데몬 실행파일이 존재하는 위치에 설정파일 생성도구를 활용하여 파일을 생성한 뒤 실행합니다(실행에 root 권한이 필요합니다).
+그러므로 데몬 실행파일이 존재하는 위치에 설정파일 생성도구를 활용하여 파일을 생성한 뒤 root 권한으로 실행합니다.
 
 ```console
 $ "$SSAM_REPO"/ssamd/releasedata/gen_ssamd_conf.sh \
       --output-path ~/.cargo/bin \
-      --bundled-pkgs-dir ~/ssam/bundled \
+      --builtin-pkgs-dir ~/ssam/builtin \
       --downloaded-pkgs-dir ~/ssam/downloaded \
-      --pkgs-mnt-root ~/ssam/mnt \
+      --oci-bundle-dir ~/ssam/oci-bundle \
       --pkgs-data-root ~/ssam/data \
       --public-key-file ~/ssam/keys/public_key.pem
 $ sudo ~/.cargo/bin/ssamd

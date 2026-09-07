@@ -117,7 +117,7 @@ remain_after_exit = false       # 선택
 - **타입:** string(콜론으로 구분된 경로) · **선택**
 - 컨테이너 안에서 **읽기·쓰기가 필요한 디렉터리**(컨테이너 절대 경로)들을 `:`로 구분해 나열합니다.
   패키지 파일시스템 자체는 읽기 전용이므로, 앱에서 쓰기가 되어야 하는 경로는 여기에 선언해야 합니다.
-- `ssamd`는 [`packages_data_root`](daemon-config.ko.md#packages_data_root) 아래에 이 경로들을 영속 데이터 디렉터리로 만들어 컨테이너에 bind 마운트하고, 용량은 [`storage_limit`](#storage_limit)으로 제한합니다.
+- `ssamd`는 [`package.dir.data`](daemon-config.ko.md#data) 아래에 이 경로들을 영속 데이터 디렉터리로 만들어 컨테이너에 bind 마운트하고, 용량은 [`storage_limit`](#storage_limit)으로 제한합니다.
   확보·마운트의 상세 동작은 [Execution](../architecture/execution.ko.md#the-execution-pipeline)을 참고하세요.
 
 ```toml

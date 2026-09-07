@@ -152,8 +152,13 @@ flowchart LR
   style MD fill:#eef1f5,stroke:#2563eb,stroke-width:3px,color:#334155
 ```
 
-- *dm-verity* 는 기본적으로 활성화되며 `[integrity].disable_runtime_integrity` 설정으로 비활성화할 수 있습니다.
-  비활성화하면 블록 수준의 런타임 검증은 제거되지만 패키지 서명 검증은 계속 적용됩니다.
+- *dm-verity* 는 기본적으로 활성화되며
+  [`debug.disable_pkgfs_integrity`](../reference/daemon-config.ko.md#disable_pkgfs_integrity) 설정으로 비활성화할 수 있습니다.
+  비활성화하면 블록 수준의 런타임 검증이 제거됩니다. 이 설정은 package signature
+  verification과 독립적입니다.
+- [`debug.disable_package_verify`](../reference/daemon-config.ko.md#disable_package_verify)의 기본값은 `false`이며 개발 전용 예외입니다.
+  `true`로 설정하면 `ssamd`가 RSA signature verification과 public-key file 검사를
+  생략하므로 public key 없이도 패키지를 처리할 수 있습니다.
 - 서명된 `metadata` 에는 *dm-verity* **파라미터 전체**(루트 해시 포함)가 담깁니다.
 - 로드 시점에 `ssamd`는 그 서명된 파라미터로 *dm-verity* 타깃을 구성합니다.
   *dm-verity* 의 특성상 **읽기마다 모든 블록이 검증** 되어, 변조는 로드 시점뿐 아니라 **런타임 내내** 감지됩니다.
@@ -176,8 +181,8 @@ flowchart LR
 
 - `ssamd`는 고정된 Linux abstract Unix domain socket `@ssamd`를 통해 [Remocon gRPC 제어 API](../reference/remocon-rpc.ko.md)를 노출하므로 동일 호스트의 동일 network namespace에서 실행되는 process만 접근할 수 있습니다.
 - abstract socket은 파일시스템 권한을 통한 접근 제한이 불가능하므로, 이름을 아는 동일 network namespace 내 어떤 process라도 연결을 시도할 수 있습니다.
-- 반면, `ssamd`는 peer의 effective GID가 데몬의 effective GID와 일치하거나 [설정된 허용 GID 목록](../reference/daemon-config.ko.md#allowed_gids)에 포함되는 요청만 허용합니다.
-- **허용된 클라이언트로부터의 설치 RPC라 할지라도 호출자 권한 검증과 별도로 패키지 진위 검증이 적용됩니다:** 모든 설치 요청은 패키지 서명·무결성 검증을 통과해야 하며, 검증에 실패한 패키지는 거부되어 설정·실행되지 않습니다.
+- 반면, `ssamd`는 peer의 effective GID가 데몬의 effective GID와 일치하거나 [설정된 허용 GID 목록](../reference/daemon-config.ko.md#rpc)에 포함되는 요청만 허용합니다.
+- **허용된 클라이언트로부터의 설치 RPC라 할지라도 호출자 권한 검증과 별도로 패키지 진위 검증이 적용됩니다:** 기본 검증 설정에서는 모든 설치 요청이 패키지 서명·무결성 검증을 통과해야 하며, 검증에 실패한 패키지는 거부되어 설정·실행되지 않습니다. [`debug.disable_package_verify`](../reference/daemon-config.ko.md#disable_package_verify) = `true`는 RSA signature verification을 생략하는 개발 전용 예외입니다.
 
 ---
 

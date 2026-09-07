@@ -20,7 +20,7 @@ SSAM으로 컨테이너를 실행할 때 컨테이너의 **네트워크** 와 **
    - [No networking](#no-networking)
    - [Bridge networking](#bridge-networking)
    - [Using predefined networking](#using-predefined-networking)
-2. [Container cgroup](#container-cgroup-packages_cgroup)
+2. [Container cgroup](#container-cgroup-packagecgroup)
 3. [Storage quota](#storage-quota-storage_limit)
 
 ---
@@ -91,7 +91,7 @@ size = 29                       # 브리지별 서브넷 prefix (기본: 29)
 
 브리지 모드는 호스트의 `bridge` / `veth` 커널 기능도 필요합니다.
 
-> 📖 전체 키는 [`[network]` 레퍼런스](../reference/daemon-config.ko.md#network), 디바이스에서 브리지를 활성화·적용하는 운영 절차는 [SSAM 실행하기 → Networking](serving-ssam.ko.md#networking)을 참고하세요.
+> 📖 전체 키는 [`[network.bridge]` 레퍼런스](../reference/daemon-config.ko.md#networkbridge), 디바이스에서 브리지를 활성화·적용하는 운영 절차는 [SSAM 실행하기 → Networking](serving-ssam.ko.md#networking)을 참고하세요.
 
 #### 개별 패키지 설정
 
@@ -131,14 +131,14 @@ mode = "/var/run/netns/my-netns"
 
 ---
 
-## Container cgroup (`packages_cgroup`)
+## Container cgroup (`package.cgroup`)
 
-`ssamd.toml`의 [`packages_cgroup`](../reference/daemon-config.ko.md#packages_cgroup)은 모든 패키지 컨테이너가 놓일 **root cgroup** 을 지정합니다.
+`ssamd.toml`의 [`package.cgroup`](../reference/daemon-config.ko.md#cgroup)은 모든 패키지 컨테이너가 놓일 **root cgroup** 을 지정합니다.
 
 - **설정하지 않으면(기본설정)** `ssamd`는 root cgroup으로 호스트의 `system.slice`를 사용합니다.
 - **값을 지정하면** 그 경로를 root cgroup으로 사용합니다.
 
-root cgroup이 정해지면 `ssamd`는 각 컨테이너 *OCI Runtime config* 의 `cgroupsPath`를 `<packages_cgroup>/<패키지명>.service/container`로 지정합니다.
+root cgroup이 정해지면 `ssamd`는 각 컨테이너 *OCI Runtime config* 의 `cgroupsPath`를 `<package.cgroup>/<패키지명>.service/container`로 지정합니다.
 이를 통해 모든 패키지 컨테이너가 함께 사용하는 자원의 상한을 제한할 수 있습니다.
 지정한 root cgroup은 **`ssamd` 시작 전에 존재해야** 하며, `ssamd`는 이를 생성하지 않습니다(없으면 데몬이 중단됩니다).
 
@@ -149,7 +149,7 @@ root cgroup이 정해지면 `ssamd`는 각 컨테이너 *OCI Runtime config* 의
 
 root cgroup으로 *systemd* **slice unit** 을 사용할 수 있습니다.
 예를 들어, root cgroup으로 쓸 slice를 `ssam.slice`로 한 경우:
-- `ssamd.toml`에 `packages_cgroup = "ssam.slice"`로 지정
+- `ssamd.toml`의 `[package]` 아래에 `cgroup = "ssam.slice"`로 지정
 - `ssamd`는 각 컨테이너별 *systemd* service unit(`<패키지명>.service`)의 `Slice=`를 `ssam.slice`로 설정
 - `ssamd`는 각 컨테이너별 *OCI Runtime config* 의 `cgroupsPath`를 `ssam.slice/<패키지명>.service/container`로 설정
 
@@ -170,7 +170,7 @@ EOF
 
 root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다.
 예를 들어, root cgroup으로 쓸 이름을 `ssam`으로 한 경우:
-- `ssamd.toml`에 `packages_cgroup = "ssam"`으로 지정
+- `ssamd.toml`의 `[package]` 아래에 `cgroup = "ssam"`으로 지정
 - `ssamd`는 각 컨테이너별 *OCI Runtime config* 의 `cgroupsPath`를 `ssam/<패키지명>.service/container`로 설정
 - `ssamd`는 이 값이 *systemd* slice가 아니므로 각 컨테이너별 *systemd* service unit에 `Slice=`를 설정하지 않고 경고 로그를 출력
 
@@ -188,7 +188,7 @@ root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다.
 
 패키지가 [`container.storage_limit`](../reference/package-config.ko.md#storage_limit)을 선언하면 `ssamd`는 그 패키지의 데이터 디렉터리에 용량 상한을 적용합니다.
 `ssamd`는 이를 *ext4* **project quota** 로 구현합니다.
-이를 사용하려면 **호스트 시스템의 커널 설정** 과 **[`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root)로 설정한 파일시스템** 이 각각 다음을 갖춰야 합니다.
+이를 사용하려면 **호스트 시스템의 커널 설정** 과 **[`package.dir.data`](../reference/daemon-config.ko.md#data)로 설정한 파일시스템** 이 각각 다음을 갖춰야 합니다.
 
 **커널 설정**
 

@@ -71,7 +71,6 @@ pub(crate) mod oci {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
-    use crate::configuration;
     use anyhow::Context;
     use libssam::container::NetworkMode;
     use libssam::ssam_package::PackageSeccompPolicy;
@@ -84,21 +83,48 @@ pub(crate) mod oci {
 
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
     #[allow(clippy::unnecessary_debug_formatting)]
-    fn create_bundle_dir(dir_name: &str) -> anyhow::Result<TempDir> {
+    fn create_bundle_dir(
+        mount_point: &Path,
+        package_name: &str,
+        version: &str,
+    ) -> anyhow::Result<(PathBuf, Option<TempDir>)> {
+        let dir_name = format!("{package_name}_{version}");
         anyhow::ensure!(
-            crate::utils::is_safe_path_segment(dir_name),
+            crate::utils::is_safe_path_segment(&dir_name),
             "Unsafe bundle directory name rejected: {dir_name:?}"
         );
-        let root = configuration::runtime_bundle_root();
-        remove_existing_bundle(&root.join(dir_name))?;
+        let (root, bundle_path) = if mount_point.file_name().is_some_and(|name| name == "pkgfs") {
+            let bundle_path = mount_point
+                .parent()
+                .context("Package filesystem mount path has no bundle directory")?;
+            let root = bundle_path
+                .parent()
+                .context("Package bundle path has no configured root")?;
+            if bundle_path.file_name().and_then(|name| name.to_str()) == Some(dir_name.as_str()) {
+                (root.to_path_buf(), bundle_path.to_path_buf())
+            } else {
+                (root.to_path_buf(), root.join(&dir_name))
+            }
+        } else {
+            let root = mount_point
+                .parent()
+                .context("Package mount path has no parent directory")?;
+            (root.to_path_buf(), root.join(&dir_name))
+        };
+        if crate::mount::is_exact_mount(mount_point) {
+            return Ok((bundle_path, None));
+        }
+        fs::create_dir_all(&root)
+            .with_context(|| format!("Failed to create bundle root {root:?}"))?;
+        remove_existing_bundle(&bundle_path)?;
 
-        // rand_bytes(0) keeps the fixed <pkg>-<version> name.
-        tempfile::Builder::new()
-            .prefix(dir_name)
+        let temp_dir = tempfile::Builder::new()
+            .prefix(&dir_name)
             .rand_bytes(0)
             .permissions(fs::Permissions::from_mode(0o755))
             .tempdir_in(&root)
-            .with_context(|| format!("Failed to create bundle directory in {root:?}"))
+            .with_context(|| format!("Failed to create bundle directory in {root:?}"))?;
+        Ok((temp_dir.path().to_path_buf(), Some(temp_dir)))
     }
 
     // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
@@ -166,7 +192,8 @@ pub(crate) mod oci {
 
     #[derive(Debug)]
     pub(crate) struct TransientRuntimeConfig {
-        bundle_path: TempDir,
+        bundle_path: PathBuf,
+        _temp_dir: Option<TempDir>,
     }
 
     impl TransientRuntimeConfig {
@@ -195,7 +222,7 @@ pub(crate) mod oci {
                 bridge_netns_path,
             } = spec;
 
-            let bundle_path = create_bundle_dir(&format!("{package_name}_{version}"))?;
+            let (bundle_path, temp_dir) = create_bundle_dir(&mount_point, &package_name, &version)?;
 
             // just absolutize the rootfs path. the rootfs might not be mounted yet.
             let rootfs_path = std::path::absolute(&mount_point).with_context(|| {
@@ -262,7 +289,7 @@ pub(crate) mod oci {
                 }
             }
 
-            let new_conf_path = bundle_path.path().join("config.json");
+            let new_conf_path = bundle_path.join("config.json");
 
             oci_runtime_conf
                 .save_pretty(new_conf_path.as_path())
@@ -271,7 +298,10 @@ pub(crate) mod oci {
                     new_conf_path.display()
                 ))?;
 
-            Ok(Self { bundle_path })
+            Ok(Self {
+                bundle_path,
+                _temp_dir: temp_dir,
+            })
         }
 
         // TODO: ssam-wrap will validate that runtime.json does not contain a
@@ -480,7 +510,20 @@ pub(crate) mod oci {
         }
 
         pub(crate) fn dir_path(&self) -> &Path {
-            self.bundle_path.path()
+            &self.bundle_path
+        }
+
+        pub(crate) fn cleanup(&self) -> anyhow::Result<()> {
+            match fs::remove_dir_all(&self.bundle_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).with_context(|| {
+                    format!(
+                        "Failed to remove bundle directory {}",
+                        self.bundle_path.display()
+                    )
+                }),
+            }
         }
     }
 
@@ -649,6 +692,7 @@ pub(crate) trait CommandExecutorBackend: Send + Sync + std::fmt::Debug {
     async fn start(&self) -> anyhow::Result<ExecutionResult>;
     async fn stop(&self) -> anyhow::Result<ExecutionResult>;
     async fn teardown(&self) -> anyhow::Result<()>;
+    async fn cleanup(&self) -> anyhow::Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -656,6 +700,9 @@ pub(crate) trait ExecuteCommand: Send + Sync + std::fmt::Debug {
     fn get_start_cmd(&self) -> anyhow::Result<Vec<String>>;
     fn get_stop_cmd(&self) -> anyhow::Result<Vec<String>>;
     async fn prepare(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn cleanup(&self) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -717,8 +764,8 @@ pub(crate) mod container {
                 None
             };
 
-            // Deref coercion: &PackageRuntimeConfig → &Box<Spec> → &Spec
-            let oci_runtime_spec: &oci_spec::runtime::Spec = package_file.runtime_config();
+            // Deref coercion: &OciRuntimeConfig → &Box<Spec> → &Spec
+            let oci_runtime_spec: &oci_spec::runtime::Spec = package_file.oci_runtime_config();
 
             let spec = oci::ContainerBundleSpec {
                 oci_template: oci_runtime_spec.clone(),
@@ -753,6 +800,13 @@ pub(crate) mod container {
                         .context("join container bundle preparation task")?
                 })
                 .await?;
+            Ok(())
+        }
+
+        async fn cleanup(&self) -> anyhow::Result<()> {
+            if let Some(runtime_config) = self.runtime_config.get() {
+                runtime_config.cleanup()?;
+            }
             Ok(())
         }
 
@@ -803,21 +857,6 @@ mod tests {
     // Helper to create a test seccomp policy
     fn create_test_seccomp_policy() -> PackageSeccompPolicy {
         PackageSeccompPolicy::default_policy()
-    }
-
-    // Daemon::setup_runtime_environ creates the bundle root at startup; tests
-    // construct configs directly and bypass startup, so create it here once.
-    fn ensure_test_bundle_root() {
-        use crate::configuration;
-        use std::os::unix::fs::DirBuilderExt;
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            fs::DirBuilder::new()
-                .mode(0o755)
-                .recursive(true)
-                .create(configuration::runtime_bundle_root())
-                .expect("Failed to create test runtime bundle root");
-        });
     }
 
     // Helper to create a real PackageVolume for testing using the package_volume test infrastructure
@@ -881,7 +920,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
 
         // Create a real PackageVolume using the same infrastructure as package_volume tests
         let package_volume = create_test_package_volume_real(&mount_point)
@@ -944,7 +982,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
 
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
@@ -977,7 +1014,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
@@ -997,9 +1033,7 @@ mod tests {
 
         assert_eq!(
             config.dir_path(),
-            std::env::temp_dir()
-                .join(".ssamd")
-                .join("test-package-fixed-dir_1.0.0")
+            mount_point.join("test-package-fixed-dir_1.0.0")
         );
         assert!(
             config.dir_path().join("config.json").exists(),
@@ -1010,18 +1044,14 @@ mod tests {
     #[test]
     fn test_transient_runtime_config_removes_existing_bundle_dir() {
         let package_name = "test-package-stale-dir";
-        let bundle_path = std::env::temp_dir()
-            .join(".ssamd")
-            .join(format!("{package_name}_1.0.0"));
-        fs::create_dir_all(&bundle_path).expect("Failed to create stale bundle dir");
-        let stale_file = bundle_path.join("stale");
-        fs::write(&stale_file, "stale").expect("Failed to write stale file");
-
         let oci_spec = create_test_oci_spec();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
+        let bundle_path = mount_point.join(format!("{package_name}_1.0.0"));
+        fs::create_dir_all(&bundle_path).expect("Failed to create stale bundle dir");
+        let stale_file = bundle_path.join("stale");
+        fs::write(&stale_file, "stale").expect("Failed to write stale file");
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
@@ -1057,7 +1087,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
@@ -1075,7 +1104,6 @@ mod tests {
         })
         .expect("TransientRuntimeConfig::new should succeed");
 
-        let root = std::env::temp_dir().join(".ssamd");
         let bundle_path = config.dir_path().to_path_buf();
         assert!(bundle_path.exists(), "bundle dir should exist before drop");
 
@@ -1085,7 +1113,6 @@ mod tests {
             !bundle_path.exists(),
             "bundle dir should be removed on drop"
         );
-        assert!(root.exists(), "runtime bundle root should be preserved");
     }
 
     #[test]
@@ -1094,7 +1121,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
@@ -1150,7 +1176,6 @@ mod tests {
         let mount_point = temp_dir.path().join("mount");
         let data_root = temp_dir.path().join("data");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
         fs::create_dir_all(&data_root).expect("Failed to create data root");
 
         // Create a real PackageVolume with data directory
@@ -1207,7 +1232,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
 
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
@@ -1256,7 +1280,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        ensure_test_bundle_root();
 
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
@@ -1372,7 +1395,6 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-            ensure_test_bundle_root();
 
             let spec = ContainerBundleSpec {
                 oci_template: oci_spec,
@@ -1851,7 +1873,6 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -1906,7 +1927,6 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -1954,7 +1974,6 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -2005,7 +2024,6 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
@@ -2067,7 +2085,6 @@ mod tests {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-            ensure_test_bundle_root();
 
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");

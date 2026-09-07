@@ -26,6 +26,7 @@ unset GEN_SERVICE_UNIT
 # generator, except for required feature fields whose empty value explicitly
 # disables that feature.
 declare -A SSAMD_CONFIG
+SSAMD_CONFIG=()
 
 config_is_set() {
     [[ -n "${SSAMD_CONFIG[$1]+set}" ]]
@@ -116,19 +117,22 @@ Arguments for SSAMD configuration (All paths below are on the target device)
 
   Package configuration:
     Required:
-      --pkgs-mnt-root       PATH  Package filesystem mount root directory.
-      --downloaded-pkgs-dir PATH  Downloaded package directory.
-      --pkgs-data-root      PATH  Package data root directory.
-      --public-key-file     PATH  Public key file for package verification.
+      --oci-bundle-dir       PATH  Absolute OCI bundle root directory.
+      --pkgs-data-root       PATH  Package data root directory.
 
     Optional:
-      --bundled-pkgs-dir    PATH  Bundled (read-only) package directory.
-                                  Omit for no bundled packages.
-      --pkgs-overlayfs-root PATH  OverlayFS root directory.
+      --builtin-pkgs-dir     PATH  Builtin (read-only) package directory.
+                                  Omit for no builtin packages.
+      --downloaded-pkgs-dir  PATH  Downloaded package directory.
+                                  Omit for no downloaded packages.
+                                  At least one package directory is required.
+      --pkgs-overlayfs-root  PATH  OverlayFS root directory.
                                   Omit for disabled OverlayFS.
-      --pkgs-cgroup         NAME  Cgroup name.
+      --pkgs-cgroup          NAME  Cgroup name.
                                   Omit for default cgroup (system.slice).
-      --packages-ext        EXT   Package file extension without a dot.
+      --public-key-file      PATH  Public key file for package verification.
+                                  Defaults to /etc/ssamd/public.key.
+      --packages-ext         EXT   Package file extension without a dot.
                                   Omit for the default package extension: ssam.
 
   Network configuration (optional):
@@ -146,6 +150,8 @@ Arguments for SSAMD configuration (All paths below are on the target device)
                                  Disable runtime package filesystem integrity.
                                  Omit for enabled runtime package filesystem
                                  integrity.
+    --disable-package-verify BOOL
+                                 Disable package signature verification.
 
   RPC configuration (optional):
     --rpc-allowed-gids      LIST  Additional RPC peer effective GIDs to permit,
@@ -158,14 +164,13 @@ Example - Generate all available configuration files:
         --gen-service-unit \\
         --gen-apparmor-profile \\
         --ssamd-install-path /usr/bin/ssamd \\
-        --pkgs-mnt-root /var/run/ssamd/mnt \\
-        --bundled-pkgs-dir /var/lib/ssamd/bundled \\
+        --oci-bundle-dir /var/run/ssamd/oci-bundle \\
+        --builtin-pkgs-dir /var/lib/ssamd/builtin \\
         --downloaded-pkgs-dir /var/lib/ssamd/downloaded \\
         --pkgs-data-root /var/lib/ssamd/data \\
         --public-key-file /etc/ssamd/public.key \\
         --packages-ext ssam \\
-        --pkgs-overlayfs-root /var/lib/ssamd/data/overlayfs \\
-        --pkgs-cgroup ssamd.slice
+        --pkgs-overlayfs-root /var/lib/ssamd/data/overlayfs
 
 EOF
 }
@@ -189,20 +194,22 @@ update_template_common () {
 
     echo "${!template_name}" | sed \
         -e "s|@CONF_SSAMD_INSTALL_PATH@|${SSAMD_CONFIG[CONF_SSAMD_INSTALL_PATH]-}|g" \
-        -e "s|@CONF_BUNDLED_PACKAGES_DIR@|${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]-}|g" \
+        -e "s|@CONF_BUILTIN_PACKAGES_DIR@|${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]-}|g" \
         -e "s|@CONF_DOWNLOADED_PACKAGES_DIR@|${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]-}|g" \
         -e "s|@CONF_PACKAGES_DATA_ROOT@|${SSAMD_CONFIG[CONF_PACKAGES_DATA_ROOT]-}|g" \
-        -e "s|@CONF_PACKAGES_OVERLAYFS_ROOT@|${SSAMD_CONFIG[CONF_PACKAGES_OVERLAYFS_ROOT]-}|g" \
-        -e "s|@CONF_PACKAGES_MNT_ROOT@|${SSAMD_CONFIG[CONF_PACKAGES_MNT_ROOT]-}|g" \
+        -e "s|@CONF_PKGFS_OVERLAY_DIR@|${SSAMD_CONFIG[CONF_PKGFS_OVERLAY_DIR]-}|g" \
+        -e "s|@CONF_OCI_BUNDLE_DIR@|${SSAMD_CONFIG[CONF_OCI_BUNDLE_DIR]-}|g" \
         -e "s|@CONF_PUBLIC_KEY_FILE_PATH@|${SSAMD_CONFIG[CONF_PUBLIC_KEY_FILE_PATH]-}|g" \
         -e "s|@CONF_PACKAGES_CGROUP@|${SSAMD_CONFIG[CONF_PACKAGES_CGROUP]-}|g" \
         -e "s|@CONF_PACKAGES_EXT@|${SSAMD_CONFIG[CONF_PACKAGES_EXT]-}|g" \
         -e "s|@CONF_BRIDGE_ENABLED@|${SSAMD_CONFIG[CONF_BRIDGE_ENABLED]-}|g" \
         -e "s|@CONF_BRIDGE_POOL_BASE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_BASE]-}|g" \
         -e "s|@CONF_BRIDGE_POOL_SIZE@|${SSAMD_CONFIG[CONF_BRIDGE_POOL_SIZE]-}|g" \
-        -e "s|@CONF_DISABLE_RUNTIME_INTEGRITY@|${SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]-}|g" \
+        -e "s|@CONF_DISABLE_PKGFS_INTEGRITY@|${SSAMD_CONFIG[CONF_DISABLE_PKGFS_INTEGRITY]-}|g" \
+        -e "s|@CONF_DISABLE_PACKAGE_VERIFY@|${SSAMD_CONFIG[CONF_DISABLE_PACKAGE_VERIFY]-}|g" \
         -e "s|@CONF_RPC_ALLOWED_GIDS@|${SSAMD_CONFIG[CONF_RPC_ALLOWED_GIDS]-}|g" \
-        -e "s|@CONF_REQUIRES_MOUNTS@|${REQUIRES_MOUNTS-}|g" \
+        -e "s|@CONF_REQUIRES_MOUNTS@|${SSAMD_CONFIG[CONF_REQUIRES_MOUNTS]-}|g" \
+        -e "s|@APPARMOR_PUBLIC_KEY_RULE@|${SSAMD_CONFIG[CONF_APPARMOR_PUBLIC_KEY_RULE]-}|g" \
         - > "$output_filename"
 }
 
@@ -239,12 +246,12 @@ apparmor_normalize_path() {
 # * Utilizes @{run} for paths start with /run and /var/run
 #   * @{run} must not have a trailing slash when combinded with other path
 # * e.g.
-#   - For input /run/ssamd/mnt or /var/run/ssamd/mnt:
-#     @{run}{ssamd/,ssamd/mnt/} w,
-#     @{run}ssamd/mnt/*/ w,
+#   - For input /run/ssamd/oci-bundle or /var/run/ssamd/oci-bundle:
+#     @{run}{ssamd/,ssamd/oci-bundle/} w,
+#     @{run}ssamd/oci-bundle/** rwk,
 #   - For input /var/lib/ssamd:
 #     /var/{lib/,lib/ssamd/} w,
-#     /var/lib/ssamd/*/ w,
+#     /var/lib/ssamd/** rwk,
 apparmor_gen_mkdir_policy() {
     local path=$(apparmor_normalize_path "$1")
     local path_1st
@@ -278,16 +285,15 @@ apparmor_gen_mkdir_policy() {
         result=("  ${path_1st}{${path_brace_content}} w,")
     fi
 
-    # Put wildcard at the end of whole path only to allow creating random
-    # subdirectories per container name
-    result+=("  ${path}/*/ w,")
+    # Permit bundle files and mount targets below each package directory.
+    result+=("  ${path}/** rwk,")
 
     # Put \n at the end of each policy
     printf "%s\n" "${result[@]}"
 }
 
 generate_apparmor_profile() {
-    local profile_filename conf_output conf_ssamd_toml_path
+    local profile_filename conf_output conf_ssamd_toml_path public_key_path
     conf_ssamd_toml_path="$(dirname "${SSAMD_CONFIG[CONF_SSAMD_INSTALL_PATH]}")/ssamd.toml"
     # Get a valid filename for the AppArmor profile from the install path
     # Replace / with . to derive the expected filename for the AppArmor profile
@@ -297,13 +303,20 @@ generate_apparmor_profile() {
     conf_output="${CONF_OUTPUT_PATH}/${profile_filename}"
     echo "Generating AppArmor profile - $conf_output"
 
+    public_key_path="${SSAMD_CONFIG[CONF_PUBLIC_KEY_FILE_PATH]-/etc/ssamd/public.key}"
+    if [[ "${SSAMD_CONFIG[CONF_DISABLE_PACKAGE_VERIFY]-false}" != "true" ]]; then
+        SSAMD_CONFIG[CONF_APPARMOR_PUBLIC_KEY_RULE]="  ${public_key_path} r,"
+    else
+        SSAMD_CONFIG[CONF_APPARMOR_PUBLIC_KEY_RULE]=""
+    fi
+
     update_template_common "TEMPLATE_SSAMD_APPARMOR" "$conf_output"
 
-    # Grant permissions per package directory: bundled=read-only, downloaded=read-write
+    # Grant permissions per package directory: builtin=read-only, downloaded=read-write
     local formatted_pkg_dir=""
-    # Bundled directory: read-only access (system-provided, immutable packages)
-    if [[ -n "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}" ]]; then
-        local bdir="${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}"
+    # Builtin directory: read-only access (system-provided, immutable packages)
+    if [[ -n "${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}" ]]; then
+        local bdir="${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}"
         formatted_pkg_dir="${formatted_pkg_dir}  ${bdir}/ r,\n"
         formatted_pkg_dir="${formatted_pkg_dir}  ${bdir}/* r,\n"
     fi
@@ -317,16 +330,16 @@ generate_apparmor_profile() {
     formatted_pkg_dir="${formatted_pkg_dir%\\n}"
 
     # Special treatment to grant write access to let ssamd create
-    # ${SSAMD_CONFIG[CONF_PACKAGES_MNT_ROOT]} with mkdir -p at runtime
-    local mnt_root_permissions
-    mnt_root_permissions=$(apparmor_gen_mkdir_policy "${SSAMD_CONFIG[CONF_PACKAGES_MNT_ROOT]}")
-    if [[ -n "$mnt_root_permissions" ]]; then
+    # ${SSAMD_CONFIG[CONF_OCI_BUNDLE_DIR]} with mkdir -p at runtime
+    local oci_bundle_root_permissions
+    oci_bundle_root_permissions=$(apparmor_gen_mkdir_policy "${SSAMD_CONFIG[CONF_OCI_BUNDLE_DIR]}")
+    if [[ -n "$oci_bundle_root_permissions" ]]; then
         # Using gawk for in-place editing with multi-line replacement
-        gawk -i inplace -v replacement="$mnt_root_permissions" \
-            '{gsub(/@APPARMOR_PERMISSION_PACKAGES_MNT_ROOT@/, replacement); print}' \
+        gawk -i inplace -v replacement="$oci_bundle_root_permissions" \
+            '{gsub(/@APPARMOR_PERMISSION_OCI_BUNDLE_DIR@/, replacement); print}' \
             "$conf_output"
     else
-        error_exit "Cannot generate permissions for package mount root '${SSAMD_CONFIG[CONF_PACKAGES_MNT_ROOT]}'."
+        error_exit "Cannot generate permissions for OCI bundle root '${SSAMD_CONFIG[CONF_OCI_BUNDLE_DIR]}'."
         exit 1
     fi
 
@@ -338,26 +351,25 @@ generate_apparmor_profile() {
 
     sed --in-place \
         -e "s|@CONF_SSAMD_TOML_PATH@|${conf_ssamd_toml_path}|g" \
-        -e "s|@APPARMOR_NORMALIZED_PACKAGES_MNT_ROOT@|$(apparmor_normalize_path "${SSAMD_CONFIG[CONF_PACKAGES_MNT_ROOT]}")|g" \
+        -e "s|@APPARMOR_NORMALIZED_OCI_BUNDLE_DIR@|$(apparmor_normalize_path "${SSAMD_CONFIG[CONF_OCI_BUNDLE_DIR]}")|g" \
         "$conf_output"
 }
 
 generate_service_unit() {
-    local conf_output required_mounts field
+    local conf_output requires_mounts
     conf_output="${CONF_OUTPUT_PATH}/ssamd.service"
 
+    requires_mounts="/tmp"
+    if [[ -n "${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}" ]]; then
+        requires_mounts+=" ${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}"
+    fi
+    if [[ -n "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}" ]]; then
+        requires_mounts+=" ${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}"
+    fi
+    requires_mounts+=" ${SSAMD_CONFIG[CONF_PACKAGES_DATA_ROOT]} ${SSAMD_CONFIG[CONF_OCI_BUNDLE_DIR]}"
+    SSAMD_CONFIG[CONF_REQUIRES_MOUNTS]="$requires_mounts"
+
     echo "Generating Service unit - ${conf_output}..."
-    required_mounts="/tmp"
-    for field in \
-        CONF_BUNDLED_PACKAGES_DIR \
-        CONF_DOWNLOADED_PACKAGES_DIR \
-        CONF_PACKAGES_DATA_ROOT \
-        CONF_PACKAGES_MNT_ROOT; do
-        if config_is_set "$field" && [[ -n "${SSAMD_CONFIG[$field]}" ]]; then
-            required_mounts+=" ${SSAMD_CONFIG[$field]}"
-        fi
-    done
-    local REQUIRES_MOUNTS="$required_mounts"
     update_template_common "TEMPLATE_SSAMD_SERVICE_UNIT" "$conf_output"
 }
 
@@ -366,32 +378,40 @@ generate_ssamd_config() {
     local conf_output="${CONF_OUTPUT_PATH}/ssamd.toml"
     echo "Generating ssamd configuration - ${conf_output}..."
 
-    # Keep the [common] table present, but add only fields explicitly supplied
-    # by the caller. Missing optional fields are resolved by ssamd itself.
-    local SSAMD_TOML_CONTENT=$'[common]\n'
-    if config_is_set CONF_BUNDLED_PACKAGES_DIR; then
-        SSAMD_TOML_CONTENT+="bundled_packages_dir = \"@CONF_BUNDLED_PACKAGES_DIR@\""$'\n'
-    fi
-    if config_is_set CONF_DOWNLOADED_PACKAGES_DIR; then
-        SSAMD_TOML_CONTENT+="downloaded_packages_dir = \"@CONF_DOWNLOADED_PACKAGES_DIR@\""$'\n'
-    fi
-    if config_is_set CONF_PACKAGES_DATA_ROOT; then
-        SSAMD_TOML_CONTENT+="packages_data_root = \"@CONF_PACKAGES_DATA_ROOT@\""$'\n'
-    fi
-    if config_is_set CONF_PACKAGES_OVERLAYFS_ROOT; then
-        SSAMD_TOML_CONTENT+="packages_overlayfs_root = \"@CONF_PACKAGES_OVERLAYFS_ROOT@\""$'\n'
-    fi
-    if config_is_set CONF_PACKAGES_MNT_ROOT; then
-        SSAMD_TOML_CONTENT+="packages_mnt_root = \"@CONF_PACKAGES_MNT_ROOT@\""$'\n'
-    fi
-    if config_is_set CONF_PUBLIC_KEY_FILE_PATH; then
-        SSAMD_TOML_CONTENT+="public_key_file_path = \"@CONF_PUBLIC_KEY_FILE_PATH@\""$'\n'
+    local SSAMD_TOML_CONTENT=$'[package]\n'
+    if config_is_set CONF_PACKAGES_EXT; then
+        SSAMD_TOML_CONTENT+="extension = \"@CONF_PACKAGES_EXT@\""$'\n'
     fi
     if config_is_set CONF_PACKAGES_CGROUP; then
-        SSAMD_TOML_CONTENT+="packages_cgroup = \"@CONF_PACKAGES_CGROUP@\""$'\n'
+        SSAMD_TOML_CONTENT+="cgroup = \"@CONF_PACKAGES_CGROUP@\""$'\n'
     fi
-    if config_is_set CONF_PACKAGES_EXT; then
-        SSAMD_TOML_CONTENT+="packages_ext = \"@CONF_PACKAGES_EXT@\""$'\n'
+    if config_is_set CONF_PUBLIC_KEY_FILE_PATH; then
+        SSAMD_TOML_CONTENT+="public_key = \"@CONF_PUBLIC_KEY_FILE_PATH@\""$'\n'
+    fi
+
+    SSAMD_TOML_CONTENT+=$'\n[package.dir]\n'
+    if config_is_set CONF_BUILTIN_PACKAGES_DIR; then
+        SSAMD_TOML_CONTENT+="builtin = \"@CONF_BUILTIN_PACKAGES_DIR@\""$'\n'
+    fi
+    if config_is_set CONF_DOWNLOADED_PACKAGES_DIR; then
+        SSAMD_TOML_CONTENT+="downloaded = \"@CONF_DOWNLOADED_PACKAGES_DIR@\""$'\n'
+    fi
+    SSAMD_TOML_CONTENT+="oci_bundle = \"@CONF_OCI_BUNDLE_DIR@\""$'\n'
+    SSAMD_TOML_CONTENT+="data = \"@CONF_PACKAGES_DATA_ROOT@\""$'\n'
+
+    if config_is_set CONF_PKGFS_OVERLAY_DIR ||
+        config_is_set CONF_DISABLE_PKGFS_INTEGRITY ||
+        config_is_set CONF_DISABLE_PACKAGE_VERIFY; then
+        SSAMD_TOML_CONTENT+=$'\n[debug]\n'
+        if config_is_set CONF_PKGFS_OVERLAY_DIR; then
+            SSAMD_TOML_CONTENT+="pkgfs_overlay_dir = \"@CONF_PKGFS_OVERLAY_DIR@\""$'\n'
+        fi
+        if config_is_set CONF_DISABLE_PKGFS_INTEGRITY; then
+            SSAMD_TOML_CONTENT+="disable_pkgfs_integrity = @CONF_DISABLE_PKGFS_INTEGRITY@"$'\n'
+        fi
+        if config_is_set CONF_DISABLE_PACKAGE_VERIFY; then
+            SSAMD_TOML_CONTENT+="disable_package_verify = @CONF_DISABLE_PACKAGE_VERIFY@"$'\n'
+        fi
     fi
 
     if config_is_set CONF_BRIDGE_ENABLED; then
@@ -406,11 +426,6 @@ generate_ssamd_config() {
                 SSAMD_TOML_CONTENT+="size = @CONF_BRIDGE_POOL_SIZE@"$'\n'
             fi
         fi
-    fi
-
-    if config_is_set CONF_DISABLE_RUNTIME_INTEGRITY; then
-        SSAMD_TOML_CONTENT+=$'\n[integrity]\n'
-        SSAMD_TOML_CONTENT+="disable_runtime_integrity = @CONF_DISABLE_RUNTIME_INTEGRITY@"$'\n'
     fi
 
     if config_is_set CONF_RPC_ALLOWED_GIDS; then
@@ -428,8 +443,8 @@ generate_ssamd_config() {
 # Parse command line arguments
 parse_arguments() {
     temp_args=$(getopt -o h \
-        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,pkgs-mnt-root:,bundled-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,bridge-enabled:,bridge-pool-base:,bridge-pool-size:,disable-runtime-integrity:,rpc-allowed-gids: \
-        -n "$(basename "$0")" -- "$@") || error_exit
+        --long help,output-path:,gen-apparmor-profile,gen-service-unit,ssamd-install-path:,oci-bundle-dir:,builtin-pkgs-dir:,downloaded-pkgs-dir:,pkgs-data-root:,pkgs-overlayfs-root:,pkgs-cgroup:,public-key-file:,packages-ext:,bridge-enabled:,bridge-pool-base:,bridge-pool-size:,disable-runtime-integrity:,disable-package-verify:,rpc-allowed-gids: \
+        -n "$(basename "$0")" -- "$@") || error_exit "Invalid argument"
 
     eval set -- "$temp_args"
 
@@ -457,18 +472,18 @@ parse_arguments() {
                 SSAMD_CONFIG[CONF_SSAMD_INSTALL_PATH]="$2"
                 shift 2
                 ;;
-            --pkgs-mnt-root)
+            --oci-bundle-dir)
                 validate_path_argument "$1" "$2" true false
-                SSAMD_CONFIG[CONF_PACKAGES_MNT_ROOT]="$2"
+                SSAMD_CONFIG[CONF_OCI_BUNDLE_DIR]="$2"
                 shift 2
                 ;;
-            --bundled-pkgs-dir)
+            --builtin-pkgs-dir)
                 validate_path_argument "$1" "$2" true true
-                SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]="$2"
+                SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]="$2"
                 shift 2
                 ;;
             --downloaded-pkgs-dir)
-                validate_path_argument "$1" "$2" true false
+                validate_path_argument "$1" "$2" true true
                 SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]="$2"
                 shift 2
                 ;;
@@ -479,7 +494,7 @@ parse_arguments() {
                 ;;
             --pkgs-overlayfs-root)
                 validate_path_argument "$1" "$2" true true
-                SSAMD_CONFIG[CONF_PACKAGES_OVERLAYFS_ROOT]="$2"
+                SSAMD_CONFIG[CONF_PKGFS_OVERLAY_DIR]="$2"
                 shift 2
                 ;;
             --pkgs-cgroup)
@@ -487,7 +502,7 @@ parse_arguments() {
                 shift 2
                 ;;
             --public-key-file)
-                validate_path_argument "$1" "$2" true false
+                validate_path_argument "$1" "$2" true true
                 SSAMD_CONFIG[CONF_PUBLIC_KEY_FILE_PATH]="$2"
                 shift 2
                 ;;
@@ -534,7 +549,15 @@ parse_arguments() {
                     true|false) ;;
                     *) error_exit "--disable-runtime-integrity must be 'true' or 'false', got: '$2'" ;;
                 esac
-                SSAMD_CONFIG[CONF_DISABLE_RUNTIME_INTEGRITY]="$2"
+                SSAMD_CONFIG[CONF_DISABLE_PKGFS_INTEGRITY]="$2"
+                shift 2
+                ;;
+            --disable-package-verify)
+                case "$2" in
+                    true|false) ;;
+                    *) error_exit "--disable-package-verify must be 'true' or 'false', got: '$2'" ;;
+                esac
+                SSAMD_CONFIG[CONF_DISABLE_PACKAGE_VERIFY]="$2"
                 shift 2
                 ;;
             --rpc-allowed-gids)
@@ -563,24 +586,25 @@ parse_arguments() {
 }
 
 # Validate the arguments against the serde configuration structures in
-# ssamd/src/configuration.rs. Presence is what matters here: values such as an
-# empty overlayfs root or cgroup are valid and must always be written.
+# ssamd/src/configuration.rs.
 validate_configuration() {
-    local requirement field option
-    local -a required_fields=(
-        "CONF_PACKAGES_MNT_ROOT:--pkgs-mnt-root"
-        "CONF_DOWNLOADED_PACKAGES_DIR:--downloaded-pkgs-dir"
-        "CONF_PACKAGES_DATA_ROOT:--pkgs-data-root"
-        "CONF_PUBLIC_KEY_FILE_PATH:--public-key-file"
-    )
+    if ! config_is_set CONF_OCI_BUNDLE_DIR; then
+        error_exit "--oci-bundle-dir is required."
+    fi
+    if ! config_is_set CONF_PACKAGES_DATA_ROOT; then
+        error_exit "--pkgs-data-root is required."
+    fi
 
-    for requirement in "${required_fields[@]}"; do
-        field="${requirement%%:*}"
-        option="${requirement#*:}"
-        if ! config_is_set "$field"; then
-            error_exit "$option is required."
-        fi
-    done
+    if [[ -z "${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]-}" &&
+          -z "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]-}" ]]; then
+        error_exit "At least one of --builtin-pkgs-dir and --downloaded-pkgs-dir must be configured"
+    fi
+
+    if config_is_set CONF_PUBLIC_KEY_FILE_PATH &&
+        [[ -z "${SSAMD_CONFIG[CONF_PUBLIC_KEY_FILE_PATH]}" ]] &&
+        [[ "${SSAMD_CONFIG[CONF_DISABLE_PACKAGE_VERIFY]-false}" != "true" ]]; then
+        error_exit "--public-key-file must not be empty when package verification is enabled"
+    fi
 
     if (config_is_set CONF_BRIDGE_POOL_BASE ||
         config_is_set CONF_BRIDGE_POOL_SIZE) &&
@@ -594,45 +618,31 @@ validate_configuration() {
     fi
 }
 
-set_default_config_fields() {
-    # These fields are mandatory in Common, but an empty value deliberately
-    # disables the corresponding optional feature. Fill that safe value when
-    # the convenience argument is omitted.
-    if ! config_is_set CONF_PACKAGES_OVERLAYFS_ROOT; then
-        SSAMD_CONFIG[CONF_PACKAGES_OVERLAYFS_ROOT]=""
-    fi
-    if ! config_is_set CONF_PACKAGES_CGROUP; then
-        SSAMD_CONFIG[CONF_PACKAGES_CGROUP]=""
-    fi
-
-    # The daemon expects the extension without its leading dot. The default
-    # package extension is therefore `ssam`.
-    if ! config_is_set CONF_PACKAGES_EXT; then
-        SSAMD_CONFIG[CONF_PACKAGES_EXT]="ssam"
-    fi
-}
-
 normalize_package_directories() {
     local bdir ddir
 
-    if config_is_set CONF_BUNDLED_PACKAGES_DIR; then
-        if [[ -n "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}" ]]; then
-            bdir=$(realpath -m "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}")
+    if config_is_set CONF_BUILTIN_PACKAGES_DIR; then
+        if [[ -n "${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}" ]]; then
+            bdir=$(realpath -m "${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}")
         else
             bdir=""
         fi
-        SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]="$bdir"
+        SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]="$bdir"
     fi
 
     if config_is_set CONF_DOWNLOADED_PACKAGES_DIR; then
-        ddir=$(realpath -m "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}")
+        if [[ -n "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}" ]]; then
+            ddir=$(realpath -m "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}")
+        else
+            ddir=""
+        fi
         SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]="$ddir"
     fi
 
-    if config_is_set CONF_BUNDLED_PACKAGES_DIR &&
-        [[ -n "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}" ]] &&
-        [[ "${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}" == "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]}" ]]; then
-        error_exit "bundled-pkgs-dir ('${SSAMD_CONFIG[CONF_BUNDLED_PACKAGES_DIR]}') and downloaded-pkgs-dir ('$ddir') must not be the same directory"
+    if config_is_set CONF_BUILTIN_PACKAGES_DIR &&
+        [[ -n "${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}" ]] &&
+        [[ "${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}" == "${SSAMD_CONFIG[CONF_DOWNLOADED_PACKAGES_DIR]-}" ]]; then
+        error_exit "builtin-pkgs-dir ('${SSAMD_CONFIG[CONF_BUILTIN_PACKAGES_DIR]}') and downloaded-pkgs-dir ('$ddir') must not be the same directory"
     fi
 }
 
@@ -644,7 +654,6 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
 
-    set_default_config_fields
     normalize_package_directories
     validate_configuration
 
@@ -696,8 +705,8 @@ include <tunables/global>
   network unix dgram,
   network netlink dgram,
 
-  mount -> @APPARMOR_NORMALIZED_PACKAGES_MNT_ROOT@/*/,
-  umount @APPARMOR_NORMALIZED_PACKAGES_MNT_ROOT@/*/,
+  mount -> @APPARMOR_NORMALIZED_OCI_BUNDLE_DIR@/*/pkgfs/,
+  umount @APPARMOR_NORMALIZED_OCI_BUNDLE_DIR@/*/pkgfs/,
 
   @CONF_SSAMD_INSTALL_PATH@ mr,
   /dev/loop* rw,
@@ -707,10 +716,10 @@ include <tunables/global>
   @{PROC}*/mountinfo r,
   /sys/fs/cgroup/** r,
   @CONF_SSAMD_TOML_PATH@ r,
-  @CONF_PUBLIC_KEY_FILE_PATH@ r,
+@APPARMOR_PUBLIC_KEY_RULE@
   @CONF_PACKAGES_DATA_ROOT@/ rw,
   @CONF_PACKAGES_DATA_ROOT@/** rw,
-@APPARMOR_PERMISSION_PACKAGES_MNT_ROOT@
+@APPARMOR_PERMISSION_OCI_BUNDLE_DIR@
 @APPARMOR_PERMISSION_PACKAGES_DIR@
 }
 

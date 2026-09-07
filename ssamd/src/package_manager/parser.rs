@@ -59,6 +59,7 @@ pub struct PackageParseResult {
 pub(crate) fn parse_package_file(
     path: PathBuf,
     public_key_file_path: impl AsRef<Path>,
+    verify_signature: bool,
 ) -> anyhow::Result<PackageParseResult> {
     let filename = path
         .file_name()
@@ -66,7 +67,7 @@ pub(crate) fn parse_package_file(
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow::anyhow!("Failed to get filename from path: {}", path.display()))?;
 
-    let package_file = PackageFile::from_file_verified(&path, public_key_file_path)
+    let package_file = PackageFile::from_file(&path, public_key_file_path, verify_signature)
         .context("Failed to parse package file");
 
     let package_name = package_file.as_ref().map_or_else(
@@ -81,23 +82,25 @@ pub(crate) fn parse_package_file(
     })
 }
 
-/// Parses a package file path and records parse timeline events.
+/// Parse a package while selecting signature verification at the parser boundary.
 ///
 /// # Errors
 ///
-/// Returns an error when the provided path cannot be converted into a valid
-/// UTF-8 file name.
+/// Returns an error if the blocking parser task fails to start or returns a
+/// package filename/path error.
 pub async fn parse_package(
     path: impl AsRef<Path>,
     public_key_file_path: impl AsRef<Path>,
+    verify_signature: bool,
 ) -> anyhow::Result<PackageParseResult> {
     let path = path.as_ref().to_path_buf();
     let public_key_file_path = public_key_file_path.as_ref().to_path_buf();
     let start_ns = elapsed_ns();
-    let result =
-        tokio::task::spawn_blocking(move || parse_package_file(path, &public_key_file_path))
-            .await
-            .context("parse_package task panicked")??;
+    let result = tokio::task::spawn_blocking(move || {
+        parse_package_file(path, &public_key_file_path, verify_signature)
+    })
+    .await
+    .context("parse_package task panicked")??;
     let complete_ns = elapsed_ns();
 
     timeline_start_at(&result.package_name, PackagePhase::Parse, start_ns);
@@ -106,10 +109,21 @@ pub async fn parse_package(
     Ok(result)
 }
 
+#[cfg(test)]
 pub(crate) async fn parse_packages_from_dir(
     package_dir: impl AsRef<Path>,
     packages_ext: &str,
     public_key_file_path: impl AsRef<Path>,
+) -> Vec<anyhow::Result<PackageParseResult>> {
+    parse_packages_from_dir_with_verification(package_dir, packages_ext, public_key_file_path, true)
+        .await
+}
+
+pub(crate) async fn parse_packages_from_dir_with_verification(
+    package_dir: impl AsRef<Path>,
+    packages_ext: &str,
+    public_key_file_path: impl AsRef<Path>,
+    verify_signature: bool,
 ) -> Vec<anyhow::Result<PackageParseResult>> {
     let Some(dir_entries) = dir_stream(package_dir.as_ref()).await else {
         return Vec::new();
@@ -124,7 +138,7 @@ pub(crate) async fn parse_packages_from_dir(
     futures_util::future::join_all(
         paths
             .into_iter()
-            .map(|path| parse_package(path, &public_key_file_path)),
+            .map(|path| parse_package(path, &public_key_file_path, verify_signature)),
     )
     .await
 }
@@ -170,7 +184,7 @@ mod tests {
         let path = tempfile::NamedTempFile::new().unwrap();
         let p = path.path().to_path_buf();
 
-        let res = parse_package(&p, "/nonexistent/test.pub.key")
+        let res = parse_package(&p, "/nonexistent/test.pub.key", true)
             .await
             .expect("parse should return wrapper result");
         assert_eq!(res.path, p);

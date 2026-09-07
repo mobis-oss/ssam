@@ -20,218 +20,144 @@
 ## Table of Contents
 
 1. [File structure at a glance](#file-structure-at-a-glance)
-2. [`[common]`](#common)
-3. [`[rpc]`](#rpc)
-4. [`[network]`](#network)
-5. [`[integrity]`](#integrity)
-6. [Startup validation](#startup-validation)
-7. [Complete examples](#complete-examples)
+2. [`[package]`](#package)
+3. [`[package.dir]`](#packagedir)
+4. [`[debug]`](#debug)
+5. [`[network]`](#network)
+6. [`[rpc]`](#rpc)
 
 ---
 
 ## File structure at a glance
 
+`ssamd`는 데몬 바이너리와 같은 디렉터리의 `ssamd.toml`을 읽습니다.
+
 ```toml
-[common]
-bundled_packages_dir    = "/var/lib/ssamd/bundled"
-downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-packages_data_root      = "/var/lib/ssamd/data"
-packages_overlayfs_root = ""                          # 비워도 됨
-packages_mnt_root       = "/var/run/ssamd/mnt"
-public_key_file_path    = "/etc/ssamd/public.key"
-packages_cgroup         = ""                          # 비워도 됨
-packages_ext            = "ssam"
+[package]
+extension = "ssam"
+cgroup = ""
+public_key = "/etc/ssamd/public.key"
 
-[network.bridge]                                      # 선택 섹션
-enabled = true
+[package.dir]
+builtin = "/usr/share/ssamd/packages"
+downloaded = "/var/lib/ssamd/packages"
+oci_bundle = "/var/lib/ssamd/oci-bundle"
+data = "/var/lib/ssamd/data"
 
-[network.bridge.addr_pool]                            # 선택
-base = "172.20.0.0/16"                                # 기본값
-size = 29                                             # 기본값
+[debug]
+pkgfs_overlay_dir = ""
+disable_pkgfs_integrity = false
+disable_package_verify = false
 
-[rpc]                                                  # 선택 섹션
-allowed_gids = []                                      # 기본값
+[network.bridge]
+enabled = false
 
-[integrity]                                           # 선택 섹션
-disable_runtime_integrity = false                     # 기본값
+[network.bridge.addr_pool]
+base = "172.20.0.0/16"
+size = 29
+
+[rpc]
+allowed_gids = []
 ```
 
-`[common]`의 모든 키는 **반드시 존재해야** 합니다(`bundled_packages_dir` 제외).
-그렇지 않으면 데몬이 기동에 실패합니다.
-`[rpc]`, `[network]`, `[integrity]` 섹션은 **선택** 입니다.
+`package.dir.builtin`과 `package.dir.downloaded`는 선택 source입니다. 둘 중
+하나는 반드시 비어 있지 않아야 합니다. builtin package는 읽기 전용 system
+package입니다. downloaded package는 install, upgrade, remove 대상입니다.
+같은 이름이 두 source에 있으면 downloaded package가 우선합니다.
 
----
+`package.dir.oci_bundle`과 `package.dir.data`는 필수 non-empty 경로입니다.
+`package.dir.oci_bundle`은 absolute path여야 합니다.
+package source와 runtime directory는 여러 사용자가 공유하는 writable directory
+아래에 두지 않아야 합니다.
+두 package source는 같은 디렉터리로 resolve되면 안 됩니다.
 
-## `[common]`
+## `[package]`
 
-핵심 데몬 경로와 설정.
-모든 키는 문자열입니다.
+### `extension`
 
-### `bundled_packages_dir`
+점(.)을 제외한 package 파일 확장자입니다. 기본값은 `"ssam"`입니다.
 
-- **선택.** **bundled**(읽기 전용, 사전 설치) SSAM 패키지가 있는 디렉터리.
-  생략하거나 비워 두면 bundled 패키지가 없는 것으로 취급합니다.
-  설정한 경우 미리 존재해야 하며, 없으면 `ssamd`가 기동 시 중단됩니다.
+### `cgroup`
 
-### `downloaded_packages_dir`
+package process에 사용할 systemd cgroup입니다. 기본값은 `""`입니다.
 
-- **필수.** **downloaded**(읽기·쓰기, 런타임 설치) SSAM 패키지가 있는 디렉터리.
-  없으면 기동 시 자동으로 생성됩니다.
+### `public_key`
 
-### `packages_data_root`
+package signature verification에 사용할 RSA public key 경로입니다. 기본값은 `/etc/ssamd/public.key`입니다.
 
-- **필수.** 각 패키지의 영속적·쓰기 가능한 **데이터 디렉터리**(패키지의 [`data_dirs`](package-config.ko.md#data_dirs) 참조)가 저장되는 루트 디렉터리.
-  *ext4* project quota(`storage_limit`)도 여기서 적용됩니다.
+`debug.disable_package_verify = false`이면 `public_key`는 비어 있으면 안
+됩니다. signature verification이 활성화된 startup에서는 key file도
+존재해야 합니다. 빈 key는 verification을 명시적으로 끈 경우에만 허용됩니다.
 
-### `packages_overlayfs_root`
+## `[package.dir]`
 
-- **존재는 필수** 이나 **빈 문자열**(`""`)이어도 됩니다.
-- *dm-verity* 로 검증되는 읽기 전용 패키지 파일시스템 위에 읽기·쓰기 레이어를 얹어, 파일을 수정해가며 개발·테스트할 수 있게 하는 편의 설정입니다.
-  읽기·쓰기로 마운트할 적당한 위치를 지정합니다.
-- 컨테이너는 이 overlay의 merged 뷰로 실행되어 upper에 덮어쓴 파일을 그대로 사용하므로, *dm-verity* 가 보장하는 무결성이 사실상 무력화됩니다.
-  운영 환경에서는 빈 값으로 두어 비활성화하세요.
+### `builtin`
 
-### `packages_mnt_root`
+선택 read-only package source입니다. 빈 값은 source를 끕니다.
+디렉터리는 `ssamd` 실행 전에 존재해야 하며 데몬이 생성하지 않습니다.
 
-- **필수.** *dm-verity* 검증 후 패키지 파일시스템(`pkgfs`)이 런타임에 마운트되는 루트 디렉터리.
+### `downloaded`
 
-### `public_key_file_path`
+선택 read-write package source입니다. 빈 값이면 install이 설정 오류가 됩니다.
+설정하면 데몬이 startup 때 디렉터리를 생성합니다.
+`InstallPackage`는 이 source가 설정된 경우에만 사용할 수 있으므로 builtin-only
+배포에서는 runtime package 설치 요청이 설정 오류로 거부됩니다.
 
-- **필수.** 패키지 서명 검증에 사용하는 **RSA 공개 키** 경로.
-  패키지를 서명할 때 `ssam-wrap --private-key`에 전달한 개인 키와 짝이 맞아야 합니다 — [서명과 무결성](../architecture/package-format.ko.md#signature-and-integrity) 참조.
-  다른 키로 서명된 패키지는 거부됩니다.
-- 이 경로가 실제 파일을 가리키지 않으면 `ssamd`는 **기동 시 중단** 됩니다.
+### `oci_bundle`
 
-### `packages_cgroup`
+version별 OCI bundle root입니다. 필수입니다.
 
-- **존재는 필수** 이나 **빈 문자열**(`""`)이어도 됩니다.
-- 패키지 컨테이너가 놓이는 cgroup 이름(예: `ssamd.slice` 같은 *systemd* slice).
-- `ssamd`는 cgroup을 생성하지 않으므로, 값을 설정했다면 데몬 기동 이전에 해당 cgroup이 **이미 존재해야** 하며, 없으면 데몬이 중단됩니다.
-- 컨테이너를 특정 cgroup에 두지 않으려면 비워 두세요.
+package 이름이 `name`, version이 `version`이면 layout은 다음과 같습니다.
 
-### `packages_ext`
+```text
+oci_bundle/
+└── name_version/
+    ├── config.json
+    └── pkgfs/
+```
 
-- **필수.** 앞의 점을 제외한 패키지 파일 확장자(예: `ssam`).
-  이 확장자를 가진 파일이 SSAM 패키지로 인식됩니다.
+`config.json`은 OCI runtime 설정입니다. `pkgfs/`는 package filesystem mount target이며 OCI `root.path`는 absolute 경로입니다.
+데몬은 startup 때 이 디렉터리를 생성합니다.
 
----
+### `data`
 
-## `[rpc]`
+container data directory root입니다. 필수입니다.
+데몬은 startup 때 이 디렉터리를 생성합니다.
 
-데몬의 Remocon RPC 제어 서버는 Linux abstract Unix domain socket `@ssamd`에서 수신합니다.
-- 엔드포인트는 고정되어 있어 설정할 수 없습니다.
-- 엔드포인트는 abstract socket이므로 socket 파일이나 runtime directory를 만들지 않습니다.
-- Remocon 클라이언트는 같은 시스템 환경에서 실행되어야 하며 GID 기반 peer credential 검사를 통과해야 합니다.
+## `[debug]`
 
-### `allowed_gids`
+### `pkgfs_overlay_dir`
 
-- **부호 없는 정수 배열, 선택(기본 `[]`).** RPC 서버 접근을 추가로 허용할 peer의 effective GID 목록입니다.
-  예:
+선택 package filesystem overlay root입니다. 빈 값이면 overlay를 끕니다.
 
-  ```toml
-  [rpc]
-  allowed_gids = [1000, 1001]
-  ```
+### `disable_pkgfs_integrity`
 
-- 데몬 자신의 effective GID는 이 목록과 무관하게 항상 허용됩니다.
-  섹션 전체를 **생략**하거나 `allowed_gids`를 비워 두면 데몬의 effective GID와 같은 peer만 허용합니다.
-- peer의 effective GID가 데몬의 effective GID에도, 목록의 어느 항목에도 해당하지 않으면 거부됩니다.
+dm-verity enforcement를 끕니다. 기본값은 `false`입니다.
 
-> ⚠️ 인증에는 UID를 사용하지 않습니다 — 접근 허용 여부는 effective GID로만 결정됩니다.
+### `disable_package_verify`
 
----
+RSA signature verification만 끕니다. 기본값은 `false`입니다.
+
+verification을 꺼도 package format, footer, payload bounds, metadata, runtime
+configuration, seccomp policy, filesystem payload 검증은 계속 수행합니다.
+malformed package는 항상 거부합니다.
+`disable_pkgfs_integrity`는 signature verification과 독립적입니다.
 
 ## `[network]`
 
-데몬 관리 **브리지 네트워크** 설정.
-섹션 전체가 선택이며, 관리 브리지 없이 실행하려면 완전히 생략하세요.
-
-이 섹션은 **오직** 네트워크 모드가 `bridge` 인 패키지([`[container.network] mode = "bridge"`](package-config.ko.md#containernetwork))의 네트워크 구성에만 영향을 줍니다.
-`host` 또는 `none` 네트워킹을 사용하는 패키지는 이 섹션과 무관하게 동작합니다.
-데몬 브리지가 비활성인데 `bridge`를 요청한 패키지는 실행이 **거부** 됩니다 — 잘못된 설정이 정상 동작으로 오인되는 것을 미리 막기 위함입니다.
-
-각 브리지는 **내부** 브리지입니다: 연결된 컨테이너끼리는 통신하지만 게이트웨이· NAT·외부 라우팅이 없습니다.
-브리지 인터페이스 이름은 데몬이 스스로 정합니다.
+데몬이 관리하는 network 설정입니다.
+섹션 전체는 선택입니다.
 
 ### `[network.bridge]`
 
-- **`enabled`** — **boolean, 필수.** 데몬 관리 브리지 네트워크 활성화 여부.
+`enabled`는 데몬 관리 bridge networking을 제어합니다.
+기본값은 `false`입니다.
 
 ### `[network.bridge.addr_pool]`
 
-선택.
-브리지별 서브넷을 잘라내는 주소 풀을 정의합니다.
-생략하면 기본값을 사용합니다.
-
-- **`base`** — **string, 선택.** 풀 기준 CIDR(IPv4 표기, 예: `172.20.0.0/16`).
-  기본값: `172.20.0.0/16`.
-- **`size`** — **integer, 선택.** 브리지별 서브넷 prefix 길이.
-  `/30` 이상(수치상 30 이하)이어야 합니다.
-  기본값: `29`.
-
-> 📖 브리지 네트워킹은 호스트 시스템에 `bridge` / `veth` 커널 기능이 필요합니다.
-> [운영 가이드](../guides/serving-ssam.ko.md#networking)를 참고하세요.
-
----
-
-## `[integrity]`
-
-런타임 패키지 파일시스템 무결성 설정.
-섹션 전체가 **선택** 이며, 생략하면 런타임 무결성이 **활성** 상태(기본)로 유지됩니다.
-
-### `disable_runtime_integrity`
-
-- **boolean, 선택(기본 `false`).** `true` 면 런타임에 커널 *dm-verity* 블록 검증을 건너뜁니다 — 패키지 파일시스템이 verity 타깃 없이 마운트됩니다.
-  이 설정과 무관하게 **패키지 서명 검증은 계속 적용** 되며, 읽기마다 수행되는 블록 검증만 꺼집니다.
-  지속적 무결성을 유지하려면 `false`로 두거나 섹션을 생략하세요.
-  [패키지 무결성](../architecture/package-integrity.ko.md#filesystem-integrity--dm-verity) 참조.
-
----
-
-## Startup validation
-
-기동 시 `ssamd`는:
-
-- 바이너리와 동일 위치에 `ssamd.toml`이 존재하기를 **요구** 하며, 모든 필수 `[common]` 키가 있어야 합니다 — 없으면 설정 오류로 기동에 실패합니다.
-- `bundled_packages_dir`를 설정한 경우, 그 디렉터리가 미리 존재하기를 **요구** 합니다(없으면 중단).
-- `public_key_file_path`에 지정된 파일이 존재하기를 **요구** 하며, 없으면 *"Public key file not found"* 로 중단합니다.
-- `downloaded_packages_dir`·`packages_data_root`·`packages_mnt_root` 디렉터리는 없으면 자동으로 **생성** 합니다.
-- `packages_cgroup`이 (비어 있지 않을 때) 존재하는지 **확인** 하고, 없으면 중단합니다.
-- RPC 서버를 고정 abstract Unix socket `@ssamd`에 **바인딩** 합니다.
-- listener를 바인딩한 뒤 `sd_notify`를 호출합니다.
-  `ssamd`를 *systemd* 의 `notify` 타입 service unit으로 구성했다면 이때 **준비 완료가 통지** 됩니다.
-
----
-
-## Complete examples
-
-### Minimal (no managed network)
+선택 address pool은 부모 bridge table과 함께 설정합니다:
 
 ```toml
-[common]
-bundled_packages_dir    = "/var/lib/ssamd/bundled"
-downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-packages_data_root      = "/var/lib/ssamd/data"
-packages_overlayfs_root = ""
-packages_mnt_root       = "/var/run/ssamd/mnt"
-public_key_file_path    = "/etc/ssamd/public.key"
-packages_cgroup         = ""
-packages_ext            = "ssam"
-```
-
-### With cgroup confinement and bridge networking
-
-```toml
-[common]
-bundled_packages_dir    = "/var/lib/ssamd/bundled"
-downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-packages_data_root      = "/var/lib/ssamd/data"
-packages_overlayfs_root = "/var/lib/ssamd/data/overlayfs"
-packages_mnt_root       = "/var/run/ssamd/mnt"
-public_key_file_path    = "/etc/ssamd/public.key"
-packages_cgroup         = "ssamd.slice"
-packages_ext            = "ssam"
-
 [network.bridge]
 enabled = true
 
@@ -239,3 +165,12 @@ enabled = true
 base = "172.20.0.0/16"
 size = 29
 ```
+
+선택 address pool 기본값은 `172.20.0.0/16`이며 container subnet 기본 prefix는
+`/29`입니다.
+`/30`보다 긴 prefix는 usable host가 없어 거부합니다.
+
+## `[rpc]`
+
+`allowed_gids`는 Unix RPC socket 접근을 허용할 추가 peer effective GID 목록입니다.
+데몬의 effective GID는 항상 허용됩니다. 기본값은 `[]`입니다.

@@ -54,7 +54,7 @@ flowchart LR
     D -->|"start"| S["systemd + crun"]
     S -->|"create"| CT(["container"])
   end
-  P -->|"copy (bundled / downloaded)"| D
+  P -->|"copy (builtin / downloaded)"| D
   KP[/"private key"/] -.-> W
   K[/"public key"/] -.->|"verify"| D
 
@@ -96,10 +96,10 @@ From authoring to a running container:
 ## Package management
 
 A device carries packages from two sources:
-- **bundled**: pre-loaded in the device image (read-only)
+- **builtin**: pre-loaded in the device image (read-only)
 - **downloaded**: installed at runtime through the control API
 
-`ssamd` installs, updates, and removes them on request — a downloaded package overrides a bundled one of the same name, and removing that override restores the bundled package underneath.
+`ssamd` installs, updates, and removes downloaded packages on request — a downloaded package overrides a builtin one of the same name, and removing that override restores the builtin package underneath.
 
 > 📖 See [Package Management](package-management.md) for details.
 

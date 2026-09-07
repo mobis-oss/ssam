@@ -150,8 +150,14 @@ flowchart LR
   style MD fill:#eef1f5,stroke:#2563eb,stroke-width:3px,color:#334155
 ```
 
-- *dm-verity* is enabled by default and can be disabled through `[integrity].disable_runtime_integrity`.
-  Disabling it removes block-level runtime verification, but package signature verification still applies.
+- *dm-verity* is enabled by default and can be disabled through
+  [`debug.disable_pkgfs_integrity`](../reference/daemon-config.md#disable_pkgfs_integrity).
+  Disabling it removes block-level runtime verification. This setting is independent
+  from package signature verification.
+- [`debug.disable_package_verify`](../reference/daemon-config.md#disable_package_verify)
+  defaults to `false` and is a development-only exception.
+  When set to `true`, `ssamd` skips RSA signature verification and the public-key
+  file check, so packages can be processed without a public key.
 - The signed `metadata` contains the **entire set of dm-verity parameters** (including the root hash).
 - At load time `ssamd` builds the *dm-verity* target from those signed parameters.
   By *dm-verity*'s design, **every block is verified on each read**, so tampering is detected not just at load but **continuously at runtime**.
@@ -173,8 +179,8 @@ flowchart LR
 
 - `ssamd` exposes the [Remocon gRPC control API](../reference/remocon-rpc.md) over the fixed Linux abstract Unix domain socket `@ssamd`, so only processes running in the same network namespace on the same host can access it.
 - An abstract socket cannot restrict access through filesystem permissions, so any process in the same network namespace that knows the name can attempt to connect.
-- However, `ssamd` only allows a request when the peer's effective GID matches the daemon's effective GID or is in a [configured allow-list](../reference/daemon-config.md#allowed_gids).
-- **Even an installation RPC from an allowed client has package authenticity verified separately from caller authorization:** every installation request must pass signature and integrity verification, and a package that fails verification is refused and never gets set up or run.
+- However, `ssamd` only allows a request when the peer's effective GID matches the daemon's effective GID or is in the [configured allow-list](../reference/daemon-config.md#rpc).
+- **Even an installation RPC from an allowed client has package authenticity verified separately from caller authorization:** with the default verification settings, every installation request must pass signature and integrity verification, and a package that fails verification is refused and never gets set up or run. [`debug.disable_package_verify`](../reference/daemon-config.md#disable_package_verify) = `true` is a development-only exception that skips RSA signature verification.
 
 ---
 

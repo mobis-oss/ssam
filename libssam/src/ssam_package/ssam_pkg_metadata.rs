@@ -42,19 +42,24 @@ impl PackageMetadata {
         pkgfs_verity_info: PackageFsVerityInfo,
     ) -> Result<Self> {
         let build_date = jiff::Timestamp::now().to_string();
-        // To ensure the version is valid semver
-        _ = semver::Version::parse(package_config.get_package_version()).with_context(|| {
-            format!(
-                "Package version '{}' is invalid",
-                package_config.get_package_version()
-            )
-        })?;
-        Ok(PackageMetadata {
+        let metadata = PackageMetadata {
             package_config,
             build_date,
             pkgfs_type,
             pkgfs_verity_info,
-        })
+        };
+        metadata.validate()?;
+        Ok(metadata)
+    }
+
+    fn validate(&self) -> Result<()> {
+        semver::Version::parse(self.package_config.get_package_version()).with_context(|| {
+            format!(
+                "Package version '{}' is invalid",
+                self.package_config.get_package_version()
+            )
+        })?;
+        Ok(())
     }
 
     /// Returns the parsed semver version of this package.
@@ -62,8 +67,8 @@ impl PackageMetadata {
     /// # Panics
     ///
     /// Panics if the stored version string is not valid semver. This cannot
-    /// happen in practice because [`PackageMetadata::new`] validates the
-    /// version at construction time.
+    /// happen in practice because package metadata validates the version at
+    /// construction and deserialization time.
     #[must_use]
     pub fn version(&self) -> semver::Version {
         semver::Version::parse(&self.package_config.package.version)
@@ -83,11 +88,14 @@ impl PackageMetadata {
     }
 
     pub(crate) fn deserialize<R: Read>(src: &mut R) -> Result<Self, PackageParseError> {
-        bincode::decode_from_std_read(src, SSAM_SERIALIZATION_CONFIG).map_err(|e| {
-            PackageParseError::ParseFailed {
+        let metadata: Self = bincode::decode_from_std_read(src, SSAM_SERIALIZATION_CONFIG)
+            .map_err(|e| PackageParseError::ParseFailed {
                 source: anyhow!(e).context("Failed to decode metadata"),
-            }
-        })
+            })?;
+        metadata
+            .validate()
+            .map_err(|source| PackageParseError::ParseFailed { source })?;
+        Ok(metadata)
     }
 }
 
@@ -296,6 +304,17 @@ mod tests {
         let result = PackageMetadata::deserialize(&mut invalid_data);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_version_deserialization() {
+        let mut metadata = create_test_metadata();
+        metadata.package_config.package.version = "invalid".to_owned();
+        let serialized = metadata.serialize().expect("metadata should serialize");
+
+        let error = PackageMetadata::deserialize(&mut std::io::Cursor::new(serialized))
+            .expect_err("invalid metadata version should be rejected");
+        assert!(matches!(error, PackageParseError::ParseFailed { .. }));
     }
 
     #[test]

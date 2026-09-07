@@ -55,7 +55,7 @@ flowchart LR
     D -->|"시작"| S["systemd + crun"]
     S -->|"생성"| CT(["컨테이너"])
   end
-  P -->|"복사 (bundled / downloaded)"| D
+  P -->|"복사 (builtin / downloaded)"| D
   KP[/"개인 키"/] -.-> W
   K[/"공개 키"/] -.->|"검증"| D
 
@@ -97,10 +97,10 @@ flowchart LR
 ## Package management
 
 디바이스의 패키지는 두 소스에서 옵니다:
-- **bundled**: 디바이스 이미지에 사전 탑재 (읽기 전용)
+- **builtin**: 디바이스 이미지에 사전 탑재 (읽기 전용)
 - **downloaded**: 런타임에 제어 API로 설치
 
-`ssamd`는 요청에 따라 이들을 설치·업데이트·제거하며, 같은 이름이면 downloaded가 bundled를 덮어쓰고, 그 override를 제거하면 아래의 bundled 패키지가 복원됩니다.
+`ssamd`는 요청에 따라 downloaded package를 설치·업데이트·제거하며, 같은 이름이면 downloaded가 builtin을 덮어쓰고, 그 override를 제거하면 아래의 builtin package가 복원됩니다.
 
 > 📖 상세는 [Package Management](package-management.ko.md)를 참고하세요.
 

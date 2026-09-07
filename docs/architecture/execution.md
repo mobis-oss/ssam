@@ -64,7 +64,7 @@ flowchart TB
   style EXT stroke:#94a3b8
 ```
 
-- **Package management.** `PackageManager` scans and loads the bundled and downloaded package directories, verifies signatures, and drives each package's state machine (`TransitionManager`).
+- **Package management.** `PackageManager` scans and loads the builtin and downloaded package directories, verifies signatures, and drives each package's state machine (`TransitionManager`).
 - **Acquiring the data volume.** `PackageVolumeManagerActor` creates the package's data directory when the package is loaded and registered, and — when configured — limits data usage.
   This limit is supported only when the data partition's filesystem is *ext4*, applied through project quota.
 - **Building the runtime environment.** `PackageTransitioner` builds the container's runtime environment from a verified package — `PackageFileSystem` enables *dm-verity* on the filesystem for runtime integrity and mounts it read-only, `ContainerCommand` generates the *OCI Runtime config*, and `NetworkManager` attaches the network namespace.
@@ -101,12 +101,12 @@ First it **loads and verifies** the package, in order:
 2. **Verify signature** — check the *RSA* PKCS#1 v1.5 signature over the package's **configuration data** against the configured public key.
    A mismatch stops here and marks the package `Broken`.
 
-Once verified, it first **acquires the package's data volume** — it creates a per-package directory under [`packages_data_root`](../reference/daemon-config.md#packages_data_root), creates each path the package declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and, if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps usage with *ext4* project quota.
+Once verified, it first **acquires the package's data volume** — it creates a per-package directory under [`package.dir.data`](../reference/daemon-config.md#data), creates each path the package declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and, if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps usage with *ext4* project quota.
 
 It then **builds the runtime environment**.
 These build steps run **concurrently wherever possible, and all must succeed**:
 
-- **Establish dm-verity & mount read-only** — from the **signed dm-verity table**, set up a device-mapper verity target over the package filesystem image and mount it read-only under `packages_mnt_root`, so every block is verified on read.
+- **Establish dm-verity & mount read-only** — from the **signed dm-verity table**, set up a device-mapper verity target over the package filesystem image and mount it read-only under `package.dir.oci_bundle/<name>_<version>/pkgfs`, so every block is verified on read.
 - **Generate the OCI Runtime config** — translate the package's `runtime.json`, combined with the following, into the final *OCI Runtime config*:
   - rootfs location
   - the acquired data directories bind-mounted onto the `data_dirs` paths

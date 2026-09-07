@@ -537,6 +537,10 @@ pub(crate) mod tests {
                 &self.package_name
             }
 
+            fn get_package_version(&self) -> &'static str {
+                "1.0.0"
+            }
+
             fn get_container_data_dirs(&self) -> Option<&String> {
                 self.data_dirs.as_ref()
             }

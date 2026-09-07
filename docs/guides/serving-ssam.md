@@ -96,30 +96,36 @@ The paths you set here are used as-is when you generate the configuration later.
 
 | Directory | Role | If missing |
 | --- | --- | --- |
-| `bundled_packages_dir` | Read-only, pre-installed packages | Daemon fails |
-| `downloaded_packages_dir` | Read-write, runtime-installed packages | Auto-created |
-| `packages_data_root` | Per-package persistent data (+ quota) | Auto-created |
-| `packages_mnt_root` | Where verified package filesystem images are mounted | Auto-created |
-| `packages_overlayfs_root` | Overlay filesystem root (optional) | Auto-created |
+| `package.dir.builtin` | Read-only, pre-installed packages | Must exist when configured |
+| `package.dir.downloaded` | Read-write, runtime-installed packages | Auto-created when configured |
+| `package.dir.data` | Per-package persistent data (+ quota) | Auto-created |
+| `package.dir.oci_bundle` | Per-package OCI bundle root | Auto-created |
+| `debug.pkgfs_overlay_dir` | Writable overlay filesystem root (optional) | Prepare before startup; `upper/` and `work/` are auto-created on the first package mount |
 
-`bundled_packages_dir` must exist ahead of time; `ssamd` does not create it.
-The rest are created on startup if missing, but **pre-creating them all is recommended**: in production these directories are typically dedicated partitions or mount points (e.g. `packages_data_root` presumes a filesystem mounted with *ext4* project quota), and if the parent path they mount onto is read-only you cannot rely on runtime auto-creation.
+`package.dir.builtin` and `package.dir.downloaded` are optional package sources.
+At least one source must be non-empty.
+`package.dir.builtin` must exist ahead of time when configured; `ssamd` does not create it.
+`ssamd` creates `package.dir.downloaded`, `package.dir.data`, and `package.dir.oci_bundle` on startup if they are missing.
+Prepare `debug.pkgfs_overlay_dir` as a writable overlay root before startup.
+On the first package mount, `ssamd` creates each package's `upper/` and `work/` directories beneath that root.
+Mount the filesystem for any dedicated partition or mount point before `ssamd` mounts the first package.
+The filesystem holding `package.dir.data` must provide *ext4* project quota for storage limits.
 
 For example:
 
 ```console
 # mkdir -p \
-      /var/lib/ssamd/bundled \
+      /var/lib/ssamd/builtin \
       /var/lib/ssamd/downloaded \
       /var/lib/ssamd/data \
-      /var/run/ssamd/mnt
+      /var/run/ssamd/oci-bundle
 ```
 
-Place packages you want pre-installed on the device into `bundled_packages_dir`.
+Place packages you want pre-installed on the device into `package.dir.builtin`.
 For example, copy a SSAM package built with the [Wrapping a SSAM guide](wrapping-a-ssam.md) into this directory:
 
 ```console
-# cp helloworld.ssam /var/lib/ssamd/bundled/
+# cp helloworld.ssam /var/lib/ssamd/builtin/
 ```
 
 ---
@@ -150,33 +156,56 @@ Run [`gen_ssamd_conf.sh`](#generating-configuration-with-gen_ssamd_confsh) with 
 ```console
 $ ssamd/releasedata/gen_ssamd_conf.sh \
       --output-path . \
-      --bundled-pkgs-dir /var/lib/ssamd/bundled \
+      --builtin-pkgs-dir /var/lib/ssamd/builtin \
       --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
       --pkgs-data-root /var/lib/ssamd/data \
-      --pkgs-mnt-root /var/run/ssamd/mnt \
+      --oci-bundle-dir /var/run/ssamd/oci-bundle \
       --public-key-file /etc/ssamd/public.key
 ```
 
 The generated `ssamd.toml` looks like this, and you can also write it by hand:
 
 ```toml
-[common]
-bundled_packages_dir    = "/var/lib/ssamd/bundled"
-downloaded_packages_dir = "/var/lib/ssamd/downloaded"
-packages_data_root      = "/var/lib/ssamd/data"
-packages_overlayfs_root = ""
-packages_mnt_root       = "/var/run/ssamd/mnt"
-public_key_file_path    = "/etc/ssamd/public.key"
-packages_cgroup         = ""
-packages_ext            = "ssam"
+[package]
+extension = "ssam"
+cgroup = ""
+public_key = "/etc/ssamd/public.key"
+
+[package.dir]
+builtin = "/var/lib/ssamd/builtin"
+downloaded = "/var/lib/ssamd/downloaded"
+oci_bundle = "/var/run/ssamd/oci-bundle"
+data = "/var/lib/ssamd/data"
+
+[debug]
+pkgfs_overlay_dir = ""
+disable_pkgfs_integrity = false
+disable_package_verify = false
+
+[network.bridge]
+enabled = false
+
+[network.bridge.addr_pool]
+base = "172.20.0.0/16"
+size = 29
+
+[rpc]
+allowed_gids = []
 ```
 
-Every `[common]` key (except `bundled_packages_dir`) must be present.
+At least one of `package.dir.builtin` and `package.dir.downloaded` must be non-empty.
+`package.dir.oci_bundle` and `package.dir.data` must be non-empty.
 
-The following keys, which you can leave empty, are **optional-feature** switches; how to prepare them is described in [Optional configuration](#optional-configuration):
+The following keys control optional features, and each key accepts a value matching its TOML type.
+String-valued keys can use an empty string or be omitted.
+Boolean keys must use `true` or `false`, or be omitted to use their defaults.
+An empty assignment or `""` is invalid for a boolean key and prevents `ssamd` from starting.
+How to prepare these settings is described in [Optional configuration](#optional-configuration):
 
-- `packages_cgroup` — empty places containers in no dedicated cgroup slice.
-- `packages_overlayfs_root` — empty disables the overlay (the production default).
+- `package.cgroup` — an empty string or omission places containers in no dedicated cgroup slice.
+- `debug.pkgfs_overlay_dir` — an empty string or omission disables the overlay (the production default).
+- `debug.disable_pkgfs_integrity` — set `true` to disable runtime *dm-verity* verification, set `false` to keep it enabled, or omit the key to use `false`.
+- `debug.disable_package_verify` — set `true` to disable package signature verification, set `false` to keep it enabled, or omit the key to use `false`.
 
 > 📖 For the meaning and defaults of each key and all other configuration, see the [`ssamd.toml` Configuration Reference](../reference/daemon-config.md); for all helper options, see [Generating configuration](#generating-configuration-with-gen_ssamd_confsh).
 
@@ -232,15 +261,15 @@ Using them needs separate host-side preparation.
 
 ### Storage quota (`storage_limit`)
 
-To enforce a package's `container.storage_limit`, the filesystem holding `packages_data_root` must support *ext4* project quota.
+To enforce a package's `container.storage_limit`, the filesystem holding `package.dir.data` must support *ext4* project quota.
 
 > 📖 For the requirements and setup, see [Container Isolation → Storage quota](container-isolation.md#storage-quota-storage_limit).
 
-### Container cgroup (`packages_cgroup`)
+### Container cgroup (`package.cgroup`)
 
-Setting `packages_cgroup` makes `ssamd` place each container under the named cgroup, which must exist before `ssamd` starts.
+Setting `package.cgroup` makes `ssamd` place each container under the named cgroup, which must exist before `ssamd` starts.
 
-> 📖 For the systemd-slice and outside-systemd setups, see [Container Isolation → Container cgroup](container-isolation.md#container-cgroup-packages_cgroup).
+> 📖 For the systemd-slice and outside-systemd setups, see [Container Isolation → Container cgroup](container-isolation.md#container-cgroup-packagecgroup).
 
 ### AppArmor confinement for `ssamd`
 
@@ -282,20 +311,21 @@ The table below also describes whether each option is required and what happens 
 | `--output-path PATH` | (optional) Specifies where generated files are written (default: current directory). |
 | `--gen-service-unit` | (optional) Generates `ssamd.service` (*systemd* service unit). |
 | `--gen-apparmor-profile` | (optional) Generates an *AppArmor* profile for `ssamd`. |
-| `--ssamd-install-path PATH` | (conditionally required) Specifies the `ssamd` installation path on the target device. Required when generating a service unit or an *AppArmor* profile. |
-| `--pkgs-mnt-root PATH` | [`packages_mnt_root`](../reference/daemon-config.md#packages_mnt_root). (required) Specifies the root directory where package filesystems are mounted. |
-| `--bundled-pkgs-dir PATH` | [`bundled_packages_dir`](../reference/daemon-config.md#bundled_packages_dir). (optional) Specifies the read-only directory for bundled packages. Omit for no bundled packages. |
-| `--downloaded-pkgs-dir PATH` | [`downloaded_packages_dir`](../reference/daemon-config.md#downloaded_packages_dir). (required) Specifies the read-write directory for packages installed at runtime. |
-| `--pkgs-data-root PATH` | [`packages_data_root`](../reference/daemon-config.md#packages_data_root). (required) Specifies the root directory for persistent data of package containers. |
-| `--pkgs-overlayfs-root PATH` | [`packages_overlayfs_root`](../reference/daemon-config.md#packages_overlayfs_root). (optional) Specifies the OverlayFS root directory for a writable layer used in debugging and development. Omit to disable OverlayFS. |
-| `--pkgs-cgroup NAME` | [`packages_cgroup`](../reference/daemon-config.md#packages_cgroup). (optional) Specifies the cgroup where package containers are placed. Omit to use the default cgroup. |
-| `--public-key-file PATH` | [`public_key_file_path`](../reference/daemon-config.md#public_key_file_path). (required) Specifies the path to the public key file used to verify package signatures. |
-| `--packages-ext EXT` | [`packages_ext`](../reference/daemon-config.md#packages_ext). (optional) Specifies the package file extension without a leading dot. Omit to use the default `ssam` extension. |
-| `--rpc-allowed-gids LIST` | [`rpc.allowed_gids`](../reference/daemon-config.md#allowed_gids). (optional) Specifies the effective GIDs of additional Remocon clients to permit. Omit to allow no additional GIDs. |
-| `--bridge-enabled BOOL` | [`network.bridge.enabled`](../reference/daemon-config.md#networkbridge). (optional) Configures the daemon to provide `bridge` networking to containers. Omit to disable bridge networking. |
-| `--bridge-pool-base CIDR` | [`network.bridge.addr_pool.base`](../reference/daemon-config.md#networkbridgeaddr_pool). (optional) Specifies the base CIDR of the address pool for assigning per-bridge subnets. Omit to use the daemon default; requires `--bridge-enabled`. |
-| `--bridge-pool-size BITS` | [`network.bridge.addr_pool.size`](../reference/daemon-config.md#networkbridgeaddr_pool). (optional) Specifies the prefix length of each per-bridge subnet. Omit to use the daemon default; requires `--bridge-enabled`. |
-| `--disable-runtime-integrity BOOL` | [`integrity.disable_runtime_integrity`](../reference/daemon-config.md#disable_runtime_integrity). (optional) Disables the daemon's runtime integrity checks. Omit to keep the checks enabled. |
+| `--ssamd-install-path PATH` | (conditionally required) Specifies the `ssamd` installation path. Required when generating a service unit or an *AppArmor* profile. |
+| `--oci-bundle-dir PATH` | (required) Specifies the absolute `package.dir.oci_bundle` root directory for package OCI bundles. |
+| `--builtin-pkgs-dir PATH` | (optional) Specifies `package.dir.builtin`, the read-only directory for builtin packages. Omit for no builtin packages. |
+| `--downloaded-pkgs-dir PATH` | (optional) Specifies `package.dir.downloaded`, the read-write directory for downloaded packages. Omit for no downloaded packages. At least one package source is required. |
+| `--pkgs-data-root PATH` | (required) Specifies `package.dir.data`, the root directory for persistent package data. |
+| `--pkgs-overlayfs-root PATH` | (optional) Specifies `debug.pkgfs_overlay_dir`, the writable overlay root. Omit to disable the overlay. |
+| `--pkgs-cgroup NAME` | (optional) Specifies `package.cgroup`. Omit to use the default cgroup. |
+| `--public-key-file PATH` | (optional) Specifies `package.public_key`. Omit to use `/etc/ssamd/public.key`; an explicit empty value requires `--disable-package-verify true`. |
+| `--packages-ext EXT` | (optional) Specifies `package.extension` without a leading dot. Omit to use the default `ssam` extension. |
+| `--rpc-allowed-gids LIST` | (optional) Specifies `rpc.allowed_gids`, the effective GIDs of additional Remocon clients to permit. Omit to allow no additional GIDs. |
+| `--bridge-enabled BOOL` | (optional) Sets `network.bridge.enabled`. Omit to disable bridge networking. |
+| `--bridge-pool-base CIDR` | (optional) Sets `network.bridge.addr_pool.base`. Requires `--bridge-enabled`. |
+| `--bridge-pool-size BITS` | (optional) Sets `network.bridge.addr_pool.size`. Requires `--bridge-enabled`. |
+| `--disable-runtime-integrity BOOL` | (optional) Sets `debug.disable_pkgfs_integrity`. Omit to keep package filesystem integrity enabled. |
+| `--disable-package-verify BOOL` | (optional) Sets `debug.disable_package_verify`. Omit to keep package signature verification enabled. |
 
 Example — generate the config, a service unit, and an AppArmor profile:
 
@@ -305,10 +335,10 @@ $ ssamd/releasedata/gen_ssamd_conf.sh \
       --gen-service-unit \
       --gen-apparmor-profile \
       --ssamd-install-path /usr/bin/ssamd \
-      --bundled-pkgs-dir /var/lib/ssamd/bundled \
+      --builtin-pkgs-dir /var/lib/ssamd/builtin \
       --downloaded-pkgs-dir /var/lib/ssamd/downloaded \
       --pkgs-data-root /var/lib/ssamd/data \
-      --pkgs-mnt-root /var/run/ssamd/mnt \
+      --oci-bundle-dir /var/run/ssamd/oci-bundle \
       --public-key-file /etc/ssamd/public.key
 ```
 
@@ -321,9 +351,9 @@ Run `gen_ssamd_conf.sh --help` for the authoritative option list on your checkou
 | Symptom | Likely cause / fix |
 | --- | --- |
 | `Failed to read config file ...` at startup | `ssamd.toml` is missing from the binary's directory or isn't readable. |
-| `Failed to parse config file ...` | A required `[common]` key is missing or malformed. Check against the [reference](../reference/daemon-config.md#common). |
-| `Cgroup ... does not exist` | `packages_cgroup` is set but the cgroup/slice was not created before startup. Create it (see [Optional configuration](#optional-configuration)) or leave the field empty. |
-| Every package shows a signature/verification error | `public_key_file_path` does not match the key used to sign the packages. |
+| `Failed to parse config file ...` | A required package setting is missing or malformed. Check against the [reference](../reference/daemon-config.md#package). |
+| `Cgroup ... does not exist` | `package.cgroup` is set but the cgroup/slice was not created before startup. Create it (see [Optional configuration](#optional-configuration)) or leave the field empty. |
+| Every package shows a signature/verification error | `package.public_key` does not match the key used to sign the packages. |
 | A `bridge`-mode package fails with `bridge network mode requested but the daemon network is disabled` | The `[network.bridge]` section is absent or `enabled = false`; add/enable it (see [Networking](#networking)). |
 | Package container does not appear in `journalctl` | Confirm the container's `service_type` and that systemd/`crun` are available on the target. |
 

@@ -117,20 +117,26 @@ impl Daemon {
     }
 
     fn setup_runtime_environ(config: &configuration::Configuration) -> anyhow::Result<()> {
-        let public_key_path = config.public_key_file_path();
-        anyhow::ensure!(
-            Path::new(public_key_path).is_file(),
-            "Public key file not found: {public_key_path}"
-        );
+        let public_key_path = config.public_key_path();
+        if config.package_verify_disabled() {
+            log::warn!("Package signature verification is disabled by configuration");
+        } else {
+            anyhow::ensure!(
+                Path::new(public_key_path).is_file(),
+                "Public key file not found: {public_key_path}"
+            );
+        }
 
         let downloaded_dir = config.downloaded_packages_dir();
-        fs::DirBuilder::new()
-            .mode(0o755)
-            .recursive(true)
-            .create(downloaded_dir)
-            .with_context(|| {
-                format!("Failed to create downloaded packages directory '{downloaded_dir}'")
-            })?;
+        if !downloaded_dir.trim().is_empty() {
+            fs::DirBuilder::new()
+                .mode(0o755)
+                .recursive(true)
+                .create(downloaded_dir)
+                .with_context(|| {
+                    format!("Failed to create downloaded packages directory '{downloaded_dir}'")
+                })?;
+        }
 
         let packages_data_root = config.packages_data_root();
         fs::DirBuilder::new()
@@ -141,25 +147,13 @@ impl Daemon {
                 format!("Failed to create package data directory '{packages_data_root}'")
             })?;
 
-        let packages_mnt_root = config.packages_mnt_root();
+        let oci_bundle_root = config.oci_bundle_root();
         fs::DirBuilder::new()
             .mode(0o755)
             .recursive(true)
-            .create(packages_mnt_root)
+            .create(oci_bundle_root)
             .with_context(|| {
-                format!("Failed to create package mount root directory '{packages_mnt_root}'")
-            })?;
-
-        let bundle_root = configuration::runtime_bundle_root();
-        fs::DirBuilder::new()
-            .mode(0o755)
-            .recursive(true)
-            .create(&bundle_root)
-            .with_context(|| {
-                format!(
-                    "Failed to create runtime bundle root '{}'",
-                    bundle_root.display()
-                )
+                format!("Failed to create OCI bundle root directory '{oci_bundle_root}'")
             })?;
 
         Ok(())

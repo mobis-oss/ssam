@@ -112,7 +112,7 @@ let response = client.list_package_info(request).await?;
 > - 숫자를 직접 하드코딩하지 말고 codegen으로 생성된 `ApiVersion` enum 값을 사용하세요.
 > - 서버가 요구하는 버전과 일치하지 않으면 request가 gRPC `FAILED_PRECONDITION` 오류로 거부됩니다.
 
-> ⚠️ 호출자의 effective GID가 데몬의 effective GID와 일치하거나 [데몬의 허용 GID 목록](../reference/daemon-config.ko.md#allowed_gids)에 포함돼야 합니다.
+> ⚠️ 호출자의 effective GID가 데몬의 effective GID와 일치하거나 [데몬의 허용 GID 목록](../reference/daemon-config.ko.md#rpc)에 포함돼야 합니다.
 > 그렇지 않으면 `ssamd`가 `SO_PEERCRED` 검사에서 RPC를 gRPC `PermissionDenied`로 거부합니다.
 
 > ⚠️ `ListPackageInfo`를 포함하여, `package_names`를 필요로 하는 method는 이 값을 비워(`[]`) 보내면 설치된 **전체** 패키지를 대상으로 합니다.

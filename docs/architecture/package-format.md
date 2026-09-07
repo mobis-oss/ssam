@@ -121,7 +121,7 @@ digest = SHA256( metadata_bytes ‖ runtime_config_bytes ‖ seccomp_bytes )
 ```
 
 `signature.sig` and `filesystem.img` are **not** part of the digest.
-Signing uses the private key provided to `ssam-wrap`; verification uses the public key configured in `ssamd` (`public_key_file_path` in `ssamd.toml`).
+Signing uses the private key provided to `ssam-wrap`; verification uses the public key configured in `ssamd` (`package.public_key` in `ssamd.toml`).
 
 ### How the filesystem image is protected
 

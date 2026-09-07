@@ -929,7 +929,7 @@ pub(crate) fn findmnt(target: impl AsRef<Path>) -> anyhow::Result<String> {
 /// failure (missing dir, no `/proc/mounts` entry) is `false`. Ground truth for
 /// "is this package's filesystem already mounted", shared by `mount_pkgfs`'s
 /// idempotency gate and `unmount_pkgfs`'s guarded teardown.
-fn is_exact_mount(mount_point: &Path) -> bool {
+pub(crate) fn is_exact_mount(mount_point: &Path) -> bool {
     let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     matches!(
         findmnt(mount_point),

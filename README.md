@@ -100,7 +100,7 @@ By default `ssam-wrap` uses the `arm64` image —
 on an x86-64 development machine, set [`--src-oci-arch amd64`](docs/reference/ssam-wrap.md#options).
 
 ```console
-$ mkdir -p ~/ssam/{bundled,downloaded,mnt,data}
+$ mkdir -p ~/ssam/{builtin,downloaded,oci-bundle,data}
 $ mkdir -p ~/ssam/docker-helloworld && cd ~/ssam/docker-helloworld
 $ ssam-wrap --prepare docker-helloworld --pkgfs-src docker://docker.io/hello-world:latest .
 ```
@@ -121,7 +121,7 @@ Modify the Docker-derived package filesystem too, if needed, then build the pack
 $ mkdir -p pkgfs/etc
 $ cp /etc/resolv.conf pkgfs/etc/
 $ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output docker-helloworld.ssam .
-$ cp docker-helloworld.ssam ~/ssam/bundled/
+$ cp docker-helloworld.ssam ~/ssam/builtin/
 ```
 
 **From scratch**
@@ -160,7 +160,7 @@ Build the package:
 
 ```console
 $ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output helloworld.ssam .
-$ cp helloworld.ssam ~/ssam/bundled/
+$ cp helloworld.ssam ~/ssam/builtin/
 ```
 
 > 📖 For the full package-creation walkthrough, see [Wrapping a SSAM](docs/guides/wrapping-a-ssam.md).
@@ -168,15 +168,14 @@ $ cp helloworld.ssam ~/ssam/bundled/
 ### 4. Configure and start the daemon
 
 The SSAM daemon executable, `ssamd`, reads its config file, `ssamd.toml`, from the same directory it lives in.
-So generate the config file at that location with the generator tool,
-then run the daemon (running it requires root).
+Generate the config file at that location with the generator tool, then run the daemon as root.
 
 ```console
 $ "$SSAM_REPO"/ssamd/releasedata/gen_ssamd_conf.sh \
       --output-path ~/.cargo/bin \
-      --bundled-pkgs-dir ~/ssam/bundled \
+      --builtin-pkgs-dir ~/ssam/builtin \
       --downloaded-pkgs-dir ~/ssam/downloaded \
-      --pkgs-mnt-root ~/ssam/mnt \
+      --oci-bundle-dir ~/ssam/oci-bundle \
       --pkgs-data-root ~/ssam/data \
       --public-key-file ~/ssam/keys/public_key.pem
 $ sudo ~/.cargo/bin/ssamd

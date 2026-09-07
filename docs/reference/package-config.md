@@ -116,7 +116,7 @@ Data-area and storage settings for the running container.
 - **Type:** string (colon-separated paths) · **Optional**
 - A `:`-separated list of **absolute container paths that must be writable** inside the container.
   The package filesystem itself is read-only (integrity-verified), so anything the app needs to write to must be declared here.
-- `ssamd` backs these paths with persistent data directories under [`packages_data_root`](daemon-config.md#packages_data_root), bind-mounts them into the container, and caps usage with [`storage_limit`](#storage_limit).
+- `ssamd` backs these paths with persistent data directories under [`package.dir.data`](daemon-config.md#data), bind-mounts them into the container, and caps usage with [`storage_limit`](#storage_limit).
   For the exact acquire/mount steps, see [Execution](../architecture/execution.md#the-execution-pipeline).
 
 ```toml

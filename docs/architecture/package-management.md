@@ -6,32 +6,36 @@
 
 `ssamd` owns the set of packages present on a device and the operations that change it — installing, updating, and removing them.
 Clients issue these over the `Remocon` *gRPC* control API, and `ssamd` carries each request through its internal components.
-This document describes those components and the install / update / remove flows, and covers how a package's storage location — bundled or downloaded — shapes them.
+This document describes those components and the install / update / remove flows, and covers how a package's storage location — builtin or downloaded — shapes them.
 
-## Package sources: bundled and downloaded
+## Package sources: builtin and downloaded
 
 Every package `ssamd` manages exists in one of two forms:
 
-- **Bundled** — pre-loaded in the device image.
+- **Builtin** — pre-loaded in the device image.
   **Cannot be removed**.
 - **Downloaded** — installed at runtime through the control API.
 
 The two share a namespace by package name.
-A downloaded package **overrides** a bundled one of the same name; removing that override **restores** the bundled package underneath.
+A downloaded package **overrides** a builtin one of the same name; removing that override **restores** the builtin package underneath.
 
-The two forms are set in `ssamd.toml` by [`bundled_packages_dir`](../reference/daemon-config.md#bundled_packages_dir) and [`downloaded_packages_dir`](../reference/daemon-config.md#downloaded_packages_dir), one directory each.
-`ssamd` scans both directories at startup and loads every package it finds.
+The builtin and downloaded sources are configured by [`package.dir.builtin`](../reference/daemon-config.md#builtin) and [`package.dir.downloaded`](../reference/daemon-config.md#downloaded), respectively.
+Each source is optional, but at least one source must be configured.
+At startup, `ssamd` scans only the configured sources and applies the per-name precedence described below.
+`InstallPackage` requires `package.dir.downloaded` to be configured; a
+builtin-only deployment can load its pre-installed packages but cannot accept
+runtime package installation requests.
 
 ```mermaid
 flowchart TB
-  START(["ssamd startup"]) --> SCAN["scan both directories — bundled · downloaded"]
-  SCAN --> BD[/"bundled list"/]
-  SCAN --> DL[/"downloaded list"/]
+  START(["ssamd startup"]) --> SCAN["scan configured sources — at least one"]
+  SCAN -->|"when configured"| BD[/"builtin list"/]
+  SCAN -->|"when configured"| DL[/"downloaded list"/]
   BD --> DEC{"per-name decision"}
   DL --> DEC
-  DEC -->|"bundled only"| L1["load bundled"]
+  DEC -->|"builtin only"| L1["load builtin"]
   DEC -->|"downloaded only"| L2["load downloaded"]
-  DEC -->|"both — shadow"| L3["load downloaded<br/>bundled not loaded, path recorded<br/>(restored on removal)"]
+  DEC -->|"both — shadow"| L3["load downloaded<br/>builtin not loaded, path recorded<br/>(restored on removal)"]
 ```
 
 ## Components
@@ -44,7 +48,7 @@ flowchart TB
     direction TB
     RS["«struct»<br/><b>RemoconImpl</b><br/>gRPC control service"] --> PM["«struct»<br/><b>PackageManager</b><br/>validate · parse · verify · select mode · recover"]
     PM --> PT["«struct»<br/><b>PackageTransactionActor</b><br/>copy · back up · acquire volume · delete file"]
-    PM --> PS["«struct»<br/><b>PackageStore</b><br/>package records (incl. bundled path)"]
+    PM --> PS["«struct»<br/><b>PackageStore</b><br/>package records (incl. builtin path)"]
     PT --> PV["«struct»<br/><b>PackageVolumeManagerActor</b><br/>data directory · ext4 quota"]
   end
 
@@ -58,8 +62,11 @@ flowchart TB
 When a client issues an install via [`InstallPackage`](../reference/remocon-rpc.md#installpackage):
 
 1. `RemoconImpl` receives the request and forwards it to `PackageManager`.
-2. `PackageManager` checks the file exists and is a valid package, then **parses it and verifies its signature**.
-   A file that fails verification is rejected here and never stored.
+2. `PackageManager` checks the file exists and is a valid package, then parses it
+   and verifies its signature when package verification is enabled.
+   With the default settings, a file that fails verification is rejected here
+   and never stored. `debug.disable_package_verify = true` is a development-only
+   exception that skips signature verification.
    (On the startup path, an already-present file with a bad signature is instead recorded as `Broken`.)
 3. With no package of that name present, this is a **fresh install**.
    `PackageManager` hands the prepared install to `PackageTransactionActor`, which copies the file into the downloaded directory and, through `PackageVolumeManagerActor`, acquires the package's volume — its data directory and *ext4* project quota.
@@ -71,7 +78,7 @@ Install and update arrive as the same `InstallPackage` request: when a package o
 `PackageManager` first compares the new package's version against the installed one — a higher version proceeds as an upgrade, an equal version is rejected, and a lower version is allowed only when the request opts into a downgrade.
 It then selects how to proceed from where the existing package lives:
 
-- existing is **bundled** → upgrade over the bundled base,
+- existing is **builtin** → upgrade over the builtin base,
 - existing is **downloaded** → upgrade the downloaded package, backing up its file first.
 
 `PackageTransactionActor` backs up the old data directory (when the caller asks to reset it), copies the new file, and re-acquires the volume.
@@ -81,10 +88,10 @@ If any step fails, `PackageManager` recovers the previous package — restoring 
 
 A [`RemovePackage`](../reference/remocon-rpc.md#removepackage) reaches `PackageManager`, which:
 
-- **refuses** a **bundled** package — it is system-provided;
+- **refuses** a **builtin** package — it is system-provided;
 - otherwise tears the package down (stopping it and unmounting its filesystem), removes its record from `PackageStore`, optionally purges its volume, and deletes its file.
 
-If the removed package was a downloaded override of a bundled one, the **bundled package is restored** in its place.
+If the removed package was a downloaded override of a builtin one, the **builtin package is restored** in its place.
 
 ## Package states
 

@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 
 pub(crate) type PackagesMapType<T> = HashMap<String, Arc<T>>;
 pub(crate) type BrokenPackagesMapType = HashMap<String, BrokenPackageInfo>;
-pub(crate) type BundledPathsMapType = HashMap<String, PathBuf>;
+pub(crate) type BuiltinPathsMapType = HashMap<String, PathBuf>;
 
 /// Marker trait for testing purposes.
 ///
@@ -35,15 +35,15 @@ pub(crate) trait PackageStoreBackend: Send + Sync {
     async fn insert_broken(&self, name: String, info: BrokenPackageInfo);
     async fn remove_broken(&self, name: &str) -> Option<BrokenPackageInfo>;
     async fn clear_broken(&self);
-    async fn get_bundled_path(&self, name: &str) -> Option<PathBuf>;
-    async fn insert_bundled_path(&self, name: String, path: PathBuf);
-    async fn clear_bundled_paths(&self);
+    async fn get_builtin_path(&self, name: &str) -> Option<PathBuf>;
+    async fn insert_builtin_path(&self, name: String, path: PathBuf);
+    async fn clear_builtin_paths(&self);
 }
 
 pub(crate) struct HashMapPackageStore<T: PackageBound + Send + Sync> {
     packages: RwLock<PackagesMapType<T>>,
     broken_packages: RwLock<BrokenPackagesMapType>,
-    bundled_packages: RwLock<BundledPathsMapType>,
+    builtin_packages: RwLock<BuiltinPathsMapType>,
 }
 
 impl<T: PackageBound + Send + Sync> HashMapPackageStore<T> {
@@ -51,7 +51,7 @@ impl<T: PackageBound + Send + Sync> HashMapPackageStore<T> {
         Self {
             packages: RwLock::new(HashMap::new()),
             broken_packages: RwLock::new(HashMap::new()),
-            bundled_packages: RwLock::new(HashMap::new()),
+            builtin_packages: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -102,16 +102,16 @@ where
         self.broken_packages.write().await.clear();
     }
 
-    async fn get_bundled_path(&self, name: &str) -> Option<PathBuf> {
-        self.bundled_packages.read().await.get(name).cloned()
+    async fn get_builtin_path(&self, name: &str) -> Option<PathBuf> {
+        self.builtin_packages.read().await.get(name).cloned()
     }
 
-    async fn insert_bundled_path(&self, name: String, path: PathBuf) {
-        self.bundled_packages.write().await.insert(name, path);
+    async fn insert_builtin_path(&self, name: String, path: PathBuf) {
+        self.builtin_packages.write().await.insert(name, path);
     }
 
-    async fn clear_bundled_paths(&self) {
-        self.bundled_packages.write().await.clear();
+    async fn clear_builtin_paths(&self) {
+        self.builtin_packages.write().await.clear();
     }
 }
 
@@ -128,7 +128,7 @@ impl<T: PackageStoreBackend> PackageStore<T> {
     pub(crate) async fn clear_all(&self) {
         self.datastore.clear().await;
         self.datastore.clear_broken().await;
-        self.datastore.clear_bundled_paths().await;
+        self.datastore.clear_builtin_paths().await;
     }
 }
 
@@ -249,7 +249,7 @@ pub(crate) mod tests {
             )
             .await;
         backend
-            .insert_bundled_path("p3".to_string(), PathBuf::from("/bundled/p3.ssam"))
+            .insert_builtin_path("p3".to_string(), PathBuf::from("/builtin/p3.ssam"))
             .await;
 
         let store = PackageStore::new(backend);
@@ -258,25 +258,25 @@ pub(crate) mod tests {
 
         assert!(store.get_all().await.is_empty());
         assert!(store.get_broken_all().await.is_empty());
-        assert!(store.get_bundled_path("p3").await.is_none());
+        assert!(store.get_builtin_path("p3").await.is_none());
     }
 
     #[tokio::test]
-    async fn bundled_path_flow() {
+    async fn builtin_path_flow() {
         let store = HashMapPackageStore::<MockPackage>::new();
 
-        assert!(store.get_bundled_path("a").await.is_none());
+        assert!(store.get_builtin_path("a").await.is_none());
 
         store
-            .insert_bundled_path("a".to_string(), PathBuf::from("/bundled/a.ssam"))
+            .insert_builtin_path("a".to_string(), PathBuf::from("/builtin/a.ssam"))
             .await;
-        let path = store.get_bundled_path("a").await;
+        let path = store.get_builtin_path("a").await;
         assert_eq!(
             path.as_deref(),
-            Some(std::path::Path::new("/bundled/a.ssam"))
+            Some(std::path::Path::new("/builtin/a.ssam"))
         );
 
-        store.clear_bundled_paths().await;
-        assert!(store.get_bundled_path("a").await.is_none());
+        store.clear_builtin_paths().await;
+        assert!(store.get_builtin_path("a").await.is_none());
     }
 }

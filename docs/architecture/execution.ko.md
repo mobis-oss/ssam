@@ -63,7 +63,7 @@ flowchart TB
   style EXT stroke:#94a3b8
 ```
 
-- **패키지 관리.** `PackageManager`가 bundled·downloaded 패키지 디렉터리를 스캔·로드하고 서명을 검증하며, 각 패키지의 상태 머신(`TransitionManager`)을 구동합니다.
+- **패키지 관리.** `PackageManager`가 builtin·downloaded 패키지 디렉터리를 스캔·로드하고 서명을 검증하며, 각 패키지의 상태 머신(`TransitionManager`)을 구동합니다.
 - **데이터 볼륨 확보.** `PackageVolumeManagerActor`가 패키지가 로드·등록될 때 패키지의 데이터 디렉터리를 만들고, 설정된 경우 데이터 사용량을 제한합니다.
   이 제한은 데이터 파티션의 파일시스템이 *ext4* 일 때만 지원되며, project quota 를 활용해 설정됩니다.
 - **실행 환경 구성.** `PackageTransitioner`가 검증된 패키지로부터 컨테이너의 실행 환경을 구성합니다 — `PackageFileSystem`이 파일시스템에 *dm-verity* 를 걸어 실행 시점 무결성을 보장하고 읽기 전용으로 마운트하고, `ContainerCommand`가 *OCI Runtime config* 를 생성하며, `NetworkManager`가 네트워크 네임스페이스를 연결합니다.
@@ -100,12 +100,12 @@ flowchart LR
 2. **서명 검증** — 패키지의 **설정 데이터** 에 대한 *RSA* PKCS#1 v1.5 서명을 설정된 공개 키로 확인합니다.
    불일치하면 여기서 멈추고 패키지를 `Broken`으로 표시합니다.
 
-검증되면 `ssamd`는 먼저 패키지의 **데이터 볼륨을 확보** 합니다 — [`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root) 아래에 패키지별 디렉터리를 만들고, 패키지가 [`data_dirs`](../reference/package-config.ko.md#data_dirs)로 선언한 각 경로를 그 안에 생성하며, [`storage_limit`](../reference/package-config.ko.md#storage_limit)이 있으면 *ext4* project quota 로 용량을 제한합니다.
+검증되면 `ssamd`는 먼저 패키지의 **데이터 볼륨을 확보** 합니다 — [`package.dir.data`](../reference/daemon-config.ko.md#data) 아래에 패키지별 디렉터리를 만들고, 패키지가 [`data_dirs`](../reference/package-config.ko.md#data_dirs)로 선언한 각 경로를 그 안에 생성하며, [`storage_limit`](../reference/package-config.ko.md#storage_limit)이 있으면 *ext4* project quota 로 용량을 제한합니다.
 
 이어서 **실행 환경을 구성** 합니다.
 이 구성 작업들은 가능한 경우 **동시에 실행되며, 전부 성공해야 합니다**:
 
-- **dm-verity 확립 & 읽기 전용 마운트** — **서명된 dm-verity 테이블** 로 패키지 파일시스템 이미지에 device-mapper verity 타깃을 설정하고, `packages_mnt_root` 아래에 읽기 전용으로 마운트합니다.
+- **dm-verity 확립 & 읽기 전용 마운트** — **서명된 dm-verity 테이블** 로 패키지 파일시스템 이미지에 device-mapper verity 타깃을 설정하고, `package.dir.oci_bundle/<name>_<version>/pkgfs` 아래에 읽기 전용으로 마운트합니다.
   이후 읽기마다 모든 블록이 검증됩니다.
 - **OCI Runtime config 생성** — 패키지의 `runtime.json`과 다음 정보를 조합하여 최종 *OCI Runtime config* 로 변환합니다:
   - rootfs 위치
