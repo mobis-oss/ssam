@@ -4,10 +4,8 @@
   <a href="container-isolation.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
 </p>
 
-A running container's security isolation — syscall filtering, mandatory access
-control, filesystem/resource limits, and network isolation — is provided by the
-**OCI Runtime (`crun`) and the Linux kernel**. This document describes how SSAM
-assembles those isolation settings and delivers them to the *OCI Runtime*.
+A running container's security isolation — syscall filtering, mandatory access control, filesystem/resource limits, and network isolation — is provided by the **OCI Runtime (`crun`) and the Linux kernel**.
+This document describes how SSAM assembles those isolation settings and delivers them to the *OCI Runtime*.
 
 ---
 
@@ -21,14 +19,10 @@ assembles those isolation settings and delivers them to the *OCI Runtime*.
 
 ## The delegation mechanism
 
-Every isolation declaration lives **in the package** — `config.toml`,
-`seccomp.json`, and `runtime.json`. At load time `ssamd`
-generates the container's single **OCI Runtime config** from them, then hands the
-bundle to `crun` (see
-[Execution Architecture](execution.md#the-execution-pipeline)).
+Every isolation declaration lives **in the package** — `config.toml`, `seccomp.json`, and `runtime.json`.
+At load time `ssamd` generates the container's single **OCI Runtime config** from them, then hands the bundle to `crun` (see [Execution Architecture](execution.md#the-execution-pipeline)).
 
-The boundary is clean: **SSAM generates the config from the declarations**, and
-the **kernel and `crun` enforce** the isolation.
+The boundary is clean: **SSAM generates the config from the declarations**, and the **kernel and `crun` enforce** the isolation.
 
 ```mermaid
 flowchart LR
@@ -77,15 +71,10 @@ For each isolation, what SSAM does and who enforces it:
 
 Design specifics of the delegation that the table doesn't capture:
 
-- **MAC profiles originate on the host** — authoring a profile and
-  loading it into the kernel is the host's job; SSAM selects a loaded profile by
-  name and sets it in the OCI config. This contrasts with *seccomp*, where the
-  package carries the policy.
-- **`bridge` mode is an isolated internal bridge** — no gateway, NAT, or external
-  routing.
-- **The read-only rootfs also underpins integrity** — the container cannot
-  rewrite its own package filesystem (see
-  [Package Integrity](package-integrity.md#filesystem-integrity--dm-verity)).
+- **MAC profiles originate on the host** — authoring a profile and loading it into the kernel is the host's job; SSAM selects a loaded profile by name and sets it in the OCI config.
+  This contrasts with *seccomp*, where the package carries the policy.
+- **`bridge` mode is an isolated internal bridge** — no gateway, NAT, or external routing.
+- **The read-only rootfs also underpins integrity** — the container cannot rewrite its own package filesystem (see [Package Integrity](package-integrity.md#filesystem-integrity--dm-verity)).
 
 ---
 

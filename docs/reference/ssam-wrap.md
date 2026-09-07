@@ -4,14 +4,10 @@
   <a href="ssam-wrap.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
 </p>
 
-`ssam-wrap` is the SSAM package creation tool. It takes a *container-native*
-application's filesystem — supplied either as a directory, a pre-built image
-file, or a Docker/OCI container image — and produces a signed,
-integrity-protected SSAM package that `ssamd` can install and run as a
-container.
+`ssam-wrap` is the SSAM package creation tool.
+It takes a *container-native* application's filesystem — supplied either as a directory, a pre-built image file, or a Docker/OCI container image — and produces a signed, integrity-protected SSAM package that `ssamd` can install and run as a container.
 
-> 📖 For a step-by-step walkthrough of creating a package, see the
-> **[Wrapping a SSAM — Package Creation Guide](../guides/wrapping-a-ssam.md)**.
+> 📖 For a step-by-step walkthrough of creating a package, see the **[Wrapping a SSAM — Package Creation Guide](../guides/wrapping-a-ssam.md)**.
 
 ---
 
@@ -29,8 +25,8 @@ container.
 
 ## Requirements
 
-`ssam-wrap` shells out to a number of external tools. Make sure the following
-are installed and available on `PATH`:
+`ssam-wrap` shells out to a number of external tools.
+Make sure the following are installed and available on `PATH`:
 
 | Tool | Purpose | Required when |
 | --- | --- | --- |
@@ -44,8 +40,7 @@ are installed and available on `PATH`:
 | [`umoci`](https://github.com/opencontainers/umoci) | Unpack OCI images to a rootfs | Docker/OCI source |
 | `docker` | Inspect image architecture | `docker-daemon:` source only |
 
-> **Note:** `truncate` is part of GNU coreutils and is normally already
-> present on Linux systems.
+> **Note:** `truncate` is part of GNU coreutils and is normally already present on Linux systems.
 
 ---
 
@@ -53,11 +48,9 @@ are installed and available on `PATH`:
 
 `ssam-wrap` operates in one of two mutually exclusive modes:
 
-- **Prepare mode** (`--prepare`) — generates template config files (`config.toml`,
-  `runtime.json`, `seccomp.json`) in the workspace. Never overwrites existing files.
-- **Wrap mode** (default, requires `--private-key`) — builds the package filesystem
-  image, computes the *dm-verity* hash tree, and signs it into the final SSAM
-  package file.
+- **Prepare mode** (`--prepare`) — generates template config files (`config.toml`, `runtime.json`, `seccomp.json`) in the workspace.
+  Never overwrites existing files.
+- **Wrap mode** (default, requires `--private-key`) — builds the package filesystem image, computes the *dm-verity* hash tree, and signs it into the final SSAM package file.
 
 > 📖 For each step in detail and how to use them, see the [Package Creation Guide](../guides/wrapping-a-ssam.md).
 
@@ -104,8 +97,8 @@ Anything else passed to `--pkgfs-src` is treated as a **local filesystem path**.
 
 ## The Workspace
 
-A workspace is just a directory. After preparing and building a package it
-contains:
+A workspace is just a directory.
+After preparing and building a package it contains:
 
 ```
 <workspace>/
@@ -118,10 +111,9 @@ contains:
 ```
 
 - If `pkgfs/` is a **directory**, `ssam-wrap` builds a filesystem image from it.
-- If `pkgfs/` (or its symlink target) is a **file**, it is treated as an
-  already-built image and used as-is (the `--pkgfs-type` option is ignored).
-- The `intermediate/` directory holds the built image and the `.root_hash`
-  file. It can be deleted between builds.
+- If `pkgfs/` (or its symlink target) is a **file**, it is treated as an already-built image and used as-is (the `--pkgfs-type` option is ignored).
+- The `intermediate/` directory holds the built image and the `.root_hash` file.
+  It can be deleted between builds.
 
 > 📖 For what the three config files contain and how to fill them in, see the [Package Creation Guide](../guides/wrapping-a-ssam.md) and the [`config.toml` Reference](package-config.md).
 
@@ -144,11 +136,10 @@ Selected with `-t` / `--pkgfs-type` (only when the source is a directory):
 
 ## Signing
 
-wrap mode signs each package with an *RSA* private key, which `ssamd` verifies
-against the corresponding public key. Pass the private key via `--private-key`.
+wrap mode signs each package with an *RSA* private key, which `ssamd` verifies against the corresponding public key.
+Pass the private key via `--private-key`.
 
-On success, `ssam-wrap` prints the package name, service type, the signing key
-used, and the signed *dm-verity* table.
+On success, `ssam-wrap` prints the package name, service type, the signing key used, and the signed *dm-verity* table.
 
 > 📖 For generating the *RSA* key pair and protecting the private and public keys, see [Package Integrity → Package signing](../guides/package-integrity.md#package-signing--rsa).
 

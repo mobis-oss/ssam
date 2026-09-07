@@ -4,13 +4,9 @@
   <a href="package-integrity.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
 </p>
 
-SSAM guarantees that a device runs **only trusted, unmodified** packages and
-keeps detecting tampering for as long as they run. Packages can be installed and
-updated freely at runtime, yet — regardless of where they are stored or how
-mutable that location is — their integrity is always verified at execution time:
-software shipped as a SSAM package gets **free updates and run-time integrity at
-once**. It does this with an **integrity model** built from three parts: a trust
-anchor (the on-device public key), an *RSA* signature, and *dm-verity*.
+SSAM guarantees that a device runs **only trusted, unmodified** packages and keeps detecting tampering for as long as they run.
+Packages can be installed and updated freely at runtime, yet — regardless of where they are stored or how mutable that location is — their integrity is always verified at execution time: software shipped as a SSAM package gets **free updates and run-time integrity at once**.
+It does this with an **integrity model** built from three parts: a trust anchor (the on-device public key), an *RSA* signature, and *dm-verity*.
 
 > 📖 For **how to configure** signing, *dm-verity*, and the read-only filesystem, see the [Package Integrity guide](../guides/package-integrity.md).
 
@@ -32,31 +28,24 @@ anchor (the on-device public key), an *RSA* signature, and *dm-verity*.
 
 The root of trust is an **RSA key pair**:
 
-- The **private key** lives off-device, with whoever builds packages;
-  `ssam-wrap` signs each package with it at build time.
-- The **public key** is installed on the device and is the only thing `ssamd`
-  trusts. Any package it cannot verify against that key is rejected.
+- The **private key** lives off-device, with whoever builds packages; `ssam-wrap` signs each package with it at build time.
+- The **public key** is installed on the device and is the only thing `ssamd` trusts.
+  Any package it cannot verify against that key is rejected.
 
 Two things must therefore be protected:
 
-- **The private key's secrecy** — anyone holding it can produce packages the
-  device will accept.
-- **The on-device public key's integrity** — it is the trust anchor. If an
-  attacker can replace it, they can substitute their own signing key, so it must
-  be protected with the platform's normal mechanisms (read-only rootfs, secure
-  boot, file permissions).
+- **The private key's secrecy** — anyone holding it can produce packages the device will accept.
+- **The on-device public key's integrity** — it is the trust anchor.
+  If an attacker can replace it, they can substitute their own signing key, so it must be protected with the platform's normal mechanisms (read-only rootfs, secure boot, file permissions).
 
-`ssamd` itself runs as **root**, so a package that passes verification runs with
-high privilege — which is exactly why authenticity is enforced before anything
-else runs.
+`ssamd` itself runs as **root**, so a package that passes verification runs with high privilege — which is exactly why authenticity is enforced before anything else runs.
 
 ---
 
 ## Integrity chain overview
 
-SSAM protects a package in two stages. A single few-kilobyte check at load time
-extends into continuous protection of the whole filesystem for as long as the
-package runs:
+SSAM protects a package in two stages.
+A single few-kilobyte check at load time extends into continuous protection of the whole filesystem for as long as the package runs:
 
 ```mermaid
 flowchart LR
@@ -85,21 +74,15 @@ flowchart LR
   style DEV stroke:#94a3b8
 ```
 
-- **Sign (build).** `ssam-wrap` *RSA*-signs only the **configuration data** — the
-  package filesystem image is not signed.
+- **Sign (build).** `ssam-wrap` *RSA*-signs only the **configuration data** — the package filesystem image is not signed.
 - **Verify (load).** `ssamd` verifies the signature at load with the public key.
-- **Verify continuously (runtime).** The kernel's *dm-verity* checks each
-  filesystem block **on every read**.
+- **Verify continuously (runtime).** The kernel's *dm-verity* checks each filesystem block **on every read**.
 
-The signature covers only a few kilobytes but, through the embedded root hash,
-**transitively protects the entire filesystem**.
+The signature covers only a few kilobytes but, through the embedded root hash, **transitively protects the entire filesystem**.
 
-This split is a deliberate **performance choice**. Signing the whole filesystem
-would force verifying all of it at load, slowing startup; instead SSAM signs
-only the few-kilobyte configuration data and leaves the filesystem to *dm-verity*,
-which verifies it on demand at runtime. The load-time signature check therefore
-stays cheap — keeping container startup fast while still guaranteeing integrity at
-runtime.
+This split is a deliberate **performance choice**.
+Signing the whole filesystem would force verifying all of it at load, slowing startup; instead SSAM signs only the few-kilobyte configuration data and leaves the filesystem to *dm-verity*, which verifies it on demand at runtime.
+The load-time signature check therefore stays cheap — keeping container startup fast while still guaranteeing integrity at runtime.
 
 The next two sections detail each half.
 
@@ -107,9 +90,7 @@ The next two sections detail each half.
 
 ## Package authenticity — RSA signature
 
-Each SSAM package carries an **RSA PKCS#1 v1.5 signature over a SHA-256
-digest** of its **configuration data** — the few kilobytes that describe how the
-package is built and run.
+Each SSAM package carries an **RSA PKCS#1 v1.5 signature over a SHA-256 digest** of its **configuration data** — the few kilobytes that describe how the package is built and run.
 
 ```mermaid
 flowchart LR
@@ -133,14 +114,10 @@ flowchart LR
   style PKG stroke:#94a3b8
 ```
 
-- Signing uses the private key; `ssamd` verifies with the public key **before
-  parsing any of those payloads**, deciding whether to trust the package.
-- A package signed by a different key — or with any signed payload altered —
-  fails verification and is refused.
+- Signing uses the private key; `ssamd` verifies with the public key **before parsing any of those payloads**, deciding whether to trust the package.
+- A package signed by a different key — or with any signed payload altered — fails verification and is refused.
 
-The signature deliberately does **not** cover the large package filesystem image or the
-signature payload itself — the filesystem image is protected indirectly (next
-section).
+The signature deliberately does **not** cover the large package filesystem image or the signature payload itself — the filesystem image is protected indirectly (next section).
 
 ---
 
@@ -173,57 +150,38 @@ flowchart LR
   style MD fill:#eef1f5,stroke:#2563eb,stroke-width:3px,color:#334155
 ```
 
-- *dm-verity* is enabled by default and can be disabled through
-  `[integrity].disable_runtime_integrity`. Disabling it removes block-level
-  runtime verification, but package signature verification still applies.
-- The signed `metadata` contains the **entire set of dm-verity parameters**
-  (including the root hash).
+- *dm-verity* is enabled by default and can be disabled through `[integrity].disable_runtime_integrity`.
+  Disabling it removes block-level runtime verification, but package signature verification still applies.
+- The signed `metadata` contains the **entire set of dm-verity parameters** (including the root hash).
 - At load time `ssamd` builds the *dm-verity* target from those signed parameters.
-  By *dm-verity*'s design, **every block is verified on each read**, so
-  tampering is detected not just at load but **continuously at runtime**.
+  By *dm-verity*'s design, **every block is verified on each read**, so tampering is detected not just at load but **continuously at runtime**.
 
 ---
 
 ## Hardening the package parser
 
-`ssamd` cannot trust a package's contents until its signature is verified, so it
-bounds what a malicious file can do **before** verification completes:
+`ssamd` cannot trust a package's contents until its signature is verified, so it bounds what a malicious file can do **before** verification completes:
 
-- **Verify-then-parse ordering.** The *RSA* signature is checked first; the
-  configuration payloads are deserialized and trusted **only after**
-  verification succeeds.
-- **Bounded pre-auth allocation.** Both the payload index decode and each signed
-  payload read during verification are capped at small fixed sizes, so an
-  attacker-controlled size field cannot force unbounded allocation.
-- **Offset/size bounds checks.** Every declared payload region is validated
-  against the actual file size before reading, rejecting out-of-range offsets.
-- **Format gate.** A missing/incorrect magic or an unrecognized format version
-  is rejected before any payload processing.
+- **Verify-then-parse ordering.** The *RSA* signature is checked first; the configuration payloads are deserialized and trusted **only after** verification succeeds.
+- **Bounded pre-auth allocation.** Both the payload index decode and each signed payload read during verification are capped at small fixed sizes, so an attacker-controlled size field cannot force unbounded allocation.
+- **Offset/size bounds checks.** Every declared payload region is validated against the actual file size before reading, rejecting out-of-range offsets.
+- **Format gate.** A missing/incorrect magic or an unrecognized format version is rejected before any payload processing.
 
 ---
 
 ## Control interface security (RPC)
 
-- `ssamd` exposes the [Remocon gRPC control API](../reference/remocon-rpc.md)
-  over the fixed Linux abstract Unix domain socket `@ssamd`, so only processes
-  running in the same network namespace on the same host can access it.
-- An abstract socket cannot restrict access through filesystem permissions, so
-  any process in the same network namespace that knows the name can attempt to
-  connect.
-- However, `ssamd` only allows the connection when the peer's effective GID
-  matches the daemon's effective GID or is in a [configured allow-list](../reference/daemon-config.md#allowed_gids).
-- **Even an installation RPC from an allowed client has package authenticity
-  verified separately from caller authorization:** every installation request
-  must pass signature and integrity verification, and a package that fails
-  verification is refused and never gets set up or run.
+- `ssamd` exposes the [Remocon gRPC control API](../reference/remocon-rpc.md) over the fixed Linux abstract Unix domain socket `@ssamd`, so only processes running in the same network namespace on the same host can access it.
+- An abstract socket cannot restrict access through filesystem permissions, so any process in the same network namespace that knows the name can attempt to connect.
+- However, `ssamd` only allows the connection when the peer's effective GID matches the daemon's effective GID or is in a [configured allow-list](../reference/daemon-config.md#allowed_gids).
+- **Even an installation RPC from an allowed client has package authenticity verified separately from caller authorization:** every installation request must pass signature and integrity verification, and a package that fails verification is refused and never gets set up or run.
 
 ---
 
 ## Threat model summary
 
-This table covers the threats to **package integrity and authenticity**. For
-container-level threats (syscalls, host access, storage, network), see
-[Container Isolation](container-isolation.md).
+This table covers the threats to **package integrity and authenticity**.
+For container-level threats (syscalls, host access, storage, network), see [Container Isolation](container-isolation.md).
 
 | Threat | Primary mitigation |
 | --- | --- |
@@ -235,7 +193,5 @@ container-level threats (syscalls, host access, storage, network), see
 
 ---
 
-> 📖 For container-level confinement (*seccomp*, *AppArmor*, resource limits, networking),
-> see [Container Isolation](container-isolation.md). For the byte-level details of
-> signing and verification, see the
-> [Package Format Reference](package-format.md#signature-and-integrity).
+> 📖 For container-level confinement (*seccomp*, *AppArmor*, resource limits, networking), see [Container Isolation](container-isolation.md).
+> For the byte-level details of signing and verification, see the [Package Format Reference](package-format.md#signature-and-integrity).

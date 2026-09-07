@@ -4,19 +4,16 @@
   <a href="package-integrity.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
 </p>
 
-SSAM 패키지의 **내용을 신뢰** 하기 위한 세 가지를 다룹니다 — 진짜인지, 온전한지, 바뀌지
-않는지. 이 문서는 각각을 운영자와 패키지 작성자가 **어떻게 설정하는지** 설명합니다:
+SSAM 패키지의 **내용을 신뢰** 하기 위한 세 가지를 다룹니다 — 진짜인지, 온전한지, 바뀌지 않는지.
+이 문서는 각각을 운영자와 패키지 작성자가 **어떻게 설정하는지** 설명합니다:
 
 - **패키지 서명** — 신뢰할 수 있는 패키지만 로드합니다.
 - **파일시스템 무결성** — 실행 중 블록 변조를 지속적으로 감지합니다.
 - **읽기 전용 파일시스템** — 파일시스템 자체를 불변으로 만듭니다.
 
-> 📖 실행 중 컨테이너의 행위 제한(seccomp·AppArmor)은 [Container
-> Hardening](container-hardening.ko.md), 네트워크·자원 격리는 [Container
-> Isolation](container-isolation.ko.md) 가이드를 참고하세요.
+> 📖 실행 중 컨테이너의 행위 제한(seccomp·AppArmor)은 [Container Hardening](container-hardening.ko.md), 네트워크·자원 격리는 [Container Isolation](container-isolation.ko.md) 가이드를 참고하세요.
 
-> 📖 이 무결성 모델의 설계·위협 모델은 [Package Integrity 설계
-> 문서](../architecture/package-integrity.ko.md)를 참고하세요.
+> 📖 이 무결성 모델의 설계·위협 모델은 [Package Integrity 설계 문서](../architecture/package-integrity.ko.md)를 참고하세요.
 
 ---
 
@@ -30,8 +27,8 @@ SSAM 패키지의 **내용을 신뢰** 하기 위한 세 가지를 다룹니다 
 
 ## Package signing — RSA
 
-SSAM 패키지는 **RSA 개인 키**로 서명되고(`ssam-wrap`), 디바이스에 설치된 **공개
-키**로 검증됩니다(`ssamd`). 검증에 실패한 패키지는 로드 단계에서 거부됩니다.
+SSAM 패키지는 **RSA 개인 키**로 서명되고(`ssam-wrap`), 디바이스에 설치된 **공개 키**로 검증됩니다(`ssamd`).
+검증에 실패한 패키지는 로드 단계에서 거부됩니다.
 
 > 📖 서명이 무엇을 보장하는지는 [패키지 무결성 → 신뢰 모델](../architecture/package-integrity.ko.md#trust-model)을 참고하세요.
 
@@ -59,32 +56,25 @@ $ openssl rsa -in private_key.pem -pubout -out public_key.pem
 생성한 키는 다음과 같이 사용합니다:
 
 - 개인 키(`private_key.pem`)는 `ssam-wrap --private-key`로 패키지 서명에 씁니다.
-- 공개 키(`public_key.pem`)는 디바이스에 설치하고, 데몬 설정 `ssamd.toml`의
-  [`public_key_file_path`](../reference/daemon-config.ko.md#public_key_file_path)로
-  지정합니다.
+- 공개 키(`public_key.pem`)는 디바이스에 설치하고, 데몬 설정 `ssamd.toml`의 [`public_key_file_path`](../reference/daemon-config.ko.md#public_key_file_path)로 지정합니다.
 
 ### 개인 키 보호
 
-개인 키는 **서명 권한 그 자체** 입니다 — 이를 가진 누구든 디바이스가 검증할 패키지를
-만들 수 있습니다. HSM이나 접근이 제한된 CI 시크릿에 보관하고, **디바이스로는 절대
-배포하지 마세요**.
+개인 키는 **서명 권한 그 자체** 입니다 — 이를 가진 누구든 디바이스가 검증할 패키지를 만들 수 있습니다.
+HSM이나 접근이 제한된 CI 시크릿에 보관하고, **디바이스로는 절대 배포하지 마세요**.
 
 ### 신뢰 체인 보호
 
-서명 검증의 신뢰는 두 가지에 달려 있습니다 — 검증 기준인 **공개 키** 와, 검증을 실제로
-수행하는 **`ssamd` 바이너리** 입니다. 둘 중 하나라도 조작되면 위조 패키지가 통과할 수
-있으므로 둘 다 보호해야 합니다:
+서명 검증의 신뢰는 두 가지에 달려 있습니다 — 검증 기준인 **공개 키** 와, 검증을 실제로 수행하는 **`ssamd` 바이너리** 입니다.
+둘 중 하나라도 조작되면 위조 패키지가 통과할 수 있으므로 둘 다 보호해야 합니다:
 
-- **공개 키** — `ssamd`가 신뢰하는 유일한 신뢰 앵커입니다. 공격자가 자기 키로
-  바꿔치기하면 위조 패키지가 통과합니다.
-- **`ssamd` 바이너리** — 서명 검증을 수행하는 주체입니다. 검증이 무력화된 `ssamd`로
-  바꿔치기되면 서명이 틀려도 통과합니다.
+- **공개 키** — `ssamd`가 신뢰하는 유일한 신뢰 앵커입니다.
+  공격자가 자기 키로 바꿔치기하면 위조 패키지가 통과합니다.
+- **`ssamd` 바이너리** — 서명 검증을 수행하는 주체입니다.
+  검증이 무력화된 `ssamd`로 바꿔치기되면 서명이 틀려도 통과합니다.
 
-둘 다 **읽기 전용·시큐어 부트로 보호되는 경로** 에 두고 쓰기 권한을 최소화하세요. 시큐어
-부트를 지원하는 플랫폼에서는 그 신뢰가 부트체인에서 `ssamd`와 공개 키까지 이어지도록
-구성합니다 — 플랫폼이 부트체인을 검증하고, 그 무결성이 `ssamd` 바이너리를 담은 서명된
-rootfs와 공개 키가 놓인 읽기 전용 경로를 보호하며, 조작되지 않은 `ssamd`가 공개 키를
-신뢰 앵커로 삼아 패키지 서명을 검증합니다:
+둘 다 **읽기 전용·시큐어 부트로 보호되는 경로** 에 두고 쓰기 권한을 최소화하세요.
+시큐어 부트를 지원하는 플랫폼에서는 그 신뢰가 부트체인에서 `ssamd`와 공개 키까지 이어지도록 구성합니다 — 플랫폼이 부트체인을 검증하고, 그 무결성이 `ssamd` 바이너리를 담은 서명된 rootfs와 공개 키가 놓인 읽기 전용 경로를 보호하며, 조작되지 않은 `ssamd`가 공개 키를 신뢰 앵커로 삼아 패키지 서명을 검증합니다:
 
 ```mermaid
 flowchart LR
@@ -114,45 +104,40 @@ flowchart LR
 
 ## Filesystem integrity — dm-verity
 
-패키지 파일시스템 이미지는 *dm-verity* 로 블록 단위 무결성을 검증받습니다. 빌드 시
-`ssam-wrap`이 해시 트리를 만들고, 런타임에 `ssamd`가 *dm-verity* 대상을 구성하면 커널이
-읽기마다 그 트리로 블록을 검증합니다.
+패키지 파일시스템 이미지는 *dm-verity* 로 블록 단위 무결성을 검증받습니다.
+빌드 시 `ssam-wrap`이 해시 트리를 만들고, 런타임에 `ssamd`가 *dm-verity* 대상을 구성하면 커널이 읽기마다 그 트리로 블록을 검증합니다.
 
 > 📖 동작 원리는 [패키지 무결성 → dm-verity](../architecture/package-integrity.ko.md#filesystem-integrity--dm-verity)를 참고하세요.
 
-**커널 설정.** *dm-verity* 는 호스트 커널의 device-mapper verity 대상을 사용합니다. 다음
-커널 설정이 필요합니다:
+**커널 설정.** *dm-verity* 는 호스트 커널의 device-mapper verity 대상을 사용합니다.
+다음 커널 설정이 필요합니다:
 
 - `CONFIG_BLK_DEV_DM` — device-mapper
 - `CONFIG_DM_VERITY` — dm-verity 대상
 
-**운영 설정.** 블록 검증은 기본으로 켜져 있어 별도 설정이 없어도 됩니다. 다만 다음 두
-가지에 주의하세요:
+**운영 설정.** 블록 검증은 기본으로 켜져 있어 별도 설정이 없어도 됩니다.
+다만 다음 두 가지에 주의하세요:
 
-- `ssamd.toml`의
-  [`packages_overlayfs_root`](../reference/daemon-config.ko.md#packages_overlayfs_root)를
-  **빈 값** 으로 두세요. 값을 지정하면 쓰기 가능한 overlay가 얹혀 *dm-verity* 무결성이
-  사실상 무력화됩니다 — 이 overlay는 **디버깅·개발용** 이므로 운영에서는 비웁니다.
-- [`[integrity].disable_runtime_integrity`](../reference/daemon-config.ko.md#integrity)는
-  런타임 블록 검증을 끄는 **디버깅용 스위치** 입니다(꺼도 서명 검증은 유지됩니다).
+- `ssamd.toml`의 [`packages_overlayfs_root`](../reference/daemon-config.ko.md#packages_overlayfs_root)를 **빈 값** 으로 두세요.
+  값을 지정하면 쓰기 가능한 overlay가 얹혀 *dm-verity* 무결성이 사실상 무력화됩니다 — 이 overlay는 **디버깅·개발용** 이므로 운영에서는 비웁니다.
+- [`[integrity].disable_runtime_integrity`](../reference/daemon-config.ko.md#integrity)는 런타임 블록 검증을 끄는 **디버깅용 스위치** 입니다(꺼도 서명 검증은 유지됩니다).
   운영에서는 기본값(`false`)을 쓰세요.
 
 ---
 
 ## Read-only filesystem
 
-패키지 파일시스템을 읽기 전용으로 두면 실행 중 rootfs가 변경되지 않아, 서명·*dm-verity* 로
-검증한 내용이 그대로 유지됩니다. SSAM은 두 파일시스템을 지원합니다:
+패키지 파일시스템을 읽기 전용으로 두면 실행 중 rootfs가 변경되지 않아, 서명·*dm-verity* 로 검증한 내용이 그대로 유지됩니다.
+SSAM은 두 파일시스템을 지원합니다:
 
-- **EROFS(기본·권장)** — `ssam-wrap`이 기본으로 빌드합니다
-  ([`--pkgfs-type`](../reference/ssam-wrap.ko.md#package-filesystem-types)). *EROFS* 는
-  **파일시스템 레벨에서 읽기 전용만 지원** 하므로 마운트된 패키지 파일시스템에는 애초에
-  쓰기 경로가 없고, **압축을 지원** 해 이미지 크기도 줄입니다. 불변성과 크기 두 면에서
-  유리하므로 기본값이자 권장입니다.
-- **ext4** — 대안으로 지원합니다. 읽기 전용으로 **마운트** 되어 런타임에 쓰기가 막힙니다.
+- **EROFS(기본·권장)** — `ssam-wrap`이 기본으로 빌드합니다 ([`--pkgfs-type`](../reference/ssam-wrap.ko.md#package-filesystem-types)).
+  *EROFS* 는 **파일시스템 레벨에서 읽기 전용만 지원** 하므로 마운트된 패키지 파일시스템에는 애초에 쓰기 경로가 없고, **압축을 지원** 해 이미지 크기도 줄입니다.
+  불변성과 크기 두 면에서 유리하므로 기본값이자 권장입니다.
+- **ext4** — 대안으로 지원합니다.
+  읽기 전용으로 **마운트** 되어 런타임에 쓰기가 막힙니다.
 
-읽기 전용 파일시스템은 *dm-verity* 와 **직교하는 별도 방어** 입니다. 파일시스템이 쓰기를
-막고, 그 위에서 블록이 조작되더라도 *dm-verity* 가 잡아냅니다 — 서로 독립적인 두 방어입니다.
+읽기 전용 파일시스템은 *dm-verity* 와 **직교하는 별도 방어** 입니다.
+파일시스템이 쓰기를 막고, 그 위에서 블록이 조작되더라도 *dm-verity* 가 잡아냅니다 — 서로 독립적인 두 방어입니다.
 
 **커널 설정.** *EROFS* 이미지를 마운트하려면 호스트 커널에 다음이 필요합니다:
 

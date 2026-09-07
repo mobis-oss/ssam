@@ -4,13 +4,10 @@
   <a href="ssam-wrap.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
 </p>
 
-`ssam-wrap`은 SSAM 패키지 생성 도구입니다. *container-native* 애플리케이션의
-파일시스템을 — 디렉터리, 미리 빌드된 이미지 파일, 또는 Docker/OCI 컨테이너
-이미지 형태로 — 입력받아, `ssamd`가 설치하고 컨테이너로 실행할 수 있는
-서명·무결성 보호된 SSAM 패키지를 생성합니다.
+`ssam-wrap`은 SSAM 패키지 생성 도구입니다.
+*container-native* 애플리케이션의 파일시스템을 — 디렉터리, 미리 빌드된 이미지 파일, 또는 Docker/OCI 컨테이너 이미지 형태로 — 입력받아, `ssamd`가 설치하고 컨테이너로 실행할 수 있는 서명·무결성 보호된 SSAM 패키지를 생성합니다.
 
-> 📖 패키지 생성의 단계별 안내는 **[SSAM 만들기 — 패키지 생성 가이드](../guides/wrapping-a-ssam.ko.md)** 를
-> 참고하세요.
+> 📖 패키지 생성의 단계별 안내는 **[SSAM 만들기 — 패키지 생성 가이드](../guides/wrapping-a-ssam.ko.md)** 를 참고하세요.
 
 ---
 
@@ -28,8 +25,8 @@
 
 ## Requirements
 
-`ssam-wrap`은 여러 외부 도구를 실행합니다. 다음 도구들이 설치되어
-있고 `PATH`에서 접근 가능해야 합니다:
+`ssam-wrap`은 여러 외부 도구를 실행합니다.
+다음 도구들이 설치되어 있고 `PATH`에서 접근 가능해야 합니다:
 
 | 도구 | 용도 | 필요한 경우 |
 | --- | --- | --- |
@@ -43,8 +40,7 @@
 | [`umoci`](https://github.com/opencontainers/umoci) | OCI 이미지를 rootfs로 언팩 | Docker/OCI 소스 사용 시 |
 | `docker` | 이미지 아키텍처 확인 | `docker-daemon:` 소스에 한해 |
 
-> **참고:** `truncate`는 GNU coreutils의 일부로, 대부분의 Linux 시스템에
-> 이미 존재합니다.
+> **참고:** `truncate`는 GNU coreutils의 일부로, 대부분의 Linux 시스템에 이미 존재합니다.
 
 ---
 
@@ -52,10 +48,9 @@
 
 `ssam-wrap`은 상호 배타적인 두 모드로 동작합니다:
 
-- **prepare 모드** (`--prepare`) — 워크스페이스에 템플릿 설정 파일(`config.toml`,
-  `runtime.json`, `seccomp.json`)을 생성합니다. 기존 파일은 덮어쓰지 않습니다.
-- **wrap 모드** (기본, `--private-key` 필요) — 패키지 파일시스템 이미지 빌드,
-  *dm-verity* 해시 트리 계산, 서명을 거쳐 최종 SSAM 패키지 파일을 만듭니다.
+- **prepare 모드** (`--prepare`) — 워크스페이스에 템플릿 설정 파일(`config.toml`, `runtime.json`, `seccomp.json`)을 생성합니다.
+  기존 파일은 덮어쓰지 않습니다.
+- **wrap 모드** (기본, `--private-key` 필요) — 패키지 파일시스템 이미지 빌드, *dm-verity* 해시 트리 계산, 서명을 거쳐 최종 SSAM 패키지 파일을 만듭니다.
 
 > 📖 각 단계의 상세와 실제 사용법은 [패키지 생성 가이드](../guides/wrapping-a-ssam.ko.md)를 참고하세요.
 
@@ -102,8 +97,8 @@ ssam-wrap [OPTIONS] <WORKSPACE>
 
 ## The Workspace
 
-워크스페이스는 단순한 디렉터리입니다. 패키지를 준비하고 빌드한 뒤에는 다음을
-포함합니다:
+워크스페이스는 단순한 디렉터리입니다.
+패키지를 준비하고 빌드한 뒤에는 다음을 포함합니다:
 
 ```
 <workspace>/
@@ -115,10 +110,8 @@ ssam-wrap [OPTIONS] <WORKSPACE>
 └── <name>-<version>.ssam   # 최종 패키지 (기본 출력 위치)
 ```
 
-- `pkgfs/`가 **디렉터리** 이면, `ssam-wrap`은 그것으로부터 파일시스템 이미지를
-  빌드합니다.
-- `pkgfs/`(또는 그 심링크 대상)가 **파일** 이면, 이미 빌드된 이미지로 간주하여
-  그대로 사용합니다(`--pkgfs-type` 옵션은 무시됨).
+- `pkgfs/`가 **디렉터리** 이면, `ssam-wrap`은 그것으로부터 파일시스템 이미지를 빌드합니다.
+- `pkgfs/`(또는 그 심링크 대상)가 **파일** 이면, 이미 빌드된 이미지로 간주하여 그대로 사용합니다(`--pkgfs-type` 옵션은 무시됨).
 - `intermediate/` 디렉터리는 빌드된 이미지와 `.root_hash` 파일을 담습니다.
   빌드 사이에 삭제해도 됩니다.
 
@@ -143,11 +136,10 @@ SSAM의 읽기 전용·무결성 검증 런타임 모델에는 *EROFS* 를 권�
 
 ## Signing
 
-wrap 모드는 각 패키지를 *RSA* 개인 키로 서명하고, `ssamd`가 대응하는 공개 키로
-검증합니다. 개인 키는 `--private-key`로 전달합니다.
+wrap 모드는 각 패키지를 *RSA* 개인 키로 서명하고, `ssamd`가 대응하는 공개 키로 검증합니다.
+개인 키는 `--private-key`로 전달합니다.
 
-성공하면 `ssam-wrap`은 패키지 이름, 서비스 타입, 사용된 서명 키, 서명된 *dm-verity*
-테이블을 출력합니다.
+성공하면 `ssam-wrap`은 패키지 이름, 서비스 타입, 사용된 서명 키, 서명된 *dm-verity* 테이블을 출력합니다.
 
 > 📖 *RSA* 키 쌍 생성과 개인·공개 키 보호는 [Package Integrity → 패키지 서명](../guides/package-integrity.ko.md#package-signing--rsa)을 참고하세요.
 

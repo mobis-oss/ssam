@@ -4,15 +4,12 @@
   <a href="container-isolation.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
 </p>
 
-SSAM으로 컨테이너를 실행할 때 컨테이너의 **네트워크** 와 **자원(cgroup·저장 쿼터)** 을
-설정할 수 있습니다. 이 가이드는 그 설정 방법을 다룹니다.
+SSAM으로 컨테이너를 실행할 때 컨테이너의 **네트워크** 와 **자원(cgroup·저장 쿼터)** 을 설정할 수 있습니다.
+이 가이드는 그 설정 방법을 다룹니다.
 
-> 📖 실행 중 컨테이너의 행위 제한(seccomp·AppArmor)은 [Container
-> Hardening](container-hardening.ko.md), 패키지 무결성(서명·dm-verity·읽기 전용
-> 파일시스템)은 [Package Integrity](package-integrity.ko.md) 가이드를 참고하세요.
+> 📖 실행 중 컨테이너의 행위 제한(seccomp·AppArmor)은 [Container Hardening](container-hardening.ko.md), 패키지 무결성(서명·dm-verity·읽기 전용 파일시스템)은 [Package Integrity](package-integrity.ko.md) 가이드를 참고하세요.
 
-> 📖 격리가 어떻게 *OCI Runtime* 에 위임·집행되는지(설계·모델)는 [Container Isolation 설계
-> 문서](../architecture/container-isolation.ko.md)를 참고하세요.
+> 📖 격리가 어떻게 *OCI Runtime* 에 위임·집행되는지(설계·모델)는 [Container Isolation 설계 문서](../architecture/container-isolation.ko.md)를 참고하세요.
 
 ---
 
@@ -71,14 +68,10 @@ mode = "none"
 
 `bridge` 모드는 컨테이너를 `ssamd`가 관리하는 **내부** 브리지에 배치합니다:
 
-- **격리.** 게이트웨이·NAT·외부 라우팅이 없습니다 — 브리지에 연결된 컨테이너는
-  같은 브리지의 다른 컨테이너에는 닿지만 외부 네트워크에는 닿지 않습니다.
-- **공유 네트워크.** 같은
-  [`network_name`](../reference/package-config.ko.md#containernetworkbridge)을
-  설정한 패키지들은 같은 브리지에 연결되어 서로 통신할 수 있습니다. 생략하면
-  패키지 전용 브리지를 갖습니다.
-- **주소 할당.** `ssamd`가 데몬의 브리지 주소 풀에서 각 컨테이너에 주소를 할당하고, 브리지
-  인터페이스 이름을 자동으로 지정합니다.
+- **격리.** 게이트웨이·NAT·외부 라우팅이 없습니다 — 브리지에 연결된 컨테이너는 같은 브리지의 다른 컨테이너에는 닿지만 외부 네트워크에는 닿지 않습니다.
+- **공유 네트워크.** 같은 [`network_name`](../reference/package-config.ko.md#containernetworkbridge)을 설정한 패키지들은 같은 브리지에 연결되어 서로 통신할 수 있습니다.
+  생략하면 패키지 전용 브리지를 갖습니다.
+- **주소 할당.** `ssamd`가 데몬의 브리지 주소 풀에서 각 컨테이너에 주소를 할당하고, 브리지 인터페이스 이름을 자동으로 지정합니다.
 - **데몬 브리지 설정 필요.** 데몬 브리지 설정([`[network.bridge]`](../reference/daemon-config.ko.md#networkbridge))이 비활성인데 패키지가 `bridge`를 요청하면 `ssamd`는 패키지를 **거부** 합니다.
 
 브리지 모드는 **데몬** 과 **패키지** 양쪽 설정이 맞아야 동작합니다.
@@ -140,25 +133,22 @@ mode = "/var/run/netns/my-netns"
 
 ## Container cgroup (`packages_cgroup`)
 
-`ssamd.toml`의 [`packages_cgroup`](../reference/daemon-config.ko.md#packages_cgroup)은
-모든 패키지 컨테이너가 놓일 **root cgroup** 을 지정합니다.
+`ssamd.toml`의 [`packages_cgroup`](../reference/daemon-config.ko.md#packages_cgroup)은 모든 패키지 컨테이너가 놓일 **root cgroup** 을 지정합니다.
 
-- **설정하지 않으면(기본설정)** `ssamd`는 root cgroup으로 호스트의 `system.slice`를
-  사용합니다.
+- **설정하지 않으면(기본설정)** `ssamd`는 root cgroup으로 호스트의 `system.slice`를 사용합니다.
 - **값을 지정하면** 그 경로를 root cgroup으로 사용합니다.
 
-root cgroup이 정해지면 `ssamd`는 각 컨테이너 *OCI Runtime config*의 `cgroupsPath`를
-`<packages_cgroup>/<패키지명>.service/container`로 지정합니다. 이를 통해 모든 패키지
-컨테이너가 함께 사용하는 자원의 상한을 제한할 수 있습니다. 지정한 root cgroup은 **`ssamd`
-시작 전에 존재해야** 하며, `ssamd`는 이를 생성하지 않습니다(없으면 데몬이 중단됩니다).
+root cgroup이 정해지면 `ssamd`는 각 컨테이너 *OCI Runtime config*의 `cgroupsPath`를 `<packages_cgroup>/<패키지명>.service/container`로 지정합니다.
+이를 통해 모든 패키지 컨테이너가 함께 사용하는 자원의 상한을 제한할 수 있습니다.
+지정한 root cgroup은 **`ssamd` 시작 전에 존재해야** 하며, `ssamd`는 이를 생성하지 않습니다(없으면 데몬이 중단됩니다).
 
-값을 지정하는 방법은 두 가지입니다. 어느 쪽이든 root cgroup은 호스트 시스템이 미리
-준비하고, `ssamd.toml`은 그 이름을 가리키도록 설정합니다.
+값을 지정하는 방법은 두 가지입니다.
+어느 쪽이든 root cgroup은 호스트 시스템이 미리 준비하고, `ssamd.toml`은 그 이름을 가리키도록 설정합니다.
 
 ### systemd slice unit 활용하기
 
-root cgroup으로 *systemd* **slice unit** 을 사용할 수 있습니다. 예를 들어, root cgroup으로 쓸
-slice를 `ssam.slice`로 한 경우:
+root cgroup으로 *systemd* **slice unit** 을 사용할 수 있습니다.
+예를 들어, root cgroup으로 쓸 slice를 `ssam.slice`로 한 경우:
 - `ssamd.toml`에 `packages_cgroup = "ssam.slice"`로 지정
 - `ssamd`는 각 컨테이너별 *systemd* service unit(`<패키지명>.service`)의 `Slice=`를 `ssam.slice`로 설정
 - `ssamd`는 각 컨테이너별 *OCI Runtime config*의 `cgroupsPath`를 `ssam.slice/<패키지명>.service/container`로 설정
@@ -174,13 +164,12 @@ EOF
 # systemctl start ssam.slice
 ```
 
-> 📖 slice unit 작성과 slice 단위 자원 제한(`CPUQuota=`·`MemoryMax=` 등)은
-> `systemd.slice(5)`·`systemd.resource-control(5)` man 페이지를 참고하세요.
+> 📖 slice unit 작성과 slice 단위 자원 제한(`CPUQuota=`·`MemoryMax=` 등)은 `systemd.slice(5)`·`systemd.resource-control(5)` man 페이지를 참고하세요.
 
 ### cgroup 사용하기
 
-root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다. 예를 들어, root cgroup으로 쓸
-이름을 `ssam`으로 한 경우:
+root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다.
+예를 들어, root cgroup으로 쓸 이름을 `ssam`으로 한 경우:
 - `ssamd.toml`에 `packages_cgroup = "ssam"`으로 지정
 - `ssamd`는 각 컨테이너별 *OCI Runtime config*의 `cgroupsPath`를 `ssam/<패키지명>.service/container`로 설정
 - `ssamd`는 이 값이 *systemd* slice가 아니므로 각 컨테이너별 *systemd* service unit에 `Slice=`를 설정하지 않고 경고 로그를 출력
@@ -191,18 +180,15 @@ root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다. 예를 
 # mkdir -p /sys/fs/cgroup/ssam
 ```
 
-> 📖 이 cgroup에 CPU·메모리 등 **자원 제한** 을 설정하는 방법은 커널 [cgroup v2
-> 문서](https://docs.kernel.org/admin-guide/cgroup-v2.html)나 `cgroups(7)` man 페이지를
-> 참고하세요.
+> 📖 이 cgroup에 CPU·메모리 등 **자원 제한** 을 설정하는 방법은 커널 [cgroup v2 문서](https://docs.kernel.org/admin-guide/cgroup-v2.html)나 `cgroups(7)` man 페이지를 참고하세요.
 
 ---
 
 ## Storage quota (`storage_limit`)
 
-패키지가 [`container.storage_limit`](../reference/package-config.ko.md#storage_limit)을 선언하면
-`ssamd`는 그 패키지의 데이터 디렉터리에 용량 상한을 적용합니다.
-`ssamd`는 이를 *ext4* **project quota** 로 구현합니다. 이를 사용하려면 **호스트 시스템의
-커널 설정**과 **[`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root)로 설정한 파일시스템**이 각각 다음을 갖춰야 합니다.
+패키지가 [`container.storage_limit`](../reference/package-config.ko.md#storage_limit)을 선언하면 `ssamd`는 그 패키지의 데이터 디렉터리에 용량 상한을 적용합니다.
+`ssamd`는 이를 *ext4* **project quota** 로 구현합니다.
+이를 사용하려면 **호스트 시스템의 커널 설정**과 **[`packages_data_root`](../reference/daemon-config.ko.md#packages_data_root)로 설정한 파일시스템**이 각각 다음을 갖춰야 합니다.
 
 **커널 설정**
 
@@ -213,9 +199,7 @@ root cgroup으로 cgroup을 직접 만들어 사용할 수 있습니다. 예를 
 **파일시스템**
 
 - **ext4** 파일시스템일 것.
-- **project quota가 활성** 화되어 있을 것 — 예를 들어 `mkfs.ext4 -O quota,project`
-  로 포맷(또는 `tune2fs`로 기능 추가)하고 project quota로 마운트(`-o prjquota`).
+- **project quota가 활성** 화되어 있을 것 — 예를 들어 `mkfs.ext4 -O quota,project` 로 포맷(또는 `tune2fs`로 기능 추가)하고 project quota로 마운트(`-o prjquota`).
 
-전제가 충족되지 않으면(*ext4* 가 아니거나 project quota 미활성) `ssamd`는 경고를 남기고
-`storage_limit`을 적용하지 않은 채 계속 실행하며, 컨테이너는 용량 제한 없이
-기동합니다. 상한을 실제로 강제하려면 위 조건을 미리 갖추세요.
+전제가 충족되지 않으면(*ext4* 가 아니거나 project quota 미활성) `ssamd`는 경고를 남기고 `storage_limit`을 적용하지 않은 채 계속 실행하며, 컨테이너는 용량 제한 없이 기동합니다.
+상한을 실제로 강제하려면 위 조건을 미리 갖추세요.

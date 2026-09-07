@@ -4,9 +4,8 @@
   <a href="container-isolation.md"><img src="https://img.shields.io/badge/lang-English-blue" alt="English"></a>
 </p>
 
-실행 중인 컨테이너의 보안 격리 — 시스템 콜 필터링, 강제 접근 제어, 파일시스템/자원
-제한, 네트워크 격리 — 는 **OCI Runtime(`crun`)과 Linux 커널** 이 제공합니다. 이 문서는
-그 격리 설정을 SSAM이 어떻게 **구성해 *OCI Runtime*에 전달** 하는지를 설명합니다.
+실행 중인 컨테이너의 보안 격리 — 시스템 콜 필터링, 강제 접근 제어, 파일시스템/자원 제한, 네트워크 격리 — 는 **OCI Runtime(`crun`)과 Linux 커널** 이 제공합니다.
+이 문서는 그 격리 설정을 SSAM이 어떻게 **구성해 *OCI Runtime*에 전달** 하는지를 설명합니다.
 
 ---
 
@@ -20,13 +19,10 @@
 
 ## The delegation mechanism
 
-격리 설정의 선언은 모두 **패키지 안** 에 있습니다 — `config.toml`, `seccomp.json`,
-`runtime.json`. 로드 시점에 `ssamd`가 이들로 컨테이너의 단일
-**OCI Runtime config를 생성** 한 뒤, 그 번들을 `crun`에 넘깁니다
-([실행 아키텍처](execution.ko.md#the-execution-pipeline) 참조).
+격리 설정의 선언은 모두 **패키지 안** 에 있습니다 — `config.toml`, `seccomp.json`, `runtime.json`.
+로드 시점에 `ssamd`가 이들로 컨테이너의 단일 **OCI Runtime config를 생성** 한 뒤, 그 번들을 `crun`에 넘깁니다 ([실행 아키텍처](execution.ko.md#the-execution-pipeline) 참조).
 
-경계는 분명합니다: **SSAM은 선언에서 config를 생성** 하고, 실제 격리는 **커널과
-`crun`** 이 집행합니다.
+경계는 분명합니다: **SSAM은 선언에서 config를 생성** 하고, 실제 격리는 **커널과 `crun`** 이 집행합니다.
 
 ```mermaid
 flowchart LR
@@ -75,14 +71,10 @@ flowchart LR
 
 표에 담기지 않는 위임 방식의 설계적 특이점:
 
-- **MAC 프로파일은 호스트 시스템에서 나옵니다** — 프로파일을 정의해 커널에
-  로드하는 것은 호스트의 몫이고, SSAM은 로드된 프로파일을 이름으로 *선택* 해 OCI
-  config에 실을 뿐입니다. 정책을 패키지가 담는 *seccomp* 과 대조되는 지점입니다.
-- **`bridge` 모드는 격리된 내부 브리지** 입니다 — 게이트웨이·NAT·외부 라우팅이
-  없습니다.
-- **읽기 전용 rootfs는 무결성도 뒷받침** 합니다 — 컨테이너가 자신의 패키지
-  파일시스템을 다시 쓸 수 없습니다
-  ([Package Integrity](package-integrity.ko.md#filesystem-integrity--dm-verity) 참조).
+- **MAC 프로파일은 호스트 시스템에서 나옵니다** — 프로파일을 정의해 커널에 로드하는 것은 호스트의 몫이고, SSAM은 로드된 프로파일을 이름으로 *선택* 해 OCI config에 실을 뿐입니다.
+  정책을 패키지가 담는 *seccomp* 과 대조되는 지점입니다.
+- **`bridge` 모드는 격리된 내부 브리지** 입니다 — 게이트웨이·NAT·외부 라우팅이 없습니다.
+- **읽기 전용 rootfs는 무결성도 뒷받침** 합니다 — 컨테이너가 자신의 패키지 파일시스템을 다시 쓸 수 없습니다 ([Package Integrity](package-integrity.ko.md#filesystem-integrity--dm-verity) 참조).
 
 ---
 

@@ -4,11 +4,9 @@
   <a href="remocon-rpc.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
 </p>
 
-This document describes the Remocon API `ssamd` provides over *gRPC* to
-control packages.
+This document describes the Remocon API `ssamd` provides over *gRPC* to control packages.
 
-> 📖 For a step-by-step walkthrough of writing a Remocon client, see the
-> **[Writing a Remocon Client](../guides/writing-a-remocon-client.md)** guide.
+> 📖 For a step-by-step walkthrough of writing a Remocon client, see the **[Writing a Remocon Client](../guides/writing-a-remocon-client.md)** guide.
 
 ---
 
@@ -34,33 +32,28 @@ control packages.
 | Endpoint | Linux abstract Unix domain socket `@ssamd` |
 | Auth | `SO_PEERCRED`: peer effective GID must match the daemon's effective GID or an entry in `[rpc].allowed_gids` |
 
-Before dispatching an RPC, `ssamd` reads the peer's effective GID from
-`SO_PEERCRED`. The peer is allowed when that GID matches the daemon's effective
-GID or one of the additional GIDs in `[rpc].allowed_gids`; the list defaults to
-empty. UID is not used for authorization.
+Before dispatching an RPC, `ssamd` reads the peer's effective GID from `SO_PEERCRED`.
+The peer is allowed when that GID matches the daemon's effective GID or one of the additional GIDs in `[rpc].allowed_gids`; the list defaults to empty.
+UID is not used for authorization.
 
 ---
 
 ## Request metadata
 
-*gRPC* metadata are key-value pairs carried alongside a request — the equivalent of
-request headers.
+*gRPC* metadata are key-value pairs carried alongside a request — the equivalent of request headers.
 
 ### `x-ssam-api-version`
 
-**Required.** The API version the client uses. Its value must match `CURRENT` in
-the `ApiVersion` enum; if it is missing or not `CURRENT`, the request is rejected
-with *gRPC* `FAILED_PRECONDITION` before the RPC handler runs. Use the
-code-generated enum value rather than hardcoding its numeric value.
+**Required.** The API version the client uses.
+Its value must match `CURRENT` in the `ApiVersion` enum; if it is missing or not `CURRENT`, the request is rejected with *gRPC* `FAILED_PRECONDITION` before the RPC handler runs.
+Use the code-generated enum value rather than hardcoding its numeric value.
 
 | Value | Meaning |
 | --- | --- |
 | `UNSPECIFIED` | Unspecified — not a valid request version |
 | `CURRENT` | The current API version — use this in requests |
 
-> ⚠️ Headers rejected earlier while the client constructs metadata or by the
-> HTTP/2 transport itself — such as values containing a newline or NUL byte — do
-> not guarantee a `FAILED_PRECONDITION` status.
+> ⚠️ Headers rejected earlier while the client constructs metadata or by the HTTP/2 transport itself — such as values containing a newline or NUL byte — do not guarantee a `FAILED_PRECONDITION` status.
 
 ---
 
@@ -90,19 +83,14 @@ Install a package from a local path.
 - **Response:** [`InstallPackageResponse`](#response-messages)
 - **Response data type:** [`PackageData`](#packagedata)
 
-Every accepted installation RPC runs full signature and integrity checks (see
-[Package Integrity](../architecture/package-integrity.md)), regardless of the
-`downgrade` option. A package that fails verification is rejected at this step
-and is not installed (see
-[Control interface security](../architecture/package-integrity.md#control-interface-security-rpc)).
+Every accepted installation RPC runs full signature and integrity checks (see [Package Integrity](../architecture/package-integrity.md)), regardless of the `downgrade` option.
+A package that fails verification is rejected at this step and is not installed (see [Control interface security](../architecture/package-integrity.md#control-interface-security-rpc)).
 
-Version comparison against any currently installed version of the same
-package determines the outcome:
+Version comparison against any currently installed version of the same package determines the outcome:
 
 - **Same version** — always rejected, regardless of `downgrade`.
 - **Older version** — rejected unless `downgrade: true` is set.
-- **Newer version** — rejected if `downgrade: true` is set; use the default
-  (`false`) for an upgrade.
+- **Newer version** — rejected if `downgrade: true` is set; use the default (`false`) for an upgrade.
 
 ### `RemovePackage`
 
@@ -112,8 +100,7 @@ Remove an installed package.
 - **Response:** `google.protobuf.Empty`
 - **Response data type:** *(none)*
 
-A missing package returns *gRPC* `NotFound`; other removal failures return
-`Internal`.
+A missing package returns *gRPC* `NotFound`; other removal failures return `Internal`.
 
 ### `StartPackage`
 
@@ -149,8 +136,8 @@ List installed packages and their status, including `Broken` entries.
 
 ### `ListPackageInfo`
 
-Details for one or more installed packages. An empty `package_names` list
-returns all installed packages; whitespace-only names are ignored.
+Details for one or more installed packages.
+An empty `package_names` list returns all installed packages; whitespace-only names are ignored.
 
 - **Request:** [`ListPackageInfoRequest`](#listpackageinforequest)
 - **Response:** [`ListPackageInfoResponse`](#response-messages)
@@ -158,10 +145,9 @@ returns all installed packages; whitespace-only names are ignored.
 
 ### `ListPackageInfoFromFiles`
 
-Details for SSAM package files without installing them. An empty path list
-returns an empty result. One result is returned per requested path in input
-order; a relative path or an inspection failure is represented by a result
-with `success=false`.
+Details for SSAM package files without installing them.
+An empty path list returns an empty result.
+One result is returned per requested path in input order; a relative path or an inspection failure is represented by a result with `success=false`.
 
 - **Request:** [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest)
 - **Response:** [`ListPackageInfoFromFilesResponse`](#response-messages)
@@ -179,9 +165,7 @@ Daemon timeline / uptime information.
 
 ## Request messages
 
-`ListPackages` and `GetTimelineInfo` take
-`google.protobuf.Empty` and have no request fields of their own — only the
-messages below do.
+`ListPackages` and `GetTimelineInfo` take `google.protobuf.Empty` and have no request fields of their own — only the messages below do.
 
 ### `InstallPackageRequest`
 
@@ -264,9 +248,9 @@ Package data returned by the response.
 
 ### `PackageInfo`
 
-Returned for each requested package by `ListPackageInfo`. `status` is the
-single package status value. `success` is `false` for a missing package or a
-lookup error; a `Broken` entry is returned with `success=true` and error fields.
+Returned for each requested package by `ListPackageInfo`.
+`status` is the single package status value.
+`success` is `false` for a missing package or a lookup error; a `Broken` entry is returned with `success=true` and error fields.
 
 | Field | Type | Presence | Meaning |
 | --- | --- | --- | --- |
@@ -288,8 +272,7 @@ lookup error; a `Broken` entry is returned with `success=true` and error fields.
 
 ### `PackageActionResult`
 
-Per-package outcome for the bulk operations (`StartPackage`, `StopPackage`,
-`WipePackageData`), which each return an **array** with one entry per package.
+Per-package outcome for the bulk operations (`StartPackage`, `StopPackage`, `WipePackageData`), which each return an **array** with one entry per package.
 
 | Field | Type | Presence | Meaning |
 | --- | --- | --- | --- |

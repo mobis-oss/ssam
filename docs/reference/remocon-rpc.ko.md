@@ -6,8 +6,7 @@
 
 이 문서는 패키지를 제어하기 위해 `ssamd`가 *gRPC* 로 제공하는 Remocon API를 설명합니다.
 
-> 📖 Remocon 클라이언트 작성의 단계별 안내는 **[Remocon 클라이언트 작성](../guides/writing-a-remocon-client.ko.md)** 을
-> 참고하세요.
+> 📖 Remocon 클라이언트 작성의 단계별 안내는 **[Remocon 클라이언트 작성](../guides/writing-a-remocon-client.ko.md)** 을 참고하세요.
 
 ---
 
@@ -34,9 +33,8 @@
 | 인증 | `SO_PEERCRED`: peer의 effective GID가 데몬의 effective GID 또는 `[rpc].allowed_gids` 항목과 일치해야 함 |
 
 `ssamd` 는 RPC를 dispatch하기 전에 `SO_PEERCRED`에서 peer의 effective GID를 읽습니다.
-이 GID가 데몬의 effective GID와 같거나 `[rpc].allowed_gids`에 지정된 추가 GID 중
-하나와 같으면 허용합니다. 목록의 기본값은 빈 목록이며, 인증에는 UID를 사용하지
-않습니다.
+이 GID가 데몬의 effective GID와 같거나 `[rpc].allowed_gids`에 지정된 추가 GID 중 하나와 같으면 허용합니다.
+목록의 기본값은 빈 목록이며, 인증에는 UID를 사용하지 않습니다.
 
 ---
 
@@ -46,19 +44,16 @@
 
 ### `x-ssam-api-version`
 
-**필수.** 클라이언트가 사용하는 API 버전. 값은 `ApiVersion` enum의 `CURRENT`와 일치해야 하며,
-없거나 `CURRENT`가 아니면 RPC handler가 실행되기 전에 *gRPC* `FAILED_PRECONDITION`
-으로 거부됩니다. 숫자 값을 직접 하드코딩하지 말고 codegen으로 생성된 enum 값을
-사용하세요.
+**필수.** 클라이언트가 사용하는 API 버전.
+값은 `ApiVersion` enum의 `CURRENT`와 일치해야 하며, 없거나 `CURRENT`가 아니면 RPC handler가 실행되기 전에 *gRPC* `FAILED_PRECONDITION` 으로 거부됩니다.
+숫자 값을 직접 하드코딩하지 말고 codegen으로 생성된 enum 값을 사용하세요.
 
 | 값 | 의미 |
 | --- | --- |
 | `UNSPECIFIED` | 미지정 — 유효한 request version이 아님 |
 | `CURRENT` | 현재 API 버전 — request에 사용 |
 
-> ⚠️ 개행이나 NUL byte가 포함된 header처럼 클라이언트의 metadata 생성 단계 또는 HTTP/2
-> transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECONDITION` status가
-> 보장되지 않습니다.
+> ⚠️ 개행이나 NUL byte가 포함된 header처럼 클라이언트의 metadata 생성 단계 또는 HTTP/2 transport에서 header 자체가 먼저 거부되는 경우에는 `FAILED_PRECONDITION` status가 보장되지 않습니다.
 
 ---
 
@@ -88,17 +83,15 @@
 - **Response:** [`InstallPackageResponse`](#response-messages)
 - **Response data type:** [`PackageData`](#packagedata)
 
-허용된 설치 RPC는 `downgrade` 설정과 무관하게 항상 서명·무결성 검사를 거칩니다
-([패키지 무결성](../architecture/package-integrity.ko.md) 참조). 검증에 실패한 패키지는
-이 단계에서 거부되어 설치되지 않습니다([제어 인터페이스 보안]
-(../architecture/package-integrity.ko.md#control-interface-security-rpc) 참조).
+허용된 설치 RPC는 `downgrade` 설정과 무관하게 항상 서명·무결성 검사를 거칩니다 ([패키지 무결성](../architecture/package-integrity.ko.md) 참조).
+검증에 실패한 패키지는 이 단계에서 거부되어 설치되지 않습니다([제어 인터페이스 보안] (../architecture/package-integrity.ko.md#control-interface-security-rpc) 참조).
 
 설치 허용 여부는 같은 패키지의 이미 설치된 버전과 비교해 결정됩니다:
 
 - **동일 버전** — `downgrade` 값과 무관하게 항상 거부됩니다.
 - **낮은 버전** — `downgrade: true`를 지정하지 않으면 거부됩니다.
-- **높은 버전** — `downgrade: true`를 지정하면 오히려 거부됩니다. 업그레이드에는
-  기본값(`false`)을 사용하세요.
+- **높은 버전** — `downgrade: true`를 지정하면 오히려 거부됩니다.
+  업그레이드에는 기본값(`false`)을 사용하세요.
 
 ### `RemovePackage`
 
@@ -108,8 +101,7 @@
 - **Response:** `google.protobuf.Empty`
 - **Response data type:** *(none)*
 
-패키지가 없으면 *gRPC* `NotFound`를 반환하며, 그 외 제거 오류는 `Internal`을
-반환합니다.
+패키지가 없으면 *gRPC* `NotFound`를 반환하며, 그 외 제거 오류는 `Internal`을 반환합니다.
 
 ### `StartPackage`
 
@@ -137,7 +129,8 @@
 
 ### `ListPackages`
 
-설치된 패키지와 상태 목록. `Broken` 항목도 포함합니다.
+설치된 패키지와 상태 목록.
+`Broken` 항목도 포함합니다.
 
 - **Request:** `google.protobuf.Empty`
 - **Response:** [`ListPackagesResponse`](#response-messages)
@@ -145,7 +138,8 @@
 
 ### `ListPackageInfo`
 
-설치된 하나 이상의 패키지 상세 정보. 공백만 있는 이름은 무시합니다.
+설치된 하나 이상의 패키지 상세 정보.
+공백만 있는 이름은 무시합니다.
 
 - **Request:** [`ListPackageInfoRequest`](#listpackageinforequest)
 - **Response:** [`ListPackageInfoResponse`](#response-messages)
@@ -153,9 +147,9 @@
 
 ### `ListPackageInfoFromFiles`
 
-설치하지 않고 SSAM 패키지 파일을 조회합니다. 경로 목록이 비어 있으면 빈 결과를
-반환합니다. 요청한 경로 순서대로 각 파일에 대한 결과를 반환하며, 상대 경로나
-검사 실패는 해당 결과의 `success=false`로 표시합니다.
+설치하지 않고 SSAM 패키지 파일을 조회합니다.
+경로 목록이 비어 있으면 빈 결과를 반환합니다.
+요청한 경로 순서대로 각 파일에 대한 결과를 반환하며, 상대 경로나 검사 실패는 해당 결과의 `success=false`로 표시합니다.
 
 - **Request:** [`ListPackageInfoFromFilesRequest`](#listpackageinfofromfilesrequest)
 - **Response:** [`ListPackageInfoFromFilesResponse`](#response-messages)
@@ -173,9 +167,7 @@
 
 ## Request messages
 
-`ListPackages`, `GetTimelineInfo`는
-`google.protobuf.Empty`를 받으며 자체 요청 필드가 없습니다 — 아래
-메시지에만 필드가 있습니다.
+`ListPackages`, `GetTimelineInfo`는 `google.protobuf.Empty`를 받으며 자체 요청 필드가 없습니다 — 아래 메시지에만 필드가 있습니다.
 
 ### `InstallPackageRequest`
 
@@ -260,9 +252,9 @@
 
 ### `PackageInfo`
 
-`ListPackageInfo`가 요청한 각 패키지에 대해 반환합니다. `status`가 패키지의
-단일 상태 값이고, 패키지가 없거나 조회 오류이면 `success=false`입니다. `Broken`
-항목은 `success=true`와 오류 field를 함께 반환합니다.
+`ListPackageInfo`가 요청한 각 패키지에 대해 반환합니다.
+`status`가 패키지의 단일 상태 값이고, 패키지가 없거나 조회 오류이면 `success=false`입니다.
+`Broken` 항목은 `success=true`와 오류 field를 함께 반환합니다.
 
 | 필드 | 타입 | 존재 | 의미 |
 | --- | --- | --- | --- |
@@ -284,8 +276,8 @@
 
 ### `PackageActionResult`
 
-일괄 작업(`StartPackage`, `StopPackage`, `WipePackageData`)의 패키지별 결과. 이
-작업들은 패키지당 한 항목씩 담은 **배열** 을 반환합니다.
+일괄 작업(`StartPackage`, `StopPackage`, `WipePackageData`)의 패키지별 결과.
+이 작업들은 패키지당 한 항목씩 담은 **배열** 을 반환합니다.
 
 | 필드 | 타입 | 존재 | 의미 |
 | --- | --- | --- | --- |

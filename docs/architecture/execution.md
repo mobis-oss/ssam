@@ -4,8 +4,7 @@
   <a href="execution.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
 </p>
 
-How `ssamd` turns a verified SSAM package into a running container, and the
-components involved.
+How `ssamd` turns a verified SSAM package into a running container, and the components involved.
 
 ---
 
@@ -20,9 +19,8 @@ components involved.
 
 ## Architecture diagram
 
-`ssamd` is a long-running root daemon that loads and verifies packages, manages
-them through a state machine, and builds each container's *OCI Runtime bundle* and
-runtime environment through to the execution request. Below are the components and the flow.
+`ssamd` is a long-running root daemon that loads and verifies packages, manages them through a state machine, and builds each container's *OCI Runtime bundle* and runtime environment through to the execution request.
+Below are the components and the flow.
 
 ```mermaid
 flowchart TB
@@ -66,27 +64,19 @@ flowchart TB
   style EXT stroke:#94a3b8
 ```
 
-- **Package management.** `PackageManager` scans and loads the bundled and downloaded package
-  directories, verifies signatures, and drives each package's state machine (`TransitionManager`).
-- **Acquiring the data volume.** `PackageVolumeManagerActor` creates the package's data directory when
-  the package is loaded and registered, and — when configured — limits data usage. This limit is
-  supported only when the data partition's filesystem is *ext4*, applied through project quota.
-- **Building the runtime environment.** `PackageTransitioner` builds the container's
-  runtime environment from a verified package — `PackageFileSystem` enables *dm-verity* on the
-  filesystem for runtime integrity and mounts it read-only, `ContainerCommand` generates the
-  *OCI Runtime config*, and `NetworkManager` attaches the network namespace.
-- **Running the container.** `TransientUnitExecutor` registers and starts the assembled
-  *OCI Runtime bundle* as a *systemd* service unit, and *crun* creates and runs the container.
-- **Tracking container state.** `ActiveStateConverterActor` then monitors the *systemd*
-  unit's state and updates the package status (Running / Ready) in `TransitionManager`.
+- **Package management.** `PackageManager` scans and loads the bundled and downloaded package directories, verifies signatures, and drives each package's state machine (`TransitionManager`).
+- **Acquiring the data volume.** `PackageVolumeManagerActor` creates the package's data directory when the package is loaded and registered, and — when configured — limits data usage.
+  This limit is supported only when the data partition's filesystem is *ext4*, applied through project quota.
+- **Building the runtime environment.** `PackageTransitioner` builds the container's runtime environment from a verified package — `PackageFileSystem` enables *dm-verity* on the filesystem for runtime integrity and mounts it read-only, `ContainerCommand` generates the *OCI Runtime config*, and `NetworkManager` attaches the network namespace.
+- **Running the container.** `TransientUnitExecutor` registers and starts the assembled *OCI Runtime bundle* as a *systemd* service unit, and *crun* creates and runs the container.
+- **Tracking container state.** `ActiveStateConverterActor` then monitors the *systemd* unit's state and updates the package status (Running / Ready) in `TransitionManager`.
 
 ---
 
 ## The execution pipeline
 
-`ssamd` takes each package through loading the package file, building its
-runtime environment, and running it. Running launches the container only when
-a separate [`StartPackage`](../reference/remocon-rpc.md#startpackage) request arrives, unless the package config specifies autostart.
+`ssamd` takes each package through loading the package file, building its runtime environment, and running it.
+Running launches the container only when a separate [`StartPackage`](../reference/remocon-rpc.md#startpackage) request arrives, unless the package config specifies autostart.
 
 ```mermaid
 flowchart LR
@@ -107,37 +97,25 @@ flowchart LR
 
 First it **loads and verifies** the package, in order:
 
-1. **Load & parse** — open the SSAM package file and read its payload index and its
-   **configuration** payloads.
-2. **Verify signature** — check the *RSA* PKCS#1 v1.5 signature over the
-   package's **configuration data** against the configured public key. A
-   mismatch stops here and marks the package `Broken`.
+1. **Load & parse** — open the SSAM package file and read its payload index and its **configuration** payloads.
+2. **Verify signature** — check the *RSA* PKCS#1 v1.5 signature over the package's **configuration data** against the configured public key.
+   A mismatch stops here and marks the package `Broken`.
 
-Once verified, it first **acquires the package's data volume** — it creates a
-per-package directory under [`packages_data_root`](../reference/daemon-config.md#packages_data_root), creates each path the package
-declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and,
-if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps
-usage with *ext4* project quota.
+Once verified, it first **acquires the package's data volume** — it creates a per-package directory under [`packages_data_root`](../reference/daemon-config.md#packages_data_root), creates each path the package declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and, if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps usage with *ext4* project quota.
 
-It then **builds the runtime environment**. These build steps run **concurrently
-wherever possible, and all must succeed**:
+It then **builds the runtime environment**.
+These build steps run **concurrently wherever possible, and all must succeed**:
 
-- **Establish dm-verity & mount read-only** — from the **signed dm-verity
-  table**, set up a device-mapper verity target over the package filesystem
-  image and mount it read-only under `packages_mnt_root`, so every block is
-  verified on read.
-- **Generate the OCI Runtime config** — translate the package's `runtime.json`, combined
-  with the following, into the final *OCI Runtime config*:
+- **Establish dm-verity & mount read-only** — from the **signed dm-verity table**, set up a device-mapper verity target over the package filesystem image and mount it read-only under `packages_mnt_root`, so every block is verified on read.
+- **Generate the OCI Runtime config** — translate the package's `runtime.json`, combined with the following, into the final *OCI Runtime config*:
   - rootfs location
   - the acquired data directories bind-mounted onto the `data_dirs` paths
   - seccomp policy
   - cgroup placement
   - AppArmor confinement
-- **Attach network** — for `bridge` mode, attach the container's network
-  namespace to an internal bridge.
+- **Attach network** — for `bridge` mode, attach the container's network namespace to an internal bridge.
 
-Finally, the *OCI Runtime config* built with the rootfs location — the *OCI Runtime bundle* —
-is handed to a *systemd* service unit that runs the container (next section).
+Finally, the *OCI Runtime config* built with the rootfs location — the *OCI Runtime bundle* — is handed to a *systemd* service unit that runs the container (next section).
 
 ---
 
@@ -145,18 +123,13 @@ is handed to a *systemd* service unit that runs the container (next section).
 
 `ssamd` runs the container as a *systemd* `transient` service unit:
 
-- **systemd.** `ssamd` registers a **service unit** whose `Type=` comes from the
-  package's [`service_type`](../reference/package-config.md#service_type)
-  (`simple`, `notify`, `oneshot`, …). *systemd* owns the unit's lifecycle,
-  restarts, and ordering.
-- **`crun`.** *systemd*'s `ExecStart` runs *crun* on the *OCI Runtime bundle*,
-  which creates the container.
-- **Tracking & logs.** The container runs as a *systemd* service, and `ssamd` registers to
-  monitor it. State changes of the service (i.e. the container) are reported back to `ssamd`, and
-  logs from *systemd* and the container go to the *systemd* journal, viewable with `journalctl`.
+- **systemd.** `ssamd` registers a **service unit** whose `Type=` comes from the package's [`service_type`](../reference/package-config.md#service_type) (`simple`, `notify`, `oneshot`, …).
+  *systemd* owns the unit's lifecycle, restarts, and ordering.
+- **`crun`.** *systemd*'s `ExecStart` runs *crun* on the *OCI Runtime bundle*, which creates the container.
+- **Tracking & logs.** The container runs as a *systemd* service, and `ssamd` registers to monitor it.
+  State changes of the service (i.e. the container) are reported back to `ssamd`, and logs from *systemd* and the container go to the *systemd* journal, viewable with `journalctl`.
 
-`ssamd` does not embed a container engine; it uses the target's existing service
-manager (*systemd*) and the *OCI Runtime* (*crun*) to run the container.
+`ssamd` does not embed a container engine; it uses the target's existing service manager (*systemd*) and the *OCI Runtime* (*crun*) to run the container.
 
 ---
 
@@ -191,5 +164,4 @@ stateDiagram-v2
   StopRequested --> Ready
 ```
 
-Verification failures are recorded as `Broken`; setup failures and other
-failed operations surface as `Error`.
+Verification failures are recorded as `Broken`; setup failures and other failed operations surface as `Error`.

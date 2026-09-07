@@ -5,13 +5,9 @@
   <a href="serving-ssam.ko.md"><img src="https://img.shields.io/badge/lang-한국어-blue" alt="Korean"></a>
 </p>
 
-Once you have [wrapped a SSAM package](wrapping-a-ssam.md), **`ssamd`**
-is what serves it: the SSAM daemon installs packages, verifies their signatures,
-sets up *dm-verity* integrity checking, mounts the package filesystem, and runs
-the *container-native* application under *systemd*.
+Once you have [wrapped a SSAM package](wrapping-a-ssam.md), **`ssamd`** is what serves it: the SSAM daemon installs packages, verifies their signatures, sets up *dm-verity* integrity checking, mounts the package filesystem, and runs the *container-native* application under *systemd*.
 
-This guide walks you through building, deploying, configuring, and running
-`ssamd`.
+This guide walks you through building, deploying, configuring, and running `ssamd`.
 
 ---
 
@@ -33,21 +29,15 @@ This guide walks you through building, deploying, configuring, and running
 
 ## What ssamd does
 
-`ssamd` is a long-running daemon that manages the full lifecycle of SSAM
-packages on a device:
+`ssamd` is a long-running daemon that manages the full lifecycle of SSAM packages on a device:
 
-- **Loads & verifies** each package — opens it, parses the payloads, and checks
-  the *RSA* signature against the configured public key.
-- **Establishes integrity** by setting up a *dm-verity* target from the package's
-  signed *dm-verity* parameters, so tampering is detected continuously at read time.
+- **Loads & verifies** each package — opens it, parses the payloads, and checks the *RSA* signature against the configured public key.
+- **Establishes integrity** by setting up a *dm-verity* target from the package's signed *dm-verity* parameters, so tampering is detected continuously at read time.
 - **Mounts** the package filesystem read-only.
 - **Generates the OCI Runtime config** from the package's `runtime.json`.
-- **Runs** the container via an *OCI Runtime* (`crun`) as a *systemd* service,
-  applying the package's runtime config, seccomp policy, and MAC confinement.
-- **Provisions** each package's persistent data directories (with optional *ext4*
-  project-quota limits) and network (host / none / bridge).
-- **Exposes** an RPC control endpoint (the fixed abstract Unix socket `@ssamd`) that the `ssam` CLI uses to
-  list, install, start, stop, and remove packages.
+- **Runs** the container via an *OCI Runtime* (`crun`) as a *systemd* service, applying the package's runtime config, seccomp policy, and MAC confinement.
+- **Provisions** each package's persistent data directories (with optional *ext4* project-quota limits) and network (host / none / bridge).
+- **Exposes** an RPC control endpoint (the fixed abstract Unix socket `@ssamd`) that the `ssam` CLI uses to list, install, start, stop, and remove packages.
 
 `ssamd` itself supports running as a **root**, **systemd `notify`** service.
 
@@ -63,8 +53,7 @@ packages on a device:
 
 **Tools:**
 
-- [`crun`](https://github.com/containers/crun) — the *OCI Runtime* that launches
-  containers.
+- [`crun`](https://github.com/containers/crun) — the *OCI Runtime* that launches containers.
 - **systemd** — `ssamd` runs each container as a *systemd* service unit.
 
 **Mandatory kernel features:**
@@ -90,8 +79,8 @@ $ cargo install --path ssamd
 
 This installs the `ssamd` binary into `~/.cargo/bin`.
 
-Or you can cross-compile. For example, build a statically linked aarch64 binary
-using musl:
+Or you can cross-compile.
+For example, build a statically linked aarch64 binary using musl:
 
 ```console
 $ cargo build -p ssamd --release --target aarch64-unknown-linux-musl
@@ -102,9 +91,8 @@ $ cargo build -p ssamd --release --target aarch64-unknown-linux-musl
 
 ## Step 2 — Prepare directories
 
-Before configuring `ssamd`, decide and prepare the directories the daemon will
-use. The paths you set here are used as-is when you generate the configuration
-later.
+Before configuring `ssamd`, decide and prepare the directories the daemon will use.
+The paths you set here are used as-is when you generate the configuration later.
 
 | Directory | Role | If missing |
 | --- | --- | --- |
@@ -114,12 +102,8 @@ later.
 | `packages_mnt_root` | Where verified package filesystem images are mounted | Auto-created |
 | `packages_overlayfs_root` | Overlay filesystem root (optional) | Auto-created |
 
-`bundled_packages_dir` must exist ahead of time; `ssamd` does not create it. The
-rest are created on startup if missing, but **pre-creating them all is
-recommended**: in production these directories are typically dedicated partitions
-or mount points (e.g. `packages_data_root` presumes a filesystem mounted with
-*ext4* project quota), and if the parent path they mount onto is read-only you
-cannot rely on runtime auto-creation.
+`bundled_packages_dir` must exist ahead of time; `ssamd` does not create it.
+The rest are created on startup if missing, but **pre-creating them all is recommended**: in production these directories are typically dedicated partitions or mount points (e.g. `packages_data_root` presumes a filesystem mounted with *ext4* project quota), and if the parent path they mount onto is read-only you cannot rely on runtime auto-creation.
 
 For example:
 
@@ -132,8 +116,7 @@ For example:
 ```
 
 Place packages you want pre-installed on the device into `bundled_packages_dir`.
-For example, copy a SSAM package built with the [Wrapping a SSAM guide](wrapping-a-ssam.md)
-into this directory:
+For example, copy a SSAM package built with the [Wrapping a SSAM guide](wrapping-a-ssam.md) into this directory:
 
 ```console
 # cp helloworld.ssam /var/lib/ssamd/bundled/
@@ -143,18 +126,16 @@ into this directory:
 
 ## Step 3 — Prepare the public key
 
-Install the verification public key. This is the public half of the *RSA* key pair
-used to sign packages with `ssam-wrap`:
+Install the verification public key.
+This is the public half of the *RSA* key pair used to sign packages with `ssam-wrap`:
 
 ```console
 # mkdir -p /etc/ssamd
 # cp public_key.pem /etc/ssamd/public.key
 ```
 
-This public key is the only thing `ssamd` trusts to verify packages, so the
-entire trust model hinges on its integrity — if an attacker swaps in their own
-key, forged packages pass. **Place it on a read-only/secure-boot-protected path
-and tightly restrict write access.**
+This public key is the only thing `ssamd` trusts to verify packages, so the entire trust model hinges on its integrity — if an attacker swaps in their own key, forged packages pass.
+**Place it on a read-only/secure-boot-protected path and tightly restrict write access.**
 
 > 📖 For key-pair generation and management and the secure-boot trust chain, see [Package Integrity → Package signing](package-integrity.md#package-signing--rsa); for the signature format, see [Package Format → Signature and integrity](../architecture/package-format.md#signature-and-integrity).
 
@@ -162,13 +143,9 @@ and tightly restrict write access.**
 
 ## Step 4 — Prepare `ssamd.toml`
 
-`ssamd` reads `ssamd.toml` from the same directory as its binary (the only
-location it reads). You can write this file by hand using the
-[`ssamd.toml` Configuration Reference](../reference/daemon-config.md), but for
-convenience SSAM ships a generator script. Run
-[`gen_ssamd_conf.sh`](#generating-configuration-with-gen_ssamd_confsh) with the
-paths you set in the previous steps to generate a minimal configuration (the file
-is written to `--output-path`, and must end up next to the `ssamd` binary):
+`ssamd` reads `ssamd.toml` from the same directory as its binary (the only location it reads).
+You can write this file by hand using the [`ssamd.toml` Configuration Reference](../reference/daemon-config.md), but for convenience SSAM ships a generator script.
+Run [`gen_ssamd_conf.sh`](#generating-configuration-with-gen_ssamd_confsh) with the paths you set in the previous steps to generate a minimal configuration (the file is written to `--output-path`, and must end up next to the `ssamd` binary):
 
 ```console
 $ ssamd/releasedata/gen_ssamd_conf.sh \
@@ -196,8 +173,7 @@ packages_ext            = "ssam"
 
 Every `[common]` key (except `bundled_packages_dir`) must be present.
 
-The following keys, which you can leave empty, are **optional-feature** switches;
-how to prepare them is described in [Optional configuration](#optional-configuration):
+The following keys, which you can leave empty, are **optional-feature** switches; how to prepare them is described in [Optional configuration](#optional-configuration):
 
 - `packages_cgroup` — empty places containers in no dedicated cgroup slice.
 - `packages_overlayfs_root` — empty disables the overlay (the production default).
@@ -208,9 +184,7 @@ how to prepare them is described in [Optional configuration](#optional-configura
 
 ## Step 5 — Run under systemd
 
-`ssamd` must run as **root**, and since it signals readiness through *systemd*'s
-`sd_notify`, running it as a *systemd* **`notify`** service is recommended where
-possible, though not required.
+`ssamd` must run as **root**, and since it signals readiness through *systemd*'s `sd_notify`, running it as a *systemd* **`notify`** service is recommended where possible, though not required.
 
 Running it directly (foreground) for a quick test:
 
@@ -220,10 +194,8 @@ Running it directly (foreground) for a quick test:
 ...
 ```
 
-As a service, use a unit of `Type=notify` that runs the binary from the
-directory containing `ssamd.toml`. The
-[`gen_ssamd_conf.sh`](#generating-configuration-with-gen_ssamd_confsh) helper can
-generate a matching `ssamd.service` for you too.
+As a service, use a unit of `Type=notify` that runs the binary from the directory containing `ssamd.toml`.
+The [`gen_ssamd_conf.sh`](#generating-configuration-with-gen_ssamd_confsh) helper can generate a matching `ssamd.service` for you too.
 
 ---
 
@@ -239,8 +211,8 @@ Package name         Status
 helloworld           Ready
 ```
 
-Package containers run as *systemd* services, so their stdout/stderr and lifecycle
-appear in `journalctl` under the package's unit. For example, a package's logs:
+Package containers run as *systemd* services, so their stdout/stderr and lifecycle appear in `journalctl` under the package's unit.
+For example, a package's logs:
 
 ```console
 $ journalctl --no-pager -u helloworld
@@ -255,36 +227,27 @@ systemd[1]: helloworld.service: Deactivated successfully.
 
 ## Optional configuration
 
-The following features are not required to run the daemon; you configure them to
-match your operational policy. Using them needs separate host-side preparation.
+The following features are not required to run the daemon; you configure them to match your operational policy.
+Using them needs separate host-side preparation.
 
 ### Storage quota (`storage_limit`)
 
-To enforce a package's `container.storage_limit`, the filesystem holding
-`packages_data_root` must support *ext4* project quota.
+To enforce a package's `container.storage_limit`, the filesystem holding `packages_data_root` must support *ext4* project quota.
 
 > 📖 For the requirements and setup, see [Container Isolation → Storage quota](container-isolation.md#storage-quota-storage_limit).
 
 ### Container cgroup (`packages_cgroup`)
 
-Setting `packages_cgroup` makes `ssamd` place each container under the named
-cgroup, which must exist before `ssamd` starts.
+Setting `packages_cgroup` makes `ssamd` place each container under the named cgroup, which must exist before `ssamd` starts.
 
 > 📖 For the systemd-slice and outside-systemd setups, see [Container Isolation → Container cgroup](container-isolation.md#container-cgroup-packages_cgroup).
 
 ### AppArmor confinement for `ssamd`
 
-To confine the `ssamd` daemon itself with *AppArmor*, the host must author and load
-a profile attached to the daemon binary path — the `ssamd` runtime does not apply
-a profile to itself (the MAC it applies to *containers* is covered in
-[Container Hardening → Mandatory access control](container-hardening.md#mandatory-access-control--apparmor)).
+To confine the `ssamd` daemon itself with *AppArmor*, the host must author and load a profile attached to the daemon binary path — the `ssamd` runtime does not apply a profile to itself (the MAC it applies to *containers* is covered in [Container Hardening → Mandatory access control](container-hardening.md#mandatory-access-control--apparmor)).
 
-Both the profile that confines the `ssamd` daemon and the `container-default`
-profile used as the default for the containers `ssamd` runs are, by default,
-**authored and loaded by the operator** on the target device.
-[`gen_ssamd_conf.sh`](#generating-configuration-with-gen_ssamd_confsh)'s
-`--gen-apparmor-profile` generates both in one file — usable as-is, or as a
-**template** to modify as needed:
+Both the profile that confines the `ssamd` daemon and the `container-default` profile used as the default for the containers `ssamd` runs are, by default, **authored and loaded by the operator** on the target device.
+[`gen_ssamd_conf.sh`](#generating-configuration-with-gen_ssamd_confsh)'s `--gen-apparmor-profile` generates both in one file — usable as-is, or as a **template** to modify as needed:
 
 - **`ssamd` daemon profile** — attached to the daemon binary path; confines the daemon itself.
 - **`container-default` profile** — the fallback for package containers that ship without a dedicated profile.
@@ -293,9 +256,8 @@ Load the generated profile into *AppArmor* on the target device.
 
 ### Networking
 
-A package's `host` and `none` modes need no daemon configuration. If a package selects
-**`bridge`** mode, enable the daemon bridge via `[network.bridge]` in `ssamd.toml`,
-and the host's `bridge` / `veth` kernel features must be enabled:
+A package's `host` and `none` modes need no daemon configuration.
+If a package selects **`bridge`** mode, enable the daemon bridge via `[network.bridge]` in `ssamd.toml`, and the host's `bridge` / `veth` kernel features must be enabled:
 
 ```toml
 [network.bridge]
@@ -308,14 +270,10 @@ enabled = true
 
 ## Generating configuration with `gen_ssamd_conf.sh`
 
-`ssamd/releasedata/gen_ssamd_conf.sh` is an **optional helper** that generates
-`ssamd.toml` (and, on request, a *systemd* service unit and an *AppArmor* profile)
-from command-line options, filling in sensible defaults. You never *need* it —
-a hand-written `ssamd.toml` works — but it is convenient for provisioning a
-target device consistently.
+`ssamd/releasedata/gen_ssamd_conf.sh` is an **optional helper** that generates `ssamd.toml` (and, on request, a *systemd* service unit and an *AppArmor* profile) from command-line options, filling in sensible defaults.
+You never *need* it — a hand-written `ssamd.toml` works — but it is convenient for provisioning a target device consistently.
 
-Run with no arguments to emit a default `ssamd.toml` in the current directory,
-or pass options to customize:
+Run with no arguments to emit a default `ssamd.toml` in the current directory, or pass options to customize:
 
 | Option | Purpose |
 | --- | --- |
@@ -352,12 +310,9 @@ $ ssamd/releasedata/gen_ssamd_conf.sh \
       --pkgs-cgroup ssamd.slice
 ```
 
-> The generator always emits a `[network.bridge]`/`[network.bridge.addr_pool]`
-> section (disabled by default) — override it with the flags above, or edit
-> `ssamd.toml` afterward.
+> The generator always emits a `[network.bridge]`/`[network.bridge.addr_pool]` section (disabled by default) — override it with the flags above, or edit `ssamd.toml` afterward.
 
-Run `gen_ssamd_conf.sh --help` for the authoritative option list on your
-checkout.
+Run `gen_ssamd_conf.sh --help` for the authoritative option list on your checkout.
 
 ---
 
