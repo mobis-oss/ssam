@@ -69,9 +69,7 @@ SSAM은 각 컨테이너의 설정을 빌드 시점에 확정합니다. 기존�
 
 ## Quick start
 
-개발 머신에서 0에서부터 실행 중인 SSAM 패키지까지 — 도구 설치, 서명된 패키지 생성, 데몬 실행, 실행 확인.
-
-### 1. Install the tools
+### 1. Build & Install
 
 `ssam` 저장소를 체크아웃한 루트 디렉터리에서 아래 명령을 실행하세요:
 
@@ -94,29 +92,85 @@ $ openssl genpkey -algorithm RSA -out private_key.pem -pkeyopt rsa_keygen_bits:2
 $ openssl rsa -in private_key.pem -pubout -out public_key.pem
 ```
 
-### 3. Create a package
+### 3. Create packages
 
-샘플 앱(여기서는 공개 `hello-world` 이미지)을 서명된 SSAM 패키지로 만들어, 데몬의
-**bundled** 패키지 디렉터리에 넣습니다. `ssam-wrap`은 기본적으로 **arm64**
-이미지 변형을 가져옵니다 — x86-64 개발 머신이라면 `--src-oci-arch amd64`를
-추가하세요, 그러지 않으면 컨테이너가 실행되지 않습니다(autostart가 기본
-활성화라, 5단계 Verify에서 `Hello from Docker!` 대신 오류가 나타납니다).
+컨테이너 이미지를 변환하거나 처음부터 빌드하는 두 가지 방식으로 패키지 파일시스템을 채울 수 있습니다.
+
+**Docker 이미지 변환**
+
+Docker의 `hello-world` 이미지를 활용하는 예시입니다.
+`ssam-wrap`은 기본적으로 `arm64` 이미지를 사용합니다 — x86-64 개발 머신이라면 [`--src-oci-arch amd64`](docs/reference/ssam-wrap.ko.md#options)를 설정하세요.
 
 ```console
 $ mkdir -p ~/ssam/{bundled,downloaded,mnt,data}
-$ mkdir -p ~/ssam/helloworld && cd ~/ssam/helloworld
-$ ssam-wrap --prepare helloworld --pkgfs-src docker://docker.io/hello-world:latest .
+$ mkdir -p ~/ssam/docker-helloworld && cd ~/ssam/docker-helloworld
+$ ssam-wrap --prepare docker-helloworld --pkgfs-src docker://docker.io/hello-world:latest .
+```
+
+prepare 모드는 [`mac`](docs/reference/package-config.ko.md#mac)을 켠 상태로 패키지 설정 — [`config.toml`](docs/reference/package-config.ko.md)을 생성하지만
+이는 호스트 시스템에 대응하는 *AppArmor* 프로파일이 로드되어 있어야 동작하므로, 이 샘플에서는 꺼줍니다.
+
+```diff
+ [container.security]
+ seccomp = true # default is true
+-mac = true # default is true
++mac = false # default is true
+```
+
+Docker 이미지로부터 생성된 패키지 파일시스템도 필요하면 수정한 뒤 패키지를 빌드합니다.
+
+```console
+$ mkdir -p pkgfs/etc
+$ cp /etc/resolv.conf pkgfs/etc/
+$ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output docker-helloworld.ssam .
+$ cp docker-helloworld.ssam ~/ssam/bundled/
+```
+
+**처음부터 빌드**
+
+[`--pkgfs-src`](docs/reference/ssam-wrap.ko.md#options) 없이 실행하면 `ssam-wrap`은 비어있는 `pkgfs/`를 생성하므로 필요에 따라 직접 채워줍니다.
+여기서는 편의를 위해 정적으로 빌드된 바이너리를 사용합니다.
+
+```console
+$ cd ~/ssam
+$ ssam-wrap --prepare helloworld helloworld/
+$ cd helloworld
+$ cargo new --name helloworld app/
+$ cargo build --manifest-path app/Cargo.toml --target x86_64-unknown-linux-musl --release
+$ cp app/target/x86_64-unknown-linux-musl/release/helloworld pkgfs/
+```
+
+패키지 설정에서 `mac`을 꺼줍니다:
+
+```diff
+ [container.security]
+ seccomp = true # default is true
+-mac = true # default is true
++mac = false # default is true
+```
+
+템플릿으로 생성된 `runtime.json`의 entrypoint가 실행 바이너리를 가리키도록 수정합니다.
+
+```diff
+     "args": [
+-      "sh"
++      "/helloworld"
+     ],
+```
+
+패키지를 빌드합니다.
+
+```console
 $ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output helloworld.ssam .
 $ cp helloworld.ssam ~/ssam/bundled/
 ```
 
-> 📖 `config.toml` / `runtime.json` 설정, *Docker* 이미지 또는 처음부터 빌드하는 전체
-> 워크스루는 [SSAM 만들기](docs/guides/wrapping-a-ssam.ko.md)에 있습니다.
+> 📖 패키지 생성에 대한 자세한 사항은 [SSAM 패키지 만들기](docs/guides/wrapping-a-ssam.ko.md)를 참고해 주세요.
 
 ### 4. Configure and start the daemon
 
-`ssamd` 바이너리 옆에 `ssamd.toml`을 생성한 뒤 데몬을 실행합니다(root로 실행되며
-bundled 디렉터리에서 패키지를 자동 로드).
+SSAM 데몬 실행파일 — `ssamd`는 동일한 위치에 존재하는 설정파일 — `ssamd.toml`을 읽어들여서 동작합니다.
+그러므로 데몬 실행파일이 존재하는 위치에 설정파일 생성도구를 활용하여 파일을 생성한 뒤 실행합니다(실행에 root 권한이 필요합니다).
 
 ```console
 $ "$SSAM_REPO"/ssamd/releasedata/gen_ssamd_conf.sh \
@@ -130,29 +184,51 @@ $ sudo ~/.cargo/bin/ssamd
 [INFO] Successfully loaded runtime configuration from '~/.cargo/bin/ssamd.toml'
 ```
 
-> 📖 데몬 설정, *systemd* 통합, 모든 설정 키는 [SSAM 실행하기](docs/guides/serving-ssam.ko.md)와
-> [`ssamd.toml` 레퍼런스](docs/reference/daemon-config.ko.md)에서 다룹니다.
+> 📖 데몬 설정과 실행에 대한 자세한 정보는 [SSAM 실행하기](docs/guides/serving-ssam.ko.md)와 [`ssamd.toml` 레퍼런스](docs/reference/daemon-config.ko.md)에서 다룹니다.
 
 ### 5. Verify
 
-데몬이 실행 중인 상태에서 패키지 상태와 출력을 확인합니다. 패키지는 *systemd*
-서비스로 실행되므로 로그가 `journalctl`에 나타납니다.
+데몬이 실행 중인 상태에서 `ssam CLI` 명령을 통해 패키지의 상태를 확인합니다.
 
 ```console
 $ ssam list
 List of packages
 Package name         Status
 ===============================================
+docker-helloworld    Ready
 helloworld           Ready
+```
+
+패키지는 *systemd* 서비스로서 실행되므로 `journalctl`을 활용하여 로그를 확인합니다.
+
+```console
+$ journalctl --no-pager -u docker-helloworld
+systemd[1]: Started A short description of the package.
+crun[]: Hello from Docker!
+crun[]: This message shows that your installation appears to be working correctly.
+crun[]: To generate this message, Docker took the following steps:
+crun[]:  1. The Docker client contacted the Docker daemon.
+crun[]:  2. The Docker daemon pulled the "hello-world" image from the Docker Hub.
+crun[]:     (amd64)
+crun[]:  3. The Docker daemon created a new container from that image which runs the
+crun[]:     executable that produces the output you are currently reading.
+crun[]:  4. The Docker daemon streamed that output to the Docker client, which sent it
+crun[]:     to your terminal.
+crun[]: To try something more ambitious, you can run an Ubuntu container with:
+crun[]:  $ docker run -it ubuntu bash
+crun[]: Share images, automate workflows, and more with a free Docker ID:
+crun[]:  https://hub.docker.com/
+crun[]: For more examples and ideas, visit:
+crun[]:  https://docs.docker.com/get-started/
+systemd[1]: docker-helloworld.service: Deactivated successfully.
 
 $ journalctl --no-pager -u helloworld
 systemd[1]: Started A short description of the package.
-crun[]: Hello from Docker!
+crun[]: Hello, world!
 systemd[1]: helloworld.service: Deactivated successfully.
 ```
 
-> 📖 패키지 관리(`install` / `start` / `stop` / `remove` / `pkg-info`)는
-> [`ssam` CLI 레퍼런스](docs/reference/ssam.ko.md)에서 다룹니다.
+> 📖 `ssam CLI`의 사용 방법은 [`ssam` CLI 레퍼런스](docs/reference/ssam.ko.md)를 참고해 주세요.
 
 ## Documentation
 

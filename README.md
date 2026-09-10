@@ -65,9 +65,7 @@ SSAM fixes each container's configuration at build time. A conventional OCI-base
 
 ## Quick start
 
-From zero to a running SSAM package on a development machine — install the tools, create a signed package, run the daemon, and verify execution.
-
-### 1. Install the tools
+### 1. Build & Install
 
 Run these commands from the root of your `ssam` repository checkout:
 
@@ -82,8 +80,8 @@ This installs `ssam-wrap`, `ssam`, and `ssamd` into `~/.cargo/bin`.
 
 ### 2. Generate a signing key pair
 
-Every package is signed with an *RSA* private key; `ssamd` verifies it with the
-matching public key.
+Every package is signed with an *RSA* private key;
+`ssamd` verifies it with the matching public key.
 
 ```console
 $ mkdir -p ~/ssam/keys && cd ~/ssam/keys
@@ -91,31 +89,87 @@ $ openssl genpkey -algorithm RSA -out private_key.pem -pkeyopt rsa_keygen_bits:2
 $ openssl rsa -in private_key.pem -pubout -out public_key.pem
 ```
 
-### 3. Create a package
+### 3. Create packages
 
-Wrap a sample app (here, the public `hello-world` image) into a signed SSAM package,
-then drop it in the daemon's **bundled** packages directory. By default
-`ssam-wrap` pulls the **arm64** image variant — on an x86-64 development
-machine, add `--src-oci-arch amd64` or the container will fail to run
-(autostart is on by default, so Step 5's Verify will show an error instead of
-`Hello from Docker!`).
+Populate a package's filesystem either by converting a container image or by building from scratch.
+
+**From a Docker image**
+
+This example uses Docker's `hello-world` image.
+By default `ssam-wrap` uses the `arm64` image —
+on an x86-64 development machine, set [`--src-oci-arch amd64`](docs/reference/ssam-wrap.md#options).
 
 ```console
 $ mkdir -p ~/ssam/{bundled,downloaded,mnt,data}
-$ mkdir -p ~/ssam/helloworld && cd ~/ssam/helloworld
-$ ssam-wrap --prepare helloworld --pkgfs-src docker://docker.io/hello-world:latest .
+$ mkdir -p ~/ssam/docker-helloworld && cd ~/ssam/docker-helloworld
+$ ssam-wrap --prepare docker-helloworld --pkgfs-src docker://docker.io/hello-world:latest .
+```
+
+Prepare mode generates the package configuration, [`config.toml`](docs/reference/package-config.md), with [`mac`](docs/reference/package-config.md#mac) turned on,
+but this needs a matching *AppArmor* profile loaded on the host, so turn it off for this sample:
+
+```diff
+ [container.security]
+ seccomp = true # default is true
+-mac = true # default is true
++mac = false # default is true
+```
+
+Modify the Docker-derived package filesystem too, if needed, then build the package.
+
+```console
+$ mkdir -p pkgfs/etc
+$ cp /etc/resolv.conf pkgfs/etc/
+$ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output docker-helloworld.ssam .
+$ cp docker-helloworld.ssam ~/ssam/bundled/
+```
+
+**From scratch**
+
+With no [`--pkgfs-src`](docs/reference/ssam-wrap.md#options), `ssam-wrap` leaves `pkgfs/` empty, so build your own binary into it.
+For convenience, this uses a statically linked binary.
+
+```console
+$ cd ~/ssam
+$ ssam-wrap --prepare helloworld helloworld/
+$ cd helloworld
+$ cargo new --name helloworld app/
+$ cargo build --manifest-path app/Cargo.toml --target x86_64-unknown-linux-musl --release
+$ cp app/target/x86_64-unknown-linux-musl/release/helloworld pkgfs/
+```
+
+Turn off *AppArmor* confinement here too:
+
+```diff
+ [container.security]
+ seccomp = true # default is true
+-mac = true # default is true
++mac = false # default is true
+```
+
+Point `runtime.json`'s entrypoint at the binary you just built:
+
+```diff
+     "args": [
+-      "sh"
++      "/helloworld"
+     ],
+```
+
+Build the package:
+
+```console
 $ ssam-wrap --private-key ~/ssam/keys/private_key.pem --output helloworld.ssam .
 $ cp helloworld.ssam ~/ssam/bundled/
 ```
 
-> 📖 The full walkthrough — configuring `config.toml` / `runtime.json`, building
-> from a *Docker* image or from scratch — is in
-> [Wrapping a SSAM](docs/guides/wrapping-a-ssam.md).
+> 📖 For the full package-creation walkthrough, see [Wrapping a SSAM](docs/guides/wrapping-a-ssam.md).
 
 ### 4. Configure and start the daemon
 
-Generate `ssamd.toml` next to the `ssamd` binary, then start the daemon (it runs
-as root and auto-loads packages from the bundled directory).
+The SSAM daemon executable, `ssamd`, reads its config file, `ssamd.toml`, from the same directory it lives in.
+So generate the config file at that location with the generator tool,
+then run the daemon (running it requires root).
 
 ```console
 $ "$SSAM_REPO"/ssamd/releasedata/gen_ssamd_conf.sh \
@@ -129,30 +183,51 @@ $ sudo ~/.cargo/bin/ssamd
 [INFO] Successfully loaded runtime configuration from '~/.cargo/bin/ssamd.toml'
 ```
 
-> 📖 Daemon setup, *systemd* integration, and every config key are covered in
-> [Serving SSAM](docs/guides/serving-ssam.md) and the
-> [`ssamd.toml` reference](docs/reference/daemon-config.md).
+> 📖 Daemon setup, *systemd* integration, and every config key are covered in [Serving SSAM](docs/guides/serving-ssam.md) and the [`ssamd.toml` reference](docs/reference/daemon-config.md).
 
 ### 5. Verify
 
-With the daemon running, check the package status and its output. Packages are
-run as *systemd* services, so their logs appear in `journalctl`.
+With the daemon running, check the package status via the `ssam` CLI.
 
 ```console
 $ ssam list
 List of packages
 Package name         Status
 ===============================================
+docker-helloworld    Ready
 helloworld           Ready
+```
+
+Packages run as *systemd* services, so check their logs with `journalctl`.
+
+```console
+$ journalctl --no-pager -u docker-helloworld
+systemd[1]: Started A short description of the package.
+crun[]: Hello from Docker!
+crun[]: This message shows that your installation appears to be working correctly.
+crun[]: To generate this message, Docker took the following steps:
+crun[]:  1. The Docker client contacted the Docker daemon.
+crun[]:  2. The Docker daemon pulled the "hello-world" image from the Docker Hub.
+crun[]:     (amd64)
+crun[]:  3. The Docker daemon created a new container from that image which runs the
+crun[]:     executable that produces the output you are currently reading.
+crun[]:  4. The Docker daemon streamed that output to the Docker client, which sent it
+crun[]:     to your terminal.
+crun[]: To try something more ambitious, you can run an Ubuntu container with:
+crun[]:  $ docker run -it ubuntu bash
+crun[]: Share images, automate workflows, and more with a free Docker ID:
+crun[]:  https://hub.docker.com/
+crun[]: For more examples and ideas, visit:
+crun[]:  https://docs.docker.com/get-started/
+systemd[1]: docker-helloworld.service: Deactivated successfully.
 
 $ journalctl --no-pager -u helloworld
 systemd[1]: Started A short description of the package.
-crun[]: Hello from Docker!
+crun[]: Hello, world!
 systemd[1]: helloworld.service: Deactivated successfully.
 ```
 
-> 📖 Managing packages (`install` / `start` / `stop` / `remove` / `pkg-info`) is
-> covered in the [`ssam` CLI Reference](docs/reference/ssam.md).
+> 📖 For how to use the `ssam` CLI, see the [`ssam` CLI Reference](docs/reference/ssam.md).
 
 ## Documentation
 
