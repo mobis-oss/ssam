@@ -154,8 +154,8 @@ impl PackageVolume {
         Arc::clone(&self.inner.pkgfs)
     }
 
-    pub(crate) fn get_mount_point(&self) -> &Path {
-        self.inner.pkgfs.mount_point()
+    pub(crate) fn oci_bundle_root(&self) -> &Path {
+        self.inner.pkgfs.oci_bundle_root()
     }
 
     #[must_use]

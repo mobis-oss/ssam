@@ -763,10 +763,6 @@ impl CommandExecutorBackend for TransientUnitExecutor<'_> {
         let _ = tokio::time::timeout(BLOCKING_TIMEOUT, self.stop()).await;
         self.reset_failed().await
     }
-
-    async fn cleanup(&self) -> anyhow::Result<()> {
-        self.cmd_args.cleanup().await
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, strum_macros::EnumString, strum::Display)]

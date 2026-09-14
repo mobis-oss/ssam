@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+pub(crate) mod oci_bundle_dir;
+
 #[non_exhaustive]
 #[derive(strum_macros::Display, Debug)]
 pub(crate) enum ContainerRuntime {
@@ -10,7 +12,7 @@ pub(crate) enum ContainerRuntime {
     CRun,
 }
 
-#[derive(Debug)] // TODO:: Get default executor from config
+#[derive(Debug, Clone)] // TODO:: Get default executor from config
 pub(crate) enum ExecutorType {
     Systemd(systemd::ServiceInfo),
 }
@@ -67,10 +69,9 @@ impl std::fmt::Display for ExecutionStatus {
 }
 
 pub(crate) mod oci {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    use super::oci_bundle_dir::OciBundleDir;
     use anyhow::Context;
     use libssam::container::NetworkMode;
     use libssam::ssam_package::PackageSeccompPolicy;
@@ -79,77 +80,6 @@ pub(crate) mod oci {
         Arch, Linux, LinuxNamespace, LinuxNamespaceBuilder, LinuxNamespaceType, LinuxSeccomp,
         Mount, MountBuilder, RootBuilder,
     };
-    use tempfile::TempDir;
-
-    // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
-    #[allow(clippy::unnecessary_debug_formatting)]
-    fn create_bundle_dir(
-        mount_point: &Path,
-        package_name: &str,
-        version: &str,
-    ) -> anyhow::Result<(PathBuf, Option<TempDir>)> {
-        let dir_name = format!("{package_name}_{version}");
-        anyhow::ensure!(
-            crate::utils::is_safe_path_segment(&dir_name),
-            "Unsafe bundle directory name rejected: {dir_name:?}"
-        );
-        let (root, bundle_path) = if mount_point.file_name().is_some_and(|name| name == "pkgfs") {
-            let bundle_path = mount_point
-                .parent()
-                .context("Package filesystem mount path has no bundle directory")?;
-            let root = bundle_path
-                .parent()
-                .context("Package bundle path has no configured root")?;
-            if bundle_path.file_name().and_then(|name| name.to_str()) == Some(dir_name.as_str()) {
-                (root.to_path_buf(), bundle_path.to_path_buf())
-            } else {
-                (root.to_path_buf(), root.join(&dir_name))
-            }
-        } else {
-            let root = mount_point
-                .parent()
-                .context("Package mount path has no parent directory")?;
-            (root.to_path_buf(), root.join(&dir_name))
-        };
-        if crate::mount::is_exact_mount(mount_point) {
-            return Ok((bundle_path, None));
-        }
-        fs::create_dir_all(&root)
-            .with_context(|| format!("Failed to create bundle root {root:?}"))?;
-        remove_existing_bundle(&bundle_path)?;
-
-        let temp_dir = tempfile::Builder::new()
-            .prefix(&dir_name)
-            .rand_bytes(0)
-            .permissions(fs::Permissions::from_mode(0o755))
-            .tempdir_in(&root)
-            .with_context(|| format!("Failed to create bundle directory in {root:?}"))?;
-        Ok((temp_dir.path().to_path_buf(), Some(temp_dir)))
-    }
-
-    // Safety: Debug format ({:?}) for paths prevents log injection via special characters.
-    #[allow(clippy::unnecessary_debug_formatting)]
-    fn remove_existing_bundle(path: &Path) -> anyhow::Result<()> {
-        let meta = match fs::symlink_metadata(path) {
-            Ok(meta) => meta,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    return Ok(());
-                }
-                return Err(e).with_context(|| format!("Failed to stat bundle directory {path:?}"));
-            }
-        };
-
-        if meta.file_type().is_dir() {
-            fs::remove_dir_all(path)
-                .with_context(|| format!("Failed to remove bundle directory {path:?}"))
-        } else {
-            // Stale non-dir leftover at the fixed path: unlink so it self-heals.
-            fs::remove_file(path)
-                .with_context(|| format!("Failed to remove stale bundle path {path:?}"))
-        }
-    }
-
     /// Represents the host architecture mapped to seccomp architecture constants.
     /// Maps `std::env::consts::ARCH` values to corresponding `SCMP_ARCH_*` values.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,24 +121,16 @@ pub(crate) mod oci {
     }
 
     #[derive(Debug)]
-    pub(crate) struct TransientRuntimeConfig {
-        bundle_path: PathBuf,
-        _temp_dir: Option<TempDir>,
-    }
+    pub(crate) struct OciRuntimeConfig;
 
-    impl TransientRuntimeConfig {
+    impl OciRuntimeConfig {
         const MOUNT_OPTION: [&'static str; 2] = ["rbind", "rw"];
         const CONTAINER_DEFAULT_APPARMOR_PROFILE: &str = "container-default";
 
-        /// Creates a new transient runtime configuration for a container.
-        ///
-        /// Prepares a temporary directory with a `config.json` OCI runtime specification,
-        /// configuring rootfs, seccomp, cgroups, and bind mounts for the package.
-        ///
-        /// # Arguments
-        ///
-        /// * `spec` - Owned snapshot of all inputs needed to build the bundle.
-        pub(crate) fn new(spec: ContainerBundleSpec) -> anyhow::Result<Self> {
+        pub(crate) fn write(
+            spec: ContainerBundleSpec,
+            oci_bundle_dir: &OciBundleDir,
+        ) -> anyhow::Result<()> {
             let ContainerBundleSpec {
                 oci_template,
                 seccomp_policy,
@@ -216,18 +138,16 @@ pub(crate) mod oci {
                 network_mode,
                 cgroups_path,
                 package_name,
-                version,
-                mount_point,
                 data_mounts,
                 bridge_netns_path,
+                ..
             } = spec;
 
-            let (bundle_path, temp_dir) = create_bundle_dir(&mount_point, &package_name, &version)?;
-
-            // just absolutize the rootfs path. the rootfs might not be mounted yet.
-            let rootfs_path = std::path::absolute(&mount_point).with_context(|| {
-                format!("Unable to absoluteize rootfs directory of {package_name}")
-            })?;
+            // Just absolutize the rootfs path. The rootfs might not be mounted yet.
+            let rootfs_path =
+                std::path::absolute(oci_bundle_dir.pkgfs_path()).with_context(|| {
+                    format!("Unable to absoluteize rootfs directory of {package_name}")
+                })?;
             let mut oci_runtime_conf = oci_template;
 
             let linux = oci_runtime_conf.linux_mut().get_or_insert(Linux::default());
@@ -289,19 +209,18 @@ pub(crate) mod oci {
                 }
             }
 
-            let new_conf_path = bundle_path.join("config.json");
+            let new_conf_path = oci_bundle_dir.as_path().join("config.json");
 
             oci_runtime_conf
                 .save_pretty(new_conf_path.as_path())
-                .context(format!(
-                    "Failed to save container runtime spec to {}",
-                    new_conf_path.display()
-                ))?;
+                .with_context(|| {
+                    format!(
+                        "Failed to save container runtime spec to {}",
+                        new_conf_path.display()
+                    )
+                })?;
 
-            Ok(Self {
-                bundle_path,
-                _temp_dir: temp_dir,
-            })
+            Ok(())
         }
 
         // TODO: ssam-wrap will validate that runtime.json does not contain a
@@ -508,23 +427,6 @@ pub(crate) mod oci {
 
             architectures
         }
-
-        pub(crate) fn dir_path(&self) -> &Path {
-            &self.bundle_path
-        }
-
-        pub(crate) fn cleanup(&self) -> anyhow::Result<()> {
-            match fs::remove_dir_all(&self.bundle_path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error).with_context(|| {
-                    format!(
-                        "Failed to remove bundle directory {}",
-                        self.bundle_path.display()
-                    )
-                }),
-            }
-        }
     }
 
     #[cfg(test)]
@@ -533,7 +435,7 @@ pub(crate) mod oci {
 
         #[test]
         fn build_seccomp_config_none_is_disabled() {
-            let seccomp = TransientRuntimeConfig::build_seccomp_config(None).unwrap();
+            let seccomp = OciRuntimeConfig::build_seccomp_config(None).unwrap();
             assert!(seccomp.is_none(), "no policy => intentionally disabled");
         }
 
@@ -543,7 +445,7 @@ pub(crate) mod oci {
                 br#"{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[]}"#.to_vec(),
             )
             .unwrap();
-            let seccomp = TransientRuntimeConfig::build_seccomp_config(Some(&policy))
+            let seccomp = OciRuntimeConfig::build_seccomp_config(Some(&policy))
                 .expect("valid policy must map")
                 .expect("must produce a filter");
             assert_eq!(
@@ -558,20 +460,20 @@ pub(crate) mod oci {
             let policy =
                 PackageSeccompPolicy::from_bytes(br#"{"defaultAction":"SCMP_ACT_BOGUS"}"#.to_vec())
                     .unwrap();
-            assert!(TransientRuntimeConfig::build_seccomp_config(Some(&policy)).is_err());
+            assert!(OciRuntimeConfig::build_seccomp_config(Some(&policy)).is_err());
         }
 
         #[test]
         fn build_seccomp_config_missing_default_action_fails_closed() {
             let policy = PackageSeccompPolicy::from_bytes(br#"{"syscalls":[]}"#.to_vec()).unwrap();
-            assert!(TransientRuntimeConfig::build_seccomp_config(Some(&policy)).is_err());
+            assert!(OciRuntimeConfig::build_seccomp_config(Some(&policy)).is_err());
         }
 
         #[test]
         fn test_make_bind_mounts_rejects_traversal_data_dir() {
             let package_data_root = Path::new("/package-data/test-package");
 
-            let result = TransientRuntimeConfig::make_bind_mounts(
+            let result = OciRuntimeConfig::make_bind_mounts(
                 package_data_root,
                 vec![Path::new("/../escape")],
             );
@@ -583,11 +485,9 @@ pub(crate) mod oci {
         fn test_make_bind_mounts_uses_validated_relative_path() {
             let package_data_root = Path::new("/package-data/test-package");
 
-            let mounts = TransientRuntimeConfig::make_bind_mounts(
-                package_data_root,
-                vec![Path::new("/var/data")],
-            )
-            .unwrap();
+            let mounts =
+                OciRuntimeConfig::make_bind_mounts(package_data_root, vec![Path::new("/var/data")])
+                    .unwrap();
 
             let mount_json = serde_json::to_value(&mounts[0]).unwrap();
             assert_eq!(mount_json["source"], "/package-data/test-package/var/data");
@@ -598,7 +498,7 @@ pub(crate) mod oci {
         fn netns_arm_fails_for_non_netns_path() {
             let file = tempfile::NamedTempFile::new().expect("tempfile");
             let mut namespaces = Vec::new();
-            let err = TransientRuntimeConfig::configure_network_namespace(
+            let err = OciRuntimeConfig::configure_network_namespace(
                 &mut namespaces,
                 &NetworkMode::Netns(file.path().to_path_buf()),
                 "test-netns-pkg",
@@ -623,7 +523,7 @@ pub(crate) mod oci {
             crate::network::netns::create_named_netns(&path).unwrap();
 
             let mut namespaces = Vec::new();
-            TransientRuntimeConfig::configure_network_namespace(
+            OciRuntimeConfig::configure_network_namespace(
                 &mut namespaces,
                 &NetworkMode::Netns(path.clone()),
                 "test-netns-pkg",
@@ -652,7 +552,7 @@ pub(crate) mod oci {
         pub(crate) cgroups_path: String,
         pub(crate) package_name: String,
         pub(crate) version: String,
-        pub(crate) mount_point: PathBuf,
+        pub(crate) oci_bundle_root: PathBuf,
         pub(crate) data_mounts: Option<DataMountPaths>,
         pub(crate) bridge_netns_path: Option<std::path::PathBuf>,
     }
@@ -680,9 +580,11 @@ pub(crate) mod oci {
     }
 
     impl ContainerBundleSpec {
-        /// Synchronous file I/O. Must be called inside `spawn_blocking`.
-        pub(crate) fn into_runtime_config(self) -> anyhow::Result<TransientRuntimeConfig> {
-            TransientRuntimeConfig::new(self)
+        pub(crate) fn write_oci_runtime_config(
+            self,
+            oci_bundle_dir: &OciBundleDir,
+        ) -> anyhow::Result<()> {
+            OciRuntimeConfig::write(self, oci_bundle_dir)
         }
     }
 }
@@ -692,22 +594,21 @@ pub(crate) trait CommandExecutorBackend: Send + Sync + std::fmt::Debug {
     async fn start(&self) -> anyhow::Result<ExecutionResult>;
     async fn stop(&self) -> anyhow::Result<ExecutionResult>;
     async fn teardown(&self) -> anyhow::Result<()>;
-    async fn cleanup(&self) -> anyhow::Result<()>;
 }
 
 #[async_trait::async_trait]
 pub(crate) trait ExecuteCommand: Send + Sync + std::fmt::Debug {
-    fn get_start_cmd(&self) -> anyhow::Result<Vec<String>>;
-    fn get_stop_cmd(&self) -> anyhow::Result<Vec<String>>;
     async fn prepare(&self) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn cleanup(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    fn get_start_cmd(&self) -> anyhow::Result<Vec<String>>;
+    fn get_stop_cmd(&self) -> anyhow::Result<Vec<String>>;
 }
 
 pub(crate) mod container {
+    use std::sync::Arc;
+
+    use crate::executor::oci_bundle_dir::OciBundleDir;
     use crate::network::netns;
     use crate::package_volume::PackageVolume;
     use anyhow::Context as _;
@@ -721,7 +622,7 @@ pub(crate) mod container {
         name: String,
         runtime: ContainerRuntime,
         spec: oci::ContainerBundleSpec,
-        runtime_config: tokio::sync::OnceCell<oci::TransientRuntimeConfig>,
+        oci_bundle_dir: Arc<OciBundleDir>,
     }
 
     impl ContainerCommand {
@@ -729,25 +630,25 @@ pub(crate) mod container {
             name: String,
             runtime: ContainerRuntime,
             spec: oci::ContainerBundleSpec,
+            oci_bundle_dir: Arc<OciBundleDir>,
         ) -> Self {
             Self {
                 name,
                 runtime,
                 spec,
-                runtime_config: tokio::sync::OnceCell::new(),
+                oci_bundle_dir,
             }
         }
 
-        /// Constructs a `ContainerCommand` from package metadata and volume.
+        /// Constructs a bundle specification from package metadata and volume.
         /// Extracts OCI config, security settings, network mode, and data paths.
-        pub(crate) fn from_package(
-            name: String,
-            runtime: ContainerRuntime,
+        pub(crate) fn spec_from_package(
+            name: &str,
             package_file: &PackageFile,
             pkg_volume: &PackageVolume,
             network_mode: container::NetworkMode,
             packages_cgroup: &str,
-        ) -> Self {
+        ) -> oci::ContainerBundleSpec {
             let metadata = package_file.metadata();
 
             let seccomp_policy = metadata
@@ -759,7 +660,7 @@ pub(crate) mod container {
             let data_mounts = pkg_volume.data_directory().map(oci::DataMountPaths::new);
 
             let bridge_netns_path = if network_mode == container::NetworkMode::Bridge {
-                Some(netns::netns_path(&netns::netns_name(&name)))
+                Some(netns::netns_path(&netns::netns_name(name)))
             } else {
                 None
             };
@@ -767,57 +668,38 @@ pub(crate) mod container {
             // Deref coercion: &OciRuntimeConfig → &Box<Spec> → &Spec
             let oci_runtime_spec: &oci_spec::runtime::Spec = package_file.oci_runtime_config();
 
-            let spec = oci::ContainerBundleSpec {
+            oci::ContainerBundleSpec {
                 oci_template: oci_runtime_spec.clone(),
                 seccomp_policy,
                 mac_enabled: *metadata.get_container_security_mac(),
                 network_mode,
                 cgroups_path,
-                package_name: name.clone(),
+                package_name: name.to_owned(),
                 version: metadata.version().to_string(),
-                mount_point: pkg_volume.get_mount_point().to_path_buf(),
+                oci_bundle_root: pkg_volume.oci_bundle_root().to_path_buf(),
                 data_mounts,
                 bridge_netns_path,
-            };
-
-            Self::new(name, runtime, spec)
-        }
-
-        #[cfg(test)]
-        pub(crate) fn runtime_config(&self) -> &tokio::sync::OnceCell<oci::TransientRuntimeConfig> {
-            &self.runtime_config
+            }
         }
     }
 
     #[async_trait::async_trait]
     impl ExecuteCommand for ContainerCommand {
         async fn prepare(&self) -> anyhow::Result<()> {
-            self.runtime_config
-                .get_or_try_init(|| async {
-                    let spec = self.spec.clone();
-                    tokio::task::spawn_blocking(move || spec.into_runtime_config())
-                        .await
-                        .context("join container bundle preparation task")?
-                })
-                .await?;
-            Ok(())
-        }
-
-        async fn cleanup(&self) -> anyhow::Result<()> {
-            if let Some(runtime_config) = self.runtime_config.get() {
-                runtime_config.cleanup()?;
-            }
-            Ok(())
+            let spec = self.spec.clone();
+            let oci_bundle_dir = Arc::clone(&self.oci_bundle_dir);
+            tokio::task::spawn_blocking(move || spec.write_oci_runtime_config(&oci_bundle_dir))
+                .await
+                .context("join container bundle preparation task")?
         }
 
         fn get_start_cmd(&self) -> anyhow::Result<Vec<String>> {
-            let path = self
-                .runtime_config
-                .get()
-                .context("OCI runtime config not prepared")?
-                .dir_path();
+            let path = self.oci_bundle_dir.as_path();
             if !path.exists() {
                 anyhow::bail!("Bundle path does not exist: {}", path.display());
+            }
+            if !self.oci_bundle_dir.as_path().join("config.json").is_file() {
+                anyhow::bail!("OCI runtime config not prepared");
             }
             let bundle_path = path
                 .to_str()
@@ -846,13 +728,37 @@ pub(crate) mod systemd;
 
 #[cfg(test)]
 mod tests {
-    use super::oci::{ContainerBundleSpec, DataMountPaths, TransientRuntimeConfig};
+    use super::oci::{ContainerBundleSpec, DataMountPaths, OciRuntimeConfig};
+    use crate::executor::oci_bundle_dir::OciBundleDir;
     use crate::package_volume::{DataDirectory, PackageVolume};
     use libssam::ssam_package::PackageSeccompPolicy;
     use oci_spec::runtime::{LinuxBuilder, ProcessBuilder, RootBuilder, Spec};
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    #[derive(Debug)]
+    struct TestOciRuntimeConfig {
+        oci_bundle_dir: OciBundleDir,
+    }
+
+    impl TestOciRuntimeConfig {
+        fn new(spec: ContainerBundleSpec) -> anyhow::Result<Self> {
+            let oci_bundle_dir =
+                OciBundleDir::new(&spec.oci_bundle_root, &spec.package_name, &spec.version)?;
+            oci_bundle_dir.ensure()?;
+            OciRuntimeConfig::write(spec, &oci_bundle_dir)?;
+            Ok(Self { oci_bundle_dir })
+        }
+
+        fn dir_path(&self) -> &Path {
+            self.oci_bundle_dir.as_path()
+        }
+
+        fn cleanup_bundle(&self) -> anyhow::Result<()> {
+            self.oci_bundle_dir.cleanup()
+        }
+    }
 
     // Helper to create a test seccomp policy
     fn create_test_seccomp_policy() -> PackageSeccompPolicy {
@@ -913,8 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_runtime_config_actual_new_function() {
-        // Test the ACTUAL TransientRuntimeConfig::new function with real PackageVolume
+    fn test_oci_runtime_config_creation() {
         let oci_spec = create_test_oci_spec();
         let seccomp_policy = create_test_seccomp_policy();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -925,8 +830,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        // Call the ACTUAL TransientRuntimeConfig::new function
-        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: Some(seccomp_policy),
             mac_enabled: true,
@@ -934,14 +838,14 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-basic".to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         });
 
         assert!(
             result.is_ok(),
-            "Actual TransientRuntimeConfig::new should succeed: {:?}",
+            "Test runtime config creation should succeed: {:?}",
             result.err()
         );
 
@@ -974,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_runtime_config_bundle_dir_is_0755() {
+    fn test_oci_runtime_config_bundle_dir_is_0755() {
         use std::os::unix::fs::PermissionsExt;
 
         let oci_spec = create_test_oci_spec();
@@ -986,7 +890,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: Some(seccomp_policy),
             mac_enabled: true,
@@ -994,11 +898,11 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-mode".to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         })
-        .expect("TransientRuntimeConfig::new should succeed");
+        .expect("Test runtime config creation should succeed");
 
         let meta = fs::symlink_metadata(config.dir_path()).expect("Failed to stat bundle dir");
         assert_eq!(
@@ -1009,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_runtime_config_uses_fixed_package_dir() {
+    fn test_oci_runtime_config_uses_fixed_package_dir() {
         let oci_spec = create_test_oci_spec();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
@@ -1017,7 +921,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: None,
             mac_enabled: false,
@@ -1025,11 +929,11 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-fixed-dir".to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         })
-        .expect("TransientRuntimeConfig::new should succeed");
+        .expect("Test runtime config creation should succeed");
 
         assert_eq!(
             config.dir_path(),
@@ -1039,10 +943,23 @@ mod tests {
             config.dir_path().join("config.json").exists(),
             "config.json should be created in the fixed package directory"
         );
+
+        let bundle_path = config.dir_path().to_path_buf();
+        let config_path = config.dir_path().join("config.json");
+        drop(config);
+        assert!(
+            config_path.exists(),
+            "config.json should remain until runtime cleanup"
+        );
+        crate::utils::remove_path_if_exists(&bundle_path).expect("bundle cleanup should succeed");
+        assert!(
+            !bundle_path.exists(),
+            "runtime cleanup should remove the bundle directory"
+        );
     }
 
     #[test]
-    fn test_transient_runtime_config_removes_existing_bundle_dir() {
+    fn test_oci_runtime_config_removes_existing_bundle_dir() {
         let package_name = "test-package-stale-dir";
         let oci_spec = create_test_oci_spec();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -1055,7 +972,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: None,
             mac_enabled: false,
@@ -1063,11 +980,11 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: package_name.to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         })
-        .expect("TransientRuntimeConfig::new should succeed");
+        .expect("Test runtime config creation should succeed");
 
         assert_eq!(config.dir_path(), bundle_path);
         assert!(
@@ -1081,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_runtime_config_drop_removes_package_dir() {
+    fn test_oci_runtime_config_cleanup_removes_package_dir() {
         let package_name = "test-package-drop-cleanup";
         let oci_spec = create_test_oci_spec();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -1090,7 +1007,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let config = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: None,
             mac_enabled: false,
@@ -1098,25 +1015,28 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: package_name.to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         })
-        .expect("TransientRuntimeConfig::new should succeed");
+        .expect("Test runtime config creation should succeed");
 
         let bundle_path = config.dir_path().to_path_buf();
         assert!(bundle_path.exists(), "bundle dir should exist before drop");
 
+        config
+            .cleanup_bundle()
+            .expect("bundle directory cleanup should succeed");
         drop(config);
 
         assert!(
             !bundle_path.exists(),
-            "bundle dir should be removed on drop"
+            "bundle dir should be removed by explicit cleanup"
         );
     }
 
     #[test]
-    fn test_transient_runtime_config_distinct_versions_isolated() {
+    fn test_oci_runtime_config_distinct_versions_isolated() {
         let package_name = "test-package-recreated";
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
@@ -1124,7 +1044,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let old_config = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let old_config = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: create_test_oci_spec(),
             seccomp_policy: None,
             mac_enabled: false,
@@ -1132,14 +1052,14 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: package_name.to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         })
         .expect("old runtime config should be created");
         let old_path = old_config.dir_path().to_path_buf();
 
-        let new_config = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let new_config = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: create_test_oci_spec(),
             seccomp_policy: None,
             mac_enabled: false,
@@ -1147,7 +1067,7 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: package_name.to_owned(),
             version: "2.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         })
@@ -1155,21 +1075,23 @@ mod tests {
         let new_path = new_config.dir_path().to_path_buf();
 
         // The version keeps an upgrade's two live configs on distinct paths, so
-        // dropping the superseded one cannot touch the incoming bundle.
+        // cleaning the superseded one cannot touch the incoming bundle.
         assert_ne!(old_path, new_path);
 
+        old_config
+            .cleanup_bundle()
+            .expect("old bundle directory cleanup should succeed");
         drop(old_config);
 
         assert!(
             new_path.join("config.json").exists(),
-            "dropping the old version must not remove the new version's bundle"
+            "cleaning the old version must not remove the new version's bundle"
         );
         assert!(!old_path.exists(), "the old version's bundle is cleaned up");
     }
 
     #[test]
-    fn test_transient_runtime_config_actual_new_with_data_directory() {
-        // Test the ACTUAL function with data directories
+    fn test_oci_runtime_config_with_data_directory() {
         let oci_spec = create_test_oci_spec();
         let seccomp_policy = create_test_seccomp_policy();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -1188,8 +1110,7 @@ mod tests {
 
         let data_mounts = package_volume.data_directory().map(DataMountPaths::new);
 
-        // Call the ACTUAL TransientRuntimeConfig::new function
-        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: Some(seccomp_policy),
             mac_enabled: true,
@@ -1197,14 +1118,14 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-data".to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts,
             bridge_netns_path: None,
         });
 
         assert!(
             result.is_ok(),
-            "Actual TransientRuntimeConfig::new with data dirs should succeed: {:?}",
+            "Test runtime config creation with data dirs should succeed: {:?}",
             result.err()
         );
 
@@ -1226,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_runtime_config_seccomp_disabled() {
+    fn test_oci_runtime_config_seccomp_disabled() {
         // Test that seccomp is not applied when seccomp policy is None
         let oci_spec = create_test_oci_spec();
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -1236,8 +1157,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        // Call TransientRuntimeConfig::new with seccomp_policy = None
-        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: None,
             mac_enabled: true,
@@ -1245,14 +1165,14 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-no-seccomp".to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         });
 
         assert!(
             result.is_ok(),
-            "TransientRuntimeConfig::new with seccomp disabled should succeed: {:?}",
+            "Test runtime config creation with seccomp disabled should succeed: {:?}",
             result.err()
         );
 
@@ -1273,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_runtime_config_seccomp() {
+    fn test_oci_runtime_config_seccomp() {
         // Test that seccomp is applied when seccomp policy is provided
         let oci_spec = create_test_oci_spec();
         let seccomp_policy = create_test_seccomp_policy();
@@ -1284,8 +1204,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        // Call TransientRuntimeConfig::new with seccomp_policy = Some
-        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: Some(seccomp_policy),
             mac_enabled: true,
@@ -1293,14 +1212,14 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-with-seccomp".to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         });
 
         assert!(
             result.is_ok(),
-            "TransientRuntimeConfig::new with seccomp enabled should succeed: {:?}",
+            "Test runtime config creation with seccomp enabled should succeed: {:?}",
             result.err()
         );
 
@@ -1328,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transient_runtime_config_seccomp_mapping_failure_fails_closed() {
+    fn test_oci_runtime_config_seccomp_mapping_failure_fails_closed() {
         let oci_spec = create_test_oci_spec();
         let bad_policy =
             PackageSeccompPolicy::from_bytes(br#"{"defaultAction":"SCMP_ACT_BOGUS"}"#.to_vec())
@@ -1339,7 +1258,7 @@ mod tests {
         let package_volume = create_test_package_volume_real(&mount_point)
             .expect("Failed to create test PackageVolume");
 
-        let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
             oci_template: oci_spec,
             seccomp_policy: Some(bad_policy),
             mac_enabled: true,
@@ -1347,7 +1266,7 @@ mod tests {
             cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
             package_name: "test-package-bad-seccomp".to_owned(),
             version: "1.0.0".to_owned(),
-            mount_point: package_volume.get_mount_point().to_path_buf(),
+            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
             data_mounts: None,
             bridge_netns_path: None,
         });
@@ -1384,11 +1303,16 @@ mod tests {
 
     // Tests for ContainerExecutor
     mod container_command_tests {
+        use std::sync::Arc;
+
         use super::*;
         use crate::executor::container::ContainerCommand;
+        use crate::executor::oci_bundle_dir::OciBundleDir;
         use crate::executor::{ContainerRuntime, ExecuteCommand};
 
-        fn create_test_container_command(package_name: &str) -> ContainerCommand {
+        fn create_test_container_command(
+            package_name: &str,
+        ) -> (ContainerCommand, Arc<OciBundleDir>, TempDir) {
             use crate::executor::oci::ContainerBundleSpec;
             let oci_spec = create_test_oci_spec();
             let seccomp_policy = create_test_seccomp_policy();
@@ -1404,18 +1328,32 @@ mod tests {
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: package_name.to_owned(),
                 version: "1.0.0".to_owned(),
-                mount_point,
+                oci_bundle_root: mount_point.clone(),
                 data_mounts: None,
                 bridge_netns_path: None,
             };
-            // temp_dir drops here but mount_point PathBuf is copied into spec.
-            // std::path::absolute() does not require path to exist on disk.
-            ContainerCommand::new(package_name.to_owned(), ContainerRuntime::CRun, spec)
+            let oci_bundle_dir = OciBundleDir::new(&mount_point, package_name, "1.0.0")
+                .expect("test bundle path should be valid");
+            oci_bundle_dir
+                .ensure()
+                .expect("test bundle directory should be created");
+            let oci_bundle_dir = Arc::new(oci_bundle_dir);
+            (
+                ContainerCommand::new(
+                    package_name.to_owned(),
+                    ContainerRuntime::CRun,
+                    spec,
+                    Arc::clone(&oci_bundle_dir),
+                ),
+                oci_bundle_dir,
+                temp_dir,
+            )
         }
 
         #[test]
         fn test_container_command_new() {
-            let executor = create_test_container_command("test-container-new");
+            let (executor, _bundle_path, _temp_dir) =
+                create_test_container_command("test-container-new");
 
             // Test that the ContainerExecutor was created successfully
             assert!(format!("{executor:?}").contains("test-container-new"));
@@ -1424,7 +1362,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_container_command_get_start_args() {
-            let executor = create_test_container_command("test-container-start-args");
+            let (executor, _bundle_path, _temp_dir) =
+                create_test_container_command("test-container-start-args");
 
             executor
                 .prepare()
@@ -1448,7 +1387,8 @@ mod tests {
 
         #[test]
         fn test_container_command_get_stop_args() {
-            let executor = create_test_container_command("test-container-stop-args");
+            let (executor, _bundle_path, _temp_dir) =
+                create_test_container_command("test-container-stop-args");
 
             let stop_args = executor.get_stop_cmd().expect("Should get stop command");
 
@@ -1462,22 +1402,15 @@ mod tests {
 
         #[tokio::test]
         async fn test_container_command_get_start_args_bundle_not_exists() {
-            let executor = create_test_container_command("test-container-missing-bundle");
+            let (executor, bundle_path, _temp_dir) =
+                create_test_container_command("test-container-missing-bundle");
 
             executor
                 .prepare()
                 .await
                 .expect("command prepare should succeed");
 
-            let bundle_path = executor
-                .runtime_config()
-                .get()
-                .expect("bundle should be prepared")
-                .dir_path()
-                .to_path_buf();
-            if bundle_path.exists() {
-                fs::remove_dir_all(&bundle_path).expect("Failed to remove bundle dir");
-            }
+            fs::remove_dir_all(bundle_path.as_path()).expect("Failed to remove bundle dir");
 
             let result = executor.get_start_cmd();
             assert!(
@@ -1493,7 +1426,8 @@ mod tests {
 
         #[test]
         fn test_container_command_unprepared_get_start_args_error() {
-            let executor = create_test_container_command("test-container-unprepared");
+            let (executor, _bundle_path, _temp_dir) =
+                create_test_container_command("test-container-unprepared");
 
             let result = executor.get_start_cmd();
 
@@ -1507,36 +1441,56 @@ mod tests {
 
         #[tokio::test]
         async fn test_container_command_prepare_idempotent() {
-            let executor = create_test_container_command("test-container-idempotent");
+            let (executor, bundle_path, _temp_dir) =
+                create_test_container_command("test-container-idempotent");
 
             executor
                 .prepare()
                 .await
                 .expect("first prepare should succeed");
-            let first_path = executor
-                .runtime_config()
-                .get()
-                .expect("bundle should be prepared")
-                .dir_path()
-                .to_path_buf();
+            let first_path = bundle_path.as_path().to_path_buf();
 
             executor
                 .prepare()
                 .await
                 .expect("second prepare should succeed");
-            let second_path = executor
-                .runtime_config()
-                .get()
-                .expect("bundle should stay prepared")
-                .dir_path()
-                .to_path_buf();
+            let second_path = bundle_path.as_path().to_path_buf();
 
             assert_eq!(first_path, second_path);
         }
 
         #[tokio::test]
+        async fn test_container_command_prepares_bundle_before_mount_target() {
+            let (executor, bundle_path, _temp_dir) =
+                create_test_container_command("test-container-mount-order");
+
+            assert!(
+                bundle_path.as_path().exists(),
+                "bundle directory should exist"
+            );
+            assert!(
+                !bundle_path.as_path().join("config.json").exists(),
+                "bundle config should be written by command preparation"
+            );
+
+            fs::create_dir(bundle_path.pkgfs_path()).expect("mount target should be creatable");
+            executor
+                .prepare()
+                .await
+                .expect("command preparation should reuse pre-created bundle");
+
+            assert!(bundle_path.pkgfs_path().exists());
+            assert!(bundle_path.as_path().join("config.json").exists());
+            let start_args = executor
+                .get_start_cmd()
+                .expect("prepared bundle should produce start arguments");
+            assert_eq!(Path::new(&start_args[3]), bundle_path.as_path());
+        }
+
+        #[tokio::test]
         async fn test_container_command_prepared_get_start_args_valid() {
-            let executor = create_test_container_command("test-container-prepared");
+            let (executor, _bundle_path, _temp_dir) =
+                create_test_container_command("test-container-prepared");
 
             executor
                 .prepare()
@@ -1559,7 +1513,8 @@ mod tests {
 
         #[test]
         fn test_container_command_debug_format() {
-            let executor = create_test_container_command("test-container-debug");
+            let (executor, _bundle_path, _temp_dir) =
+                create_test_container_command("test-container-debug");
             let debug_str = format!("{executor:?}");
 
             // Verify debug format contains expected information
@@ -1621,7 +1576,7 @@ mod tests {
     }
 
     mod convert_arch_map_tests {
-        use crate::executor::oci::{HostArch, TransientRuntimeConfig};
+        use crate::executor::oci::{HostArch, OciRuntimeConfig};
         use oci_spec::runtime::Arch;
         use serde_json::json;
 
@@ -1655,10 +1610,8 @@ mod tests {
         fn test_convert_arch_map_x86_64() {
             let arch_map = create_test_arch_map();
             let arch_map_arr = arch_map.as_array().unwrap();
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                arch_map_arr,
-                HostArch::X86_64,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(arch_map_arr, HostArch::X86_64);
 
             assert!(result.is_some());
             let archs = result.unwrap();
@@ -1672,7 +1625,7 @@ mod tests {
         fn test_convert_arch_map_aarch64() {
             let arch_map = create_test_arch_map();
             let arch_map_arr = arch_map.as_array().unwrap();
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+            let result = OciRuntimeConfig::convert_arch_map_to_architectures(
                 arch_map_arr,
                 HostArch::Aarch64,
             );
@@ -1688,10 +1641,8 @@ mod tests {
         fn test_convert_arch_map_x86() {
             let arch_map = create_test_arch_map();
             let arch_map_arr = arch_map.as_array().unwrap();
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                arch_map_arr,
-                HostArch::X86,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(arch_map_arr, HostArch::X86);
 
             assert!(result.is_some());
             let archs = result.unwrap();
@@ -1703,10 +1654,8 @@ mod tests {
         fn test_convert_arch_map_arm() {
             let arch_map = create_test_arch_map();
             let arch_map_arr = arch_map.as_array().unwrap();
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                arch_map_arr,
-                HostArch::Arm,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(arch_map_arr, HostArch::Arm);
 
             assert!(result.is_some());
             let archs = result.unwrap();
@@ -1718,7 +1667,7 @@ mod tests {
         fn test_convert_arch_map_unsupported() {
             let arch_map = create_test_arch_map();
             let arch_map_arr = arch_map.as_array().unwrap();
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
+            let result = OciRuntimeConfig::convert_arch_map_to_architectures(
                 arch_map_arr,
                 HostArch::Unsupported,
             );
@@ -1737,10 +1686,8 @@ mod tests {
             ]);
             let arch_map_arr = arch_map.as_array().unwrap();
 
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                arch_map_arr,
-                HostArch::X86_64,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(arch_map_arr, HostArch::X86_64);
             assert!(result.is_none());
         }
 
@@ -1753,10 +1700,8 @@ mod tests {
             ]);
             let arch_map_arr = arch_map.as_array().unwrap();
 
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                arch_map_arr,
-                HostArch::X86_64,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(arch_map_arr, HostArch::X86_64);
             assert!(result.is_some());
             let archs = result.unwrap();
             assert_eq!(archs.len(), 1);
@@ -1773,10 +1718,8 @@ mod tests {
             ]);
             let arch_map_arr = arch_map.as_array().unwrap();
 
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                arch_map_arr,
-                HostArch::X86_64,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(arch_map_arr, HostArch::X86_64);
             assert!(result.is_some());
             let archs = result.unwrap();
             assert_eq!(archs.len(), 1);
@@ -1797,10 +1740,8 @@ mod tests {
             ]);
             let arch_map_arr = arch_map.as_array().unwrap();
 
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                arch_map_arr,
-                HostArch::X86_64,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(arch_map_arr, HostArch::X86_64);
             assert!(result.is_some());
             let archs = result.unwrap();
             // INVALID_ARCH should be filtered out
@@ -1814,10 +1755,8 @@ mod tests {
         fn test_convert_arch_map_empty_array() {
             let arch_map: Vec<serde_json::Value> = vec![];
 
-            let result = TransientRuntimeConfig::convert_arch_map_to_architectures(
-                &arch_map,
-                HostArch::X86_64,
-            );
+            let result =
+                OciRuntimeConfig::convert_arch_map_to_architectures(&arch_map, HostArch::X86_64);
             assert!(result.is_none());
         }
     }
@@ -1877,7 +1816,7 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
@@ -1885,7 +1824,7 @@ mod tests {
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-host-net".to_owned(),
                 version: "1.0.0".to_owned(),
-                mount_point: package_volume.get_mount_point().to_path_buf(),
+                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,
             });
@@ -1931,7 +1870,7 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
@@ -1939,7 +1878,7 @@ mod tests {
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-none-net".to_owned(),
                 version: "1.0.0".to_owned(),
-                mount_point: package_volume.get_mount_point().to_path_buf(),
+                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,
             });
@@ -1978,7 +1917,7 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
@@ -1986,7 +1925,7 @@ mod tests {
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-none-dup".to_owned(),
                 version: "1.0.0".to_owned(),
-                mount_point: package_volume.get_mount_point().to_path_buf(),
+                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,
             });
@@ -2029,7 +1968,7 @@ mod tests {
                 .expect("Failed to create test PackageVolume");
 
             let netns_path = std::path::Path::new("/run/netns/ssam-test");
-            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
@@ -2037,7 +1976,7 @@ mod tests {
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-bridge-path".to_owned(),
                 version: "1.0.0".to_owned(),
-                mount_point: package_volume.get_mount_point().to_path_buf(),
+                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: Some(netns_path.to_path_buf()),
             });
@@ -2089,7 +2028,7 @@ mod tests {
             let package_volume = create_test_package_volume_real(&mount_point)
                 .expect("Failed to create test PackageVolume");
 
-            let result = TransientRuntimeConfig::new(ContainerBundleSpec {
+            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: None,
                 mac_enabled: false,
@@ -2097,7 +2036,7 @@ mod tests {
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-bridge-no-path".to_owned(),
                 version: "1.0.0".to_owned(),
-                mount_point: package_volume.get_mount_point().to_path_buf(),
+                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
                 data_mounts: None,
                 bridge_netns_path: None,
             });

@@ -250,6 +250,26 @@ pub(crate) fn make_directory(path: impl AsRef<Path>, recursive: bool) -> anyhow:
         ))
 }
 
+// Safety: Debug format ({:?}) for paths prevents log injection via special characters.
+#[allow(clippy::unnecessary_debug_formatting)]
+pub(crate) fn remove_path_if_exists(path: impl AsRef<Path>) -> anyhow::Result<()> {
+    let path = path.as_ref();
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to stat path {path:?}"));
+        }
+    };
+
+    if meta.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("Failed to remove directory {path:?}"))
+    } else {
+        std::fs::remove_file(path).with_context(|| format!("Failed to remove path {path:?}"))
+    }
+}
+
 /// True if `path` is a safe relative path: at least one component and every
 /// component is `Normal`, so `..`, absolute root/prefix, a leading `.`, and
 /// NUL are rejected. `components()` normalizes interior `.` away, so it can

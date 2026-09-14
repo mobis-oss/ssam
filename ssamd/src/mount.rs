@@ -9,6 +9,7 @@ use crate::utils::actor_supervisor::{SupervisedActor, spawn_with};
 use anyhow::Context;
 use derive_more::Deref;
 use libssam::ssam_package::PackageFsVerityInfo;
+use libssam::superblock::FsType;
 use rsactor::{Actor, ActorRef, message_handlers};
 use rustix::mount::{MountFlags, UnmountFlags};
 use std::ffi::CString;
@@ -623,28 +624,24 @@ trait DeviceMountBackend {
     fn unmount(&self) -> anyhow::Result<()>;
 }
 
-struct DefaultDeviceMountBackend<'meta> {
-    pkgfs_meta: &'meta PackageFsMetadata,
+struct DefaultDeviceMountBackend<'mount> {
+    fstype: FsType,
+    overlayfs_root: &'mount Path,
+    mount_point: &'mount Path,
 }
 
 impl DeviceMountBackend for DefaultDeviceMountBackend<'_> {
     fn mount_base(&self, blkdev: &Path) -> anyhow::Result<()> {
-        let fstype = self.pkgfs_meta.packagefs_info.fstype.to_string();
-        do_mount(
-            blkdev,
-            &self.pkgfs_meta.mount_point,
-            &fstype,
-            MountFlags::RDONLY,
-            None,
-        )
+        let fstype = self.fstype.to_string();
+        do_mount(blkdev, self.mount_point, &fstype, MountFlags::RDONLY, None)
     }
 
     fn mount_overlay(&self) -> anyhow::Result<()> {
-        mount_overlayfs(self.pkgfs_meta)
+        mount_overlayfs(self.overlayfs_root, self.mount_point)
     }
 
     fn unmount(&self) -> anyhow::Result<()> {
-        do_unmount(&self.pkgfs_meta.mount_point)
+        do_unmount(self.mount_point)
     }
 }
 
@@ -692,15 +689,13 @@ fn build_overlay_options(lowerdir: &str, upperdir: &str, workdir: &str) -> Strin
     )
 }
 
-fn mount_overlayfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
+fn mount_overlayfs(overlayfs_root: &Path, mount_point: &Path) -> anyhow::Result<()> {
     log::trace!("mounting overlayfs");
-    let overlayfs_root = &pkgfs_meta.overlayfs_root;
 
     // As we are using overlayfs_root, it should not be empty.
     assert!(!overlayfs_root.as_os_str().is_empty());
 
-    let mntpoint = pkgfs_meta
-        .mount_point
+    let mntpoint = mount_point
         .to_str()
         .ok_or(anyhow::anyhow!("failed to convert to string"))?;
 
@@ -723,16 +718,18 @@ fn mount_overlayfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
 
     do_mount(
         "overlay",
-        &pkgfs_meta.mount_point,
+        mount_point,
         "overlay",
         MountFlags::empty(),
         Some(options.as_str()),
     )
 }
 
-pub(crate) fn unmount_pkgfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
+pub(crate) fn unmount_pkgfs(
+    pkgfs_meta: &PackageFsMetadata,
+    mount_point: &Path,
+) -> anyhow::Result<()> {
     let unmount_time = Instant::now();
-    let mount_point = &pkgfs_meta.mount_point;
 
     // Reverse of mount_device: an optional overlay sits on the pkgfs base at
     // the same mount point. mount_pkgfs's idempotency gate prevents restacking,
@@ -762,6 +759,7 @@ pub(crate) fn unmount_pkgfs(pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()
 pub(crate) async fn mount_pkgfs(
     pkg_name: &str,
     pkgfs_meta: &PackageFsMetadata,
+    mount_point: &Path,
     loop_control: &impl LoopDeviceAttacher,
 ) -> anyhow::Result<()> {
     // Idempotency gate: reuse a live mount left by an ungraceful crash instead
@@ -769,15 +767,16 @@ pub(crate) async fn mount_pkgfs(
     // of an existing mount, leaking the old devices and mount-table entry).
     // Mount point logged via Debug to prevent log injection (ssamd/AGENTS.md).
     #[allow(clippy::unnecessary_debug_formatting)]
-    if is_exact_mount(&pkgfs_meta.mount_point) {
-        log::info!(
-            "{pkg_name}: package fs already mounted at {:?}; skipping mount",
-            pkgfs_meta.mount_point
-        );
+    if is_exact_mount(mount_point) {
+        log::info!("{pkg_name}: package fs already mounted at {mount_point:?}; skipping mount");
         return Ok(());
     }
 
-    let mount_backend = DefaultDeviceMountBackend { pkgfs_meta };
+    let mount_backend = DefaultDeviceMountBackend {
+        fstype: pkgfs_meta.packagefs_info.fstype,
+        overlayfs_root: &pkgfs_meta.overlayfs_root,
+        mount_point,
+    };
     let overlay_enabled = !pkgfs_meta.overlayfs_root.as_os_str().is_empty();
     mount_pkgfs_with(
         pkgfs_meta.dm_verity_disabled,

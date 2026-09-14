@@ -109,16 +109,6 @@ pub async fn parse_package(
     Ok(result)
 }
 
-#[cfg(test)]
-pub(crate) async fn parse_packages_from_dir(
-    package_dir: impl AsRef<Path>,
-    packages_ext: &str,
-    public_key_file_path: impl AsRef<Path>,
-) -> Vec<anyhow::Result<PackageParseResult>> {
-    parse_packages_from_dir_with_verification(package_dir, packages_ext, public_key_file_path, true)
-        .await
-}
-
 pub(crate) async fn parse_packages_from_dir_with_verification(
     package_dir: impl AsRef<Path>,
     packages_ext: &str,
@@ -156,6 +146,20 @@ mod tests {
         const fn assert_send<T: Send>() {}
         assert_send::<super::PackageParseResult>();
     };
+
+    async fn parse_packages_from_dir(
+        package_dir: impl AsRef<Path>,
+        packages_ext: &str,
+        public_key_file_path: impl AsRef<Path>,
+    ) -> Vec<anyhow::Result<PackageParseResult>> {
+        super::parse_packages_from_dir_with_verification(
+            package_dir,
+            packages_ext,
+            public_key_file_path,
+            true,
+        )
+        .await
+    }
 
     #[tokio::test]
     async fn test_is_package_file() {

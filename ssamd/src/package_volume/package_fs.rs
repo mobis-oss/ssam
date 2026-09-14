@@ -20,7 +20,7 @@ pub(crate) struct PackageFsInfo {
 #[derive(Debug)]
 pub(crate) struct PackageFsMetadata {
     pub(crate) path: PathBuf,
-    pub(crate) mount_point: PathBuf,
+    pub(crate) oci_bundle_root: PathBuf,
     pub(crate) overlayfs_root: PathBuf,
     pub(crate) dm_verity_disabled: bool,
     pub(crate) packagefs_info: PackageFsInfo,
@@ -46,9 +46,6 @@ impl PackageFsMetadata {
             utils::is_safe_path_segment(version),
             "Unsafe package version rejected: {version}"
         );
-        let bundle_name = format!("{package_name}_{version}");
-        let mount_point = Path::new(oci_bundle_root).join(bundle_name).join("pkgfs");
-
         let overlayfs_root = if pkgfs_overlay_root.is_empty() {
             PathBuf::new()
         } else {
@@ -75,7 +72,7 @@ impl PackageFsMetadata {
 
         Ok(Self {
             path: package_path,
-            mount_point,
+            oci_bundle_root: Path::new(oci_bundle_root).to_path_buf(),
             overlayfs_root,
             dm_verity_disabled,
             packagefs_info,
@@ -95,17 +92,17 @@ pub trait PackageFsBackend: Send + Sync + std::fmt::Debug {
     /// # Errors
     ///
     /// Returns an error if the mount operation fails.
-    async fn mount(&self) -> anyhow::Result<()>;
+    async fn mount(&self, mount_point: &Path) -> anyhow::Result<()>;
     /// Unmount the package filesystem.
     ///
     /// # Errors
     ///
     /// Returns an error if the unmount operation fails.
-    fn unmount(&self) -> anyhow::Result<()>;
+    fn unmount(&self, mount_point: &Path) -> anyhow::Result<()>;
     /// Return the package name associated with this filesystem.
     fn package_name(&self) -> &str;
-    /// Return the mount point path for this filesystem.
-    fn mount_point(&self) -> &Path;
+    /// Return the OCI bundle root for this filesystem.
+    fn oci_bundle_root(&self) -> &Path;
 }
 
 /// Strategy trait for mounting/unmounting package filesystems.
@@ -117,10 +114,15 @@ pub(crate) trait MountBackend: Send + Sync + std::fmt::Debug {
         &'a self,
         package_name: &'a str,
         pkgfs_meta: &'a PackageFsMetadata,
+        mount_point: &'a Path,
         loop_controller: &'a T,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
 
-    fn unmount_pkgfs(&self, pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()>;
+    fn unmount_pkgfs(
+        &self,
+        pkgfs_meta: &PackageFsMetadata,
+        mount_point: &Path,
+    ) -> anyhow::Result<()>;
 }
 
 /// Production mount strategy that calls kernel mount operations.
@@ -132,13 +134,18 @@ impl MountBackend for DefaultMountBackend {
         &'a self,
         package_name: &'a str,
         pkgfs_meta: &'a PackageFsMetadata,
+        mount_point: &'a Path,
         loop_controller: &'a T,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
-        mount_pkgfs(package_name, pkgfs_meta, loop_controller)
+        mount_pkgfs(package_name, pkgfs_meta, mount_point, loop_controller)
     }
 
-    fn unmount_pkgfs(&self, pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
-        unmount_pkgfs(pkgfs_meta)
+    fn unmount_pkgfs(
+        &self,
+        pkgfs_meta: &PackageFsMetadata,
+        mount_point: &Path,
+    ) -> anyhow::Result<()> {
+        unmount_pkgfs(pkgfs_meta, mount_point)
     }
 }
 
@@ -156,22 +163,28 @@ where
     T: LoopDeviceAttacher + Send + Sync + std::fmt::Debug + 'static,
     M: MountBackend + 'static,
 {
-    async fn mount(&self) -> anyhow::Result<()> {
+    async fn mount(&self, mount_point: &Path) -> anyhow::Result<()> {
         self.mount_strategy
-            .mount_pkgfs(self.package_name(), &self.pkgfs_meta, &self.loop_controller)
+            .mount_pkgfs(
+                self.package_name(),
+                &self.pkgfs_meta,
+                mount_point,
+                &self.loop_controller,
+            )
             .await
     }
 
-    fn unmount(&self) -> anyhow::Result<()> {
-        self.mount_strategy.unmount_pkgfs(&self.pkgfs_meta)
+    fn unmount(&self, mount_point: &Path) -> anyhow::Result<()> {
+        self.mount_strategy
+            .unmount_pkgfs(&self.pkgfs_meta, mount_point)
     }
 
     fn package_name(&self) -> &str {
         &self.package_name
     }
 
-    fn mount_point(&self) -> &Path {
-        &self.pkgfs_meta.mount_point
+    fn oci_bundle_root(&self) -> &Path {
+        &self.pkgfs_meta.oci_bundle_root
     }
 }
 
@@ -223,21 +236,21 @@ pub(crate) mod tests {
         #[derive(Debug)]
         pub(crate) struct MockPackageFsBackend {
             pub(crate) package_name: String,
-            pub(crate) mount_point: PathBuf,
+            pub(crate) oci_bundle_root: PathBuf,
             pub(crate) mount_should_fail: bool,
             pub(crate) unmount_should_fail: bool,
         }
 
         #[async_trait::async_trait]
         impl PackageFsBackend for MockPackageFsBackend {
-            async fn mount(&self) -> anyhow::Result<()> {
+            async fn mount(&self, _mount_point: &Path) -> anyhow::Result<()> {
                 if self.mount_should_fail {
                     anyhow::bail!("MockPackageFsBackend: mount failed")
                 }
                 Ok(())
             }
 
-            fn unmount(&self) -> anyhow::Result<()> {
+            fn unmount(&self, _mount_point: &Path) -> anyhow::Result<()> {
                 if self.unmount_should_fail {
                     anyhow::bail!("MockPackageFsBackend: unmount failed")
                 }
@@ -248,8 +261,8 @@ pub(crate) mod tests {
                 &self.package_name
             }
 
-            fn mount_point(&self) -> &Path {
-                &self.mount_point
+            fn oci_bundle_root(&self) -> &Path {
+                &self.oci_bundle_root
             }
         }
 
@@ -261,12 +274,17 @@ pub(crate) mod tests {
                 &'a self,
                 _package_name: &'a str,
                 _pkgfs_meta: &'a PackageFsMetadata,
+                _mount_point: &'a Path,
                 _loop_controller: &'a T,
             ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
                 std::future::ready(Ok(()))
             }
 
-            fn unmount_pkgfs(&self, _pkgfs_meta: &PackageFsMetadata) -> anyhow::Result<()> {
+            fn unmount_pkgfs(
+                &self,
+                _pkgfs_meta: &PackageFsMetadata,
+                _mount_point: &Path,
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
         }
@@ -358,12 +376,7 @@ pub(crate) mod tests {
             // Verify the basic fields
             assert_eq!(pkgfs_meta.path, test_path);
             let oci_bundle_root = "/test/package/path";
-            assert_eq!(
-                pkgfs_meta.mount_point,
-                Path::new(oci_bundle_root)
-                    .join("test-package_1.0.0")
-                    .join("pkgfs")
-            );
+            assert_eq!(pkgfs_meta.oci_bundle_root, Path::new(oci_bundle_root));
 
             assert_eq!(format!("{}", pkgfs_meta.packagefs_info.fstype), "ext4");
             assert_eq!(pkgfs_meta.packagefs_info.pkgfs_offset, 1024);
@@ -479,28 +492,6 @@ pub(crate) mod tests {
                 assert!(PackageFsMetadata::new_for_test(&test_path, &pkg_file).is_err());
             }
         }
-
-        #[test]
-        fn test_package_fs_metadata_separates_hyphenated_name_and_version() {
-            let test_path = PathBuf::from("/test/package/path");
-
-            let mnt_root = "/test/package/path";
-            for (package_name, package_version, bundle_name) in [
-                ("abc-1.0.0", "1.0.0", "abc-1.0.0_1.0.0"),
-                ("abc", "1.0.0-rc.1", "abc_1.0.0-rc.1"),
-            ] {
-                let mut pkg_file = create_test_ssam_package_file();
-                pkg_file.package_name = package_name.to_string();
-                pkg_file.package_version = package_version.to_string();
-
-                let pkgfs_meta = PackageFsMetadata::new_for_test(&test_path, &pkg_file)
-                    .expect("package filesystem metadata should be created");
-                assert_eq!(
-                    pkgfs_meta.mount_point,
-                    Path::new(mnt_root).join(bundle_name).join("pkgfs")
-                );
-            }
-        }
     }
 
     mod package_filesystem_test {
@@ -548,12 +539,13 @@ pub(crate) mod tests {
         async fn test_package_filesystem_mount() {
             let pkgfs: Box<dyn PackageFsBackend> = Box::new(mocks::MockPackageFsBackend {
                 package_name: "mount-test".to_string(),
-                mount_point: PathBuf::from("/test/mount"),
+                oci_bundle_root: PathBuf::from("/test/mount"),
                 mount_should_fail: false,
                 unmount_should_fail: false,
             });
 
-            let result = pkgfs.mount().await;
+            let mount_point = PathBuf::from("/test/bundle/pkgfs");
+            let result = pkgfs.mount(&mount_point).await;
 
             assert!(result.is_ok());
         }
@@ -562,12 +554,13 @@ pub(crate) mod tests {
         fn test_package_filesystem_unmount() {
             let pkgfs: Box<dyn PackageFsBackend> = Box::new(mocks::MockPackageFsBackend {
                 package_name: "unmount-test".to_string(),
-                mount_point: PathBuf::from("/test/mount"),
+                oci_bundle_root: PathBuf::from("/test/mount"),
                 mount_should_fail: false,
                 unmount_should_fail: false,
             });
 
-            let result = pkgfs.unmount();
+            let mount_point = PathBuf::from("/test/bundle/pkgfs");
+            let result = pkgfs.unmount(&mount_point);
 
             assert!(result.is_ok());
         }

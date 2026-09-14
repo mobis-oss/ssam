@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::executor::container::ContainerCommand;
+use crate::executor::oci_bundle_dir::OciBundleDir;
 use crate::executor::{self, ContainerRuntime, ExecuteCommand, ExecutionResult, ExecutionStatus};
 use crate::network::NetworkManager;
 use crate::package_volume::messages::{GetQuotaInfo, WipeVolumeData};
@@ -200,6 +201,7 @@ struct DefaultPackageTransitioner {
     package_name: String,
     executor: Arc<LazyExecutor>,
     pkgfs_handle: Arc<dyn PackageFsBackend>,
+    oci_bundle_dir: Arc<OciBundleDir>,
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
     network: Option<NetworkManager>,
     bridge_id: String,
@@ -207,26 +209,6 @@ struct DefaultPackageTransitioner {
 }
 
 impl DefaultPackageTransitioner {
-    pub(crate) fn new(
-        package_name: String,
-        executor: Arc<LazyExecutor>,
-        pkgfs_handle: Arc<dyn PackageFsBackend>,
-        volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
-        network: Option<NetworkManager>,
-        bridge_id: String,
-        container_interface: String,
-    ) -> Self {
-        Self {
-            package_name,
-            executor,
-            pkgfs_handle,
-            volume_manager_ref,
-            network,
-            bridge_id,
-            container_interface,
-        }
-    }
-
     fn bridge_network(&self) -> Option<&NetworkManager> {
         self.network.as_ref()
     }
@@ -236,6 +218,10 @@ impl DefaultPackageTransitioner {
 impl PackageTransitioner for DefaultPackageTransitioner {
     async fn setup(&self) -> anyhow::Result<()> {
         log::debug!("Setting up package {}", self.package_name);
+
+        self.oci_bundle_dir.ensure().with_context(|| {
+            format!("{}: Failed to prepare runtime directory", self.package_name)
+        })?;
 
         let executor = Arc::clone(&self.executor);
 
@@ -251,21 +237,23 @@ impl PackageTransitioner for DefaultPackageTransitioner {
 
         let pkgfs = Arc::clone(&self.pkgfs_handle);
         let pkg_name = self.package_name.clone();
+        let oci_bundle_dir = self.oci_bundle_dir.clone();
         let mount_handle = tokio::spawn(async move {
             timeline_start(&pkg_name, PackagePhase::Mount);
-            let mount_result = match pkgfs.mount().await {
+            let mount_result = match pkgfs.mount(&oci_bundle_dir.pkgfs_path()).await {
                 result @ Ok(()) => result,
                 Err(e) => {
                     log::warn!("{pkg_name}: Retrying mount of package fs after failure: {e:#?}");
 
-                    let unmount_result = pkgfs.unmount().with_context(|| {
+                    let mount_point = oci_bundle_dir.pkgfs_path();
+                    let unmount_result = pkgfs.unmount(&mount_point).with_context(|| {
                         format!("{pkg_name}: Failed to unmount package fs during retry")
                     });
 
                     if unmount_result.is_err() {
                         unmount_result
                     } else {
-                        pkgfs.mount().await
+                        pkgfs.mount(&mount_point).await
                     }
                 }
             }
@@ -335,10 +323,11 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         timeline_start(&self.package_name, PackagePhase::Unmount);
         let result = self
             .pkgfs_handle
-            .unmount()
+            .unmount(&self.oci_bundle_dir.pkgfs_path())
             .with_context(|| format!("{}: Failed to unmount package fs", self.package_name));
         timeline_complete(&self.package_name, PackagePhase::Unmount);
-        result
+        result?;
+        self.oci_bundle_dir.cleanup()
     }
 
     async fn start(&self) -> anyhow::Result<ExecutionResult> {
@@ -404,17 +393,10 @@ impl PackageTransitioner for DefaultPackageTransitioner {
         }
 
         self.pkgfs_handle
-            .unmount()
+            .unmount(&self.oci_bundle_dir.pkgfs_path())
             .with_context(|| format!("{}: Failed to unmount package fs", self.package_name))?;
 
-        if let Some(executor) = executor {
-            executor
-                .cleanup()
-                .await
-                .with_context(|| format!("{}: Failed to clean up OCI bundle", self.package_name))?;
-        }
-
-        Ok(())
+        self.oci_bundle_dir.cleanup()
     }
 
     async fn wipe_data(&self) -> anyhow::Result<()> {
@@ -525,15 +507,13 @@ impl Package {
             pkg_name.clone()
         };
 
-        let command: Arc<dyn ExecuteCommand> = Arc::new(ContainerCommand::from_package(
-            pkg_name.clone(),
-            ContainerRuntime::CRun,
+        let command_spec = ContainerCommand::spec_from_package(
+            &pkg_name,
             package_file,
             pkg_volume,
             network_mode,
             packages_cgroup,
-        ));
-
+        );
         let service_info = executor::systemd::ServiceInfo::new_from_metadata(metadata)?;
 
         let execution_type = executor::ExecutorType::Systemd(service_info);
@@ -545,18 +525,30 @@ impl Package {
             packages_cgroup: packages_cgroup.to_owned(),
         };
 
+        let oci_bundle_dir = Arc::new(OciBundleDir::new(
+            &command_spec.oci_bundle_root,
+            &command_spec.package_name,
+            &command_spec.version,
+        )?);
+        let command: Arc<dyn ExecuteCommand> = Arc::new(ContainerCommand::new(
+            pkg_name.clone(),
+            ContainerRuntime::CRun,
+            command_spec,
+            Arc::clone(&oci_bundle_dir),
+        ));
         let executor = Arc::new(LazyExecutor::new(command, init_args));
 
         let pkgfs_handle = pkg_volume.packagefs();
-        let ops = DefaultPackageTransitioner::new(
-            pkg_name.clone(),
+        let ops = DefaultPackageTransitioner {
+            package_name: pkg_name.clone(),
             executor,
             pkgfs_handle,
-            volume_manager_ref.clone(),
-            effective_network,
+            oci_bundle_dir,
+            volume_manager_ref: volume_manager_ref.clone(),
+            network: effective_network,
             bridge_id,
             container_interface,
-        );
+        };
         let transition_mgr = TransitionManager::new(Box::new(ops));
         let transition_mgr_ref = transition_mgr.clone();
 
@@ -666,7 +658,7 @@ impl Package {
     /// filesystem fails during the upgrade transition.
     pub async fn prepare_upgrade(&self) -> anyhow::Result<()> {
         self.transition_mgr.prepare_upgrade().await?;
-        // Release the superseded actor so its bundle dir drops.
+        // Stop status updates from the superseded package.
         self.receiver_handle.abort();
         Ok(())
     }
