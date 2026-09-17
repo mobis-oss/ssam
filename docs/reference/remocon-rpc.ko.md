@@ -30,10 +30,10 @@
 | 전송 | gRPC (HTTP/2), proto3 |
 | gRPC package | `ssamd.remocon` (proto3) |
 | 엔드포인트 | Linux abstract Unix domain socket `@ssamd` |
-| 인증 | `SO_PEERCRED`: peer의 effective GID가 데몬의 effective GID 또는 `[rpc].allowed_gids` 항목과 일치해야 함 |
+| 인증 | `SO_PEERCRED` 및 `SO_PEERGROUPS`: peer의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID 또는 `[rpc].allowed_gids` 항목과 일치해야 함 |
 
-`ssamd` 는 RPC를 dispatch하기 전에 `SO_PEERCRED`에서 peer의 effective GID를 읽습니다.
-이 GID가 데몬의 effective GID와 같거나 `[rpc].allowed_gids`에 지정된 추가 GID 중 하나와 같으면 허용합니다.
+`ssamd` 는 RPC를 dispatch하기 전에 `SO_PEERCRED`에서 peer의 effective GID를 읽고 `SO_PEERGROUPS`에서 supplementary GID 목록을 읽습니다.
+peer의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID와 같거나 `[rpc].allowed_gids`에 지정된 추가 GID와 같으면 허용합니다.
 목록의 기본값은 빈 목록이며, 인증에는 UID를 사용하지 않습니다.
 
 ---

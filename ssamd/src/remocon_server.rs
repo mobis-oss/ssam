@@ -1,6 +1,8 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) mod auth;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

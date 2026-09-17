@@ -172,5 +172,5 @@ size = 29
 
 ## `[rpc]`
 
-`allowed_gids`는 Unix RPC socket 접근을 허용할 추가 peer effective GID 목록입니다.
-데몬의 effective GID는 항상 허용됩니다. 기본값은 `[]`입니다.
+`allowed_gids`는 Unix RPC socket 접근을 허용할 추가 peer effective 또는 supplementary GID 목록입니다.
+peer의 effective 또는 supplementary GID가 데몬의 effective GID와 일치하면 항상 허용됩니다. 기본값은 `[]`입니다.

@@ -179,7 +179,7 @@ flowchart LR
 
 - `ssamd` exposes the [Remocon gRPC control API](../reference/remocon-rpc.md) over the fixed Linux abstract Unix domain socket `@ssamd`, so only processes running in the same network namespace on the same host can access it.
 - An abstract socket cannot restrict access through filesystem permissions, so any process in the same network namespace that knows the name can attempt to connect.
-- However, `ssamd` only allows a request when the peer's effective GID matches the daemon's effective GID or is in the [configured allow-list](../reference/daemon-config.md#rpc).
+- However, `ssamd` allows a request when one of the peer's effective or supplementary GIDs matches the daemon's effective GID or an entry in the [configured allow-list](../reference/daemon-config.md#rpc).
 - **Even an installation RPC from an allowed client has package authenticity verified separately from caller authorization:** with the default verification settings, every installation request must pass signature and integrity verification, and a package that fails verification is refused and never gets set up or run. [`debug.disable_package_verify`](../reference/daemon-config.md#disable_package_verify) = `true` is a development-only exception that skips RSA signature verification.
 
 ---

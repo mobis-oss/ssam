@@ -320,7 +320,7 @@ The table below also describes whether each option is required and what happens 
 | `--pkgs-cgroup NAME` | (optional) Specifies `package.cgroup`. Omit to use the default cgroup. |
 | `--public-key-file PATH` | (optional) Specifies `package.public_key`. Omit to use `/etc/ssamd/public.key`; an explicit empty value requires `--disable-package-verify true`. |
 | `--packages-ext EXT` | (optional) Specifies `package.extension` without a leading dot. Omit to use the default `ssam` extension. |
-| `--rpc-allowed-gids LIST` | (optional) Specifies `rpc.allowed_gids`, the effective GIDs of additional Remocon clients to permit. Omit to allow no additional GIDs. |
+| `--rpc-allowed-gids LIST` | (optional) Specifies `rpc.allowed_gids`, the effective or supplementary GIDs of additional Remocon clients to permit. Omit to allow no additional GIDs. |
 | `--bridge-enabled BOOL` | (optional) Sets `network.bridge.enabled`. Omit to disable bridge networking. |
 | `--bridge-pool-base CIDR` | (optional) Sets `network.bridge.addr_pool.base`. Requires `--bridge-enabled`. |
 | `--bridge-pool-size BITS` | (optional) Sets `network.bridge.addr_pool.size`. Requires `--bridge-enabled`. |

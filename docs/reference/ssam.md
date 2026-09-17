@@ -39,10 +39,10 @@ unix://\0ssamd
 | --- | --- | --- |
 | Endpoint | `unix://\0ssamd` |
 | Transport | local gRPC over an abstract Unix domain socket |
-| Authorization | peer effective GID must match the daemon's effective GID or `[rpc].allowed_gids` via `SO_PEERCRED` |
+| Authorization | one of the peer's effective or supplementary GIDs must match the daemon's effective GID or a GID in `[rpc].allowed_gids` via `SO_PEERCRED` and `SO_PEERGROUPS` |
 
-The daemon's effective GID is always allowed.
-Additional peer effective GIDs can be configured with `[rpc].allowed_gids`; the list defaults to empty.
+One of the peer's effective or supplementary GIDs matching the daemon's effective GID is always allowed.
+Additional peer effective or supplementary GIDs can be configured with `[rpc].allowed_gids`; the list defaults to empty.
 UID is not used for authorization.
 
 For the control API details, see the [Remocon gRPC control API](remocon-rpc.md).

@@ -321,7 +321,7 @@ enabled = true
 | `--pkgs-cgroup NAME` | (선택) `package.cgroup`을 지정합니다. 생략하면 기본 cgroup을 사용합니다. |
 | `--public-key-file PATH` | (선택) `package.public_key`를 지정합니다. 생략하면 `/etc/ssamd/public.key`를 사용하며, 빈 값을 지정하려면 `--disable-package-verify true`도 필요합니다. |
 | `--packages-ext EXT` | (선택) 앞의 점을 제외한 `package.extension`을 지정합니다. 생략하면 기본값 `ssam`을 사용합니다. |
-| `--rpc-allowed-gids LIST` | (선택) 추가 Remocon 클라이언트에 허용할 effective GID인 `rpc.allowed_gids`를 지정합니다. 생략하면 추가 GID를 허용하지 않습니다. |
+| `--rpc-allowed-gids LIST` | (선택) 추가 Remocon 클라이언트에 허용할 effective 또는 supplementary GID인 `rpc.allowed_gids`를 지정합니다. 생략하면 추가 GID를 허용하지 않습니다. |
 | `--bridge-enabled BOOL` | (선택) `network.bridge.enabled`를 설정합니다. 생략하면 bridge 네트워킹을 비활성화합니다. |
 | `--bridge-pool-base CIDR` | (선택) `network.bridge.addr_pool.base`를 설정합니다. `--bridge-enabled`가 필요합니다. |
 | `--bridge-pool-size BITS` | (선택) `network.bridge.addr_pool.size`를 설정합니다. `--bridge-enabled`가 필요합니다. |

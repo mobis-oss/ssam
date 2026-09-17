@@ -112,8 +112,8 @@ let response = client.list_package_info(request).await?;
 > - 숫자를 직접 하드코딩하지 말고 codegen으로 생성된 `ApiVersion` enum 값을 사용하세요.
 > - 서버가 요구하는 버전과 일치하지 않으면 request가 gRPC `FAILED_PRECONDITION` 오류로 거부됩니다.
 
-> ⚠️ 호출자의 effective GID가 데몬의 effective GID와 일치하거나 [데몬의 허용 GID 목록](../reference/daemon-config.ko.md#rpc)에 포함돼야 합니다.
-> 그렇지 않으면 `ssamd`가 `SO_PEERCRED` 검사에서 RPC를 gRPC `PermissionDenied`로 거부합니다.
+> ⚠️ 호출자의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID 또는 [데몬의 허용 GID 목록](../reference/daemon-config.ko.md#rpc)에 포함되어야 합니다.
+> 그렇지 않으면 `ssamd`가 peer 자격 증명 검사에서 RPC를 gRPC `PermissionDenied`로 거부합니다.
 
 > ⚠️ `ListPackageInfo`를 포함하여, `package_names`를 필요로 하는 method는 이 값을 비워(`[]`) 보내면 설치된 **전체** 패키지를 대상으로 합니다.
 > 이는 `WipePackageData`처럼 **파괴적인** method에서는 치명적이므로, 별도의 확인 절차나 안전장치가 필요합니다.
@@ -176,7 +176,7 @@ for package in response.packages {
 
 ## Security considerations
 
-- Remocon 클라이언트의 제어 API 사용은 `ssamd`와 Remocon 클라이언트의 effective GID를 기반으로 허용 여부를 결정하므로, 시스템의 실행환경 구성에서 맞춰줘야 합니다.
+- Remocon 클라이언트의 제어 API 사용은 클라이언트의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID 또는 [설정된 허용 GID 목록](../reference/daemon-config.ko.md#rpc)과 일치하는지에 따라 결정되므로, 시스템의 실행환경에 일치하는 GID를 구성해야 합니다.
 - 패키지 진위 검증은 이와 **별개의 보안 계층** 입니다: 허용된 Remocon 클라이언트에서의 설치 요청일지라도 항상 패키지의 서명·무결성 검증을 거치므로, 서명되지 않거나 변조된 패키지는 거부되어 로드·실행되지 않습니다.
 
 > 📖 제어 인터페이스의 접근 통제(로컬 소켓·peer 자격 증명)와 위협 모델은 [제어 인터페이스 보안](../architecture/package-integrity.ko.md#control-interface-security-rpc)을 참고하세요.

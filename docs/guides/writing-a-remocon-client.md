@@ -112,7 +112,7 @@ let response = client.list_package_info(request).await?;
 > - Use the code-generated `ApiVersion` enum value rather than hardcoding its numeric value.
 > - A request whose version doesn't match the one the server requires is rejected with gRPC `FAILED_PRECONDITION`.
 
-> ⚠️ The caller's effective GID must match the daemon's effective GID or be in the daemon's [allowed-GID list](../reference/daemon-config.md#rpc); otherwise `ssamd` rejects the RPC with gRPC `PermissionDenied` at the `SO_PEERCRED` check.
+> ⚠️ The caller's effective or supplementary GIDs must include the daemon's effective GID or an entry in the daemon's [allowed-GID list](../reference/daemon-config.md#rpc); otherwise `ssamd` rejects the RPC with gRPC `PermissionDenied` at the peer credential check.
 
 > ⚠️ A method that takes `package_names` — including `ListPackageInfo` — targets **every** installed package when this list is sent empty (`[]`).
 > This is dangerous for a **destructive** method like `WipePackageData`, so add a separate confirmation or safety guard.
@@ -175,7 +175,7 @@ for package in response.packages {
 
 ## Security considerations
 
-- Whether a Remocon client may use the control API is decided from the effective GIDs of `ssamd` and the Remocon client, so they must be aligned in the system's runtime configuration.
+- Whether a Remocon client may use the control API is determined by whether one of the client's effective or supplementary GIDs matches the daemon's effective GID or an entry in the configured [allow-list](../reference/daemon-config.md#rpc), so the runtime configuration must provide a matching GID.
 - Package authenticity is a **separate security layer**: even an install request from an allowed Remocon client always goes through the package's signature and integrity verification, so an unsigned or tampered package is rejected and never loads or runs.
 
 > 📖 For the control interface's access control (local socket, peer credentials) and threat model, see [Control interface security](../architecture/package-integrity.md#control-interface-security-rpc).

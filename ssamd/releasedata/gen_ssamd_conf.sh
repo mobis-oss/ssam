@@ -154,7 +154,7 @@ Arguments for SSAMD configuration (All paths below are on the target device)
                                  Disable package signature verification.
 
   RPC configuration (optional):
-    --rpc-allowed-gids      LIST  Additional RPC peer effective GIDs to permit,
+    --rpc-allowed-gids      LIST  Additional RPC peer effective or supplementary GIDs,
                                   comma-separated.
                                   Omit for no additional RPC GIDs.
 

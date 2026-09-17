@@ -176,5 +176,5 @@ A prefix longer than `/30` is rejected because it has no usable host address.
 
 ## `[rpc]`
 
-`allowed_gids` lists additional peer effective GIDs allowed to access the Unix
-RPC socket. The daemon's effective GID is always allowed. Default: `[]`.
+`allowed_gids` lists additional peer effective or supplementary GIDs allowed to access the Unix
+RPC socket. A peer's effective or supplementary GID matching the daemon's effective GID is always allowed. Default: `[]`.

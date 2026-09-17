@@ -19,6 +19,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
 anyhow = "1.0.104"
+libc = "0.2.189"
 tonic = "0.14"
 prost = "0.14"
 prost-types = "0.14"

@@ -163,7 +163,7 @@ impl BridgeConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RpcConfig {
-    /// Additional peer effective GIDs allowed to access the RPC server.
+    /// Additional peer effective or supplementary GIDs allowed to access the RPC server.
     #[serde(default)]
     pub allowed_gids: Vec<u32>,
 }
@@ -331,7 +331,7 @@ impl Configuration {
         self.debug.disable_package_verify
     }
 
-    /// Get additional RPC peer effective GIDs.
+    /// Get additional RPC peer effective or supplementary GIDs.
     #[must_use]
     pub fn rpc_allowed_gids(&self) -> &[u32] {
         &self.rpc.allowed_gids
