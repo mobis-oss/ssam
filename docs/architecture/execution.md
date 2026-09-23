@@ -30,7 +30,7 @@ flowchart TB
     direction TB
     PM["«struct»<br/><b>PackageManager</b><br/>scan · load · parse · RSA signature verify"] --> PVM["«struct»<br/><b>PackageVolumeManagerActor</b><br/>data directory · ext4 quota"]
     PVM --> TM["«struct»<br/><b>TransitionManager</b><br/>drives package state machine"]
-    TM --> PT["«trait»<br/><b>PackageTransitioner</b><br/>package transitions (setup · start · stop)"]
+    TM --> PT["«trait»<br/><b>LifecycleBackend</b><br/>package lifecycle operations (setup · start · stop)"]
 
     subgraph SU["setup — build runtime env (concurrent)"]
       direction TB
@@ -67,7 +67,7 @@ flowchart TB
 - **Package management.** `PackageManager` scans and loads the builtin and downloaded package directories, verifies signatures, and drives each package's state machine (`TransitionManager`).
 - **Acquiring the data volume.** `PackageVolumeManagerActor` creates the package's data directory when the package is loaded and registered, and — when configured — limits data usage.
   This limit is supported only when the data partition's filesystem is *ext4*, applied through project quota.
-- **Building the runtime environment.** `PackageTransitioner` builds the container's runtime environment from a verified package — `PackageFileSystem` enables *dm-verity* on the filesystem for runtime integrity and mounts it read-only, `ContainerCommand` generates the *OCI Runtime config*, and `NetworkManager` attaches the network namespace.
+- **Building the runtime environment.** `LifecycleBackend` builds the container's runtime environment from a verified package — `PackageFileSystem` enables *dm-verity* on the filesystem for runtime integrity and mounts it read-only, `ContainerCommand` generates the *OCI Runtime config*, and `NetworkManager` attaches the network namespace.
 - **Running the container.** `TransientUnitExecutor` registers and starts the assembled *OCI Runtime bundle* as a *systemd* service unit, and *crun* creates and runs the container.
 - **Tracking container state.** `ActiveStateConverterActor` then monitors the *systemd* unit's state and updates the package status (Running / Ready) in `TransitionManager`.
 

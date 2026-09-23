@@ -1,6 +1,7 @@
 // Copyright 2025-2026 Hyundai Mobis Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use crate::package_volume::{PackageFsBackend, PackageVolume, PackageVolumeManage
 use crate::utils::{timeline_complete, timeline_start};
 
 use anyhow::Context as _;
+use async_trait::async_trait;
 use libssam::container::NetworkMode;
 use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{self, BrokenReason};
@@ -20,14 +22,10 @@ use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
 use rsactor::ActorRef;
 use strum::Display;
 use tokio::sync::mpsc;
-
-mod transition;
-use transition::PackageTransitioner;
+use tokio::task::JoinHandle;
 
 mod state_machine;
-use state_machine::TransitionManager;
-#[cfg(test)]
-use state_machine::{TransitionManagerActor, transition_messages};
+use state_machine::{LifecycleBackend, TransitionManager};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display)]
 pub enum PackageStatus {
@@ -57,12 +55,26 @@ pub(crate) fn is_wipeable_status(status: &PackageStatus) -> bool {
     )
 }
 
+impl From<ExecutionResult> for PackageStatus {
+    fn from(state: ExecutionResult) -> Self {
+        match state {
+            ExecutionResult::Success(state) | ExecutionResult::Canceled(state) => match state {
+                ExecutionStatus::Active(state) => PackageStatus::Running(state.to_string()),
+                ExecutionStatus::Inactive(_) => PackageStatus::Ready,
+            },
+            ExecutionResult::Failure(reason) => PackageStatus::Error(reason),
+            ExecutionResult::Timeout => PackageStatus::Error("timeout".to_string()),
+        }
+    }
+}
+
 #[derive(Debug, strum::Display)]
 pub enum PackagePhase {
     Parse,
     InitExecutor,
     Mount,
     PrepareCommand,
+    AttachNetwork,
     Start,
     Stop,
     Unmount,
@@ -128,275 +140,195 @@ impl PackageContext {
 }
 
 #[derive(Debug)]
-struct ExecutorInitArgs {
+struct PackageRuntime {
+    executor: executor::PackageExecutor,
+}
+
+#[derive(Debug)]
+struct PackageLifecycle {
     package_name: String,
-    execution_type: executor::ExecutorType,
+    service_info: executor::systemd::ServiceInfo,
     state_sender: mpsc::Sender<ExecutionStatus>,
     packages_cgroup: String,
-}
-
-#[derive(Debug)]
-struct LazyExecutor {
-    command: Arc<dyn ExecuteCommand>,
-    init_args: tokio::sync::RwLock<Option<ExecutorInitArgs>>,
-    cell: tokio::sync::OnceCell<executor::PackageExecutor>,
-}
-
-impl LazyExecutor {
-    fn new(command: Arc<dyn ExecuteCommand>, init_args: ExecutorInitArgs) -> Self {
-        Self {
-            command,
-            init_args: tokio::sync::RwLock::new(Some(init_args)),
-            cell: tokio::sync::OnceCell::new(),
-        }
-    }
-
-    fn command(&self) -> &Arc<dyn ExecuteCommand> {
-        &self.command
-    }
-
-    async fn get(&self) -> anyhow::Result<executor::PackageExecutor> {
-        let executor = if let Some(executor) = self.cell.get() {
-            Ok(executor)
-        } else {
-            self.cell
-                .get_or_try_init(async || {
-                    let init_args =
-                        self.init_args.write().await.take().context(
-                            "executor init args already consumed by a prior init attempt",
-                        )?;
-
-                    executor::PackageExecutor::new(
-                        init_args.package_name,
-                        self.command.clone(),
-                        init_args.execution_type,
-                        init_args.state_sender,
-                        init_args.packages_cgroup,
-                    )
-                    .await
-                })
-                .await
-        };
-        // Clone is safe as the contents of the ExecutorImpl is Arc
-        executor.cloned()
-    }
-}
-
-/// Internal transition orchestrator that manages package state transitions.
-///
-/// This struct coordinates mount/unmount operations through [`PackageFsBackend`]
-/// and synchronizes timeline state across the package lifecycle. It implements
-/// the [`PackageTransitioner`] trait to provide standardized access to volume and
-/// timeline information.
-///
-/// # Responsibility
-/// - Delegates volume mount/unmount to [`PackageFsBackend`]
-/// - Maintains the connection between package name and executor
-///
-/// # Ownership Model
-/// - Owns an `Arc<dyn PackageFsBackend>` for package filesystem operations
-/// - Does NOT own the executor (holds `Arc` reference)
-#[derive(Debug)]
-struct DefaultPackageTransitioner {
-    package_name: String,
-    executor: Arc<LazyExecutor>,
     pkgfs_handle: Arc<dyn PackageFsBackend>,
     oci_bundle_dir: Arc<OciBundleDir>,
+    command: Arc<dyn ExecuteCommand>,
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
     network: Option<NetworkManager>,
     bridge_id: String,
     container_interface: String,
+    runtime: Option<PackageRuntime>,
 }
 
-impl DefaultPackageTransitioner {
-    fn bridge_network(&self) -> Option<&NetworkManager> {
-        self.network.as_ref()
+impl PackageLifecycle {
+    fn spawn_phase<F, T>(name: &str, phase: impl Into<String>, future: F) -> JoinHandle<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let name = name.to_owned();
+        let phase = phase.into();
+        tokio::spawn(async move {
+            timeline_start(&name, phase.clone());
+            let result = future.await;
+            timeline_complete(&name, phase);
+            result
+        })
     }
-}
 
-#[async_trait::async_trait]
-impl PackageTransitioner for DefaultPackageTransitioner {
-    async fn setup(&self) -> anyhow::Result<()> {
-        log::debug!("Setting up package {}", self.package_name);
+    async fn setup_bundle(&self) -> anyhow::Result<()> {
+        let package_name = self.package_name.as_str();
+        self.oci_bundle_dir
+            .ensure()
+            .with_context(|| format!("{package_name}: Failed to prepare runtime directory"))?;
 
-        self.oci_bundle_dir.ensure().with_context(|| {
-            format!("{}: Failed to prepare runtime directory", self.package_name)
-        })?;
-
-        let executor = Arc::clone(&self.executor);
-
-        let pkg_name = self.package_name.clone();
-        // init executor in this point with another task to save time
-        let executor_handle = tokio::spawn(async move {
-            timeline_start(&pkg_name, PackagePhase::InitExecutor);
-            // force init
-            let executor = executor.get().await;
-            timeline_complete(&pkg_name, PackagePhase::InitExecutor);
-            executor
-        });
-
-        let pkgfs = Arc::clone(&self.pkgfs_handle);
-        let pkg_name = self.package_name.clone();
-        let oci_bundle_dir = self.oci_bundle_dir.clone();
-        let mount_handle = tokio::spawn(async move {
-            timeline_start(&pkg_name, PackagePhase::Mount);
-            let mount_result = match pkgfs.mount(&oci_bundle_dir.pkgfs_path()).await {
-                result @ Ok(()) => result,
-                Err(e) => {
-                    log::warn!("{pkg_name}: Retrying mount of package fs after failure: {e:#?}");
-
-                    let mount_point = oci_bundle_dir.pkgfs_path();
-                    let unmount_result = pkgfs.unmount(&mount_point).with_context(|| {
-                        format!("{pkg_name}: Failed to unmount package fs during retry")
-                    });
-
-                    if unmount_result.is_err() {
-                        unmount_result
-                    } else {
-                        pkgfs.mount(&mount_point).await
-                    }
-                }
-            }
-            .with_context(|| format!("{pkg_name}: Failed to mount package fs"));
-
-            timeline_complete(&pkg_name, PackagePhase::Mount);
-            mount_result
-        });
-
-        let command = Arc::clone(self.executor.command());
-        let pkg_name = self.package_name.clone();
-        let prepare_handle = tokio::spawn(async move {
-            timeline_start(&pkg_name, PackagePhase::PrepareCommand);
-            let r = command.prepare().await;
-            timeline_complete(&pkg_name, PackagePhase::PrepareCommand);
-            r
-        });
-
-        let pkg_name = self.package_name.clone();
-        let netns_net = self.bridge_network().cloned();
+        let mount_handle = Self::spawn_phase(
+            package_name,
+            PackagePhase::Mount,
+            mount_with_retry(
+                Arc::clone(&self.pkgfs_handle),
+                self.oci_bundle_dir.pkgfs_path(),
+            ),
+        );
+        let prepare_command = Arc::clone(&self.command);
+        let prepare_handle =
+            Self::spawn_phase(package_name, PackagePhase::PrepareCommand, async move {
+                prepare_command.prepare().await
+            });
+        let netns_net = self.network.clone();
         let netns_bridge_id = self.bridge_id.clone();
         let netns_iface = self.container_interface.clone();
-        let netns_handle = tokio::spawn(async move {
-            match netns_net {
-                Some(net) => {
-                    net.create_netns(&pkg_name).await?;
-                    net.attach(&pkg_name, &netns_bridge_id, &netns_iface).await
+        let netns_name = package_name.to_owned();
+        let netns_handle =
+            Self::spawn_phase(package_name, PackagePhase::AttachNetwork, async move {
+                match netns_net {
+                    Some(net) => {
+                        net.create_netns(&netns_name).await?;
+                        net.attach(&netns_name, &netns_bridge_id, &netns_iface)
+                            .await
+                    }
+                    None => Ok(()),
                 }
-                None => Ok(()),
-            }
-        });
+            });
 
-        let (executor_result, mount_result, prepare_result, netns_result) =
-            tokio::try_join!(executor_handle, mount_handle, prepare_handle, netns_handle)
-                .with_context(|| format!("{}: Cannot join the task on setup", self.package_name))?;
-        let _ = executor_result
-            .with_context(|| format!("{}: Error on initialize LazyExecutor", self.package_name))?;
-        prepare_result
-            .with_context(|| format!("{}: Error on prepare container bundle", self.package_name))?;
-        netns_result
-            .with_context(|| format!("{}: Error on attach bridge network", self.package_name))?;
-
-        mount_result.with_context(|| format!("{}: Error on mount", self.package_name))
+        // join, not try_join: a panicked phase must not let cleanup race the others.
+        let (mount, prepare, netns) = tokio::join!(mount_handle, prepare_handle, netns_handle);
+        [mount, prepare, netns]
+            .into_iter()
+            .try_for_each(|result| result.context("A bundle setup task panicked")?)
     }
 
-    async fn cleanup(&self) -> anyhow::Result<()> {
-        log::debug!("Cleaning up package {}", self.package_name);
+    async fn teardown_bundle(&self) -> anyhow::Result<()> {
+        let name = self.package_name.as_str();
 
-        if let Some(net) = self.bridge_network() {
-            let _ = net
-                .detach(&self.package_name, &self.bridge_id)
-                .await
-                .inspect_err(|e| {
-                    log::warn!("{}: detach during cleanup failed: {e:#}", self.package_name);
-                });
-            let _ = net
-                .destroy_netns(&self.package_name)
-                .await
-                .inspect_err(|e| {
-                    log::warn!(
-                        "{}: destroy_netns during cleanup failed: {e:#}",
-                        self.package_name
-                    );
-                });
+        // Network release is best-effort; only a failed unmount must block removal.
+        if let Some(net) = &self.network {
+            if let Err(error) = net.detach(name, &self.bridge_id).await {
+                log::warn!("{name}: detach during teardown failed: {error:#}");
+            }
+            if let Err(error) = net.destroy_netns(name).await {
+                log::warn!("{name}: destroy_netns during teardown failed: {error:#}");
+            }
         }
 
-        timeline_start(&self.package_name, PackagePhase::Unmount);
-        let result = self
+        timeline_start(name, PackagePhase::Unmount);
+        let unmount = self
             .pkgfs_handle
             .unmount(&self.oci_bundle_dir.pkgfs_path())
-            .with_context(|| format!("{}: Failed to unmount package fs", self.package_name));
-        timeline_complete(&self.package_name, PackagePhase::Unmount);
-        result?;
-        self.oci_bundle_dir.cleanup()
+            .with_context(|| format!("{name}: Failed to unmount package fs"));
+        timeline_complete(name, PackagePhase::Unmount);
+        unmount?;
+
+        self.oci_bundle_dir
+            .cleanup()
+            .with_context(|| format!("{name}: Failed to cleanup OCI bundle directory"))
     }
 
-    async fn start(&self) -> anyhow::Result<ExecutionResult> {
-        let pkg_name = self.package_name.as_str();
-        log::debug!("Starting package {pkg_name}");
+    fn runtime(&self) -> anyhow::Result<&PackageRuntime> {
+        self.runtime
+            .as_ref()
+            .with_context(|| format!("{}: package is not provisioned", self.package_name))
+    }
+}
+
+#[async_trait]
+impl LifecycleBackend for PackageLifecycle {
+    fn name(&self) -> &str {
+        &self.package_name
+    }
+
+    async fn provision(&mut self) -> anyhow::Result<()> {
+        let package_name = self.package_name.as_str();
+        let executor_handle = Self::spawn_phase(
+            package_name,
+            PackagePhase::InitExecutor,
+            executor::PackageExecutor::new(
+                package_name.to_owned(),
+                Arc::clone(&self.command),
+                executor::ExecutorType::Systemd(self.service_info.clone()),
+                self.state_sender.clone(),
+                self.packages_cgroup.clone(),
+            ),
+        );
+        let (executor, bundle) = tokio::join!(executor_handle, self.setup_bundle());
+        let result = executor
+            .context("The executor init task panicked")
+            .and_then(|result| result) // Replace with `Result::flatten` once the MSRV reaches 1.89.
+            .and_then(|executor| {
+                // Kept even if the bundle failed, so removal can retry the teardown.
+                self.runtime = Some(PackageRuntime { executor });
+                bundle
+            });
+        if let Err(error) = result {
+            let package_name = self.package_name.as_str();
+            if let Err(cleanup_error) = self.teardown_bundle().await {
+                log::warn!("{package_name}: Provisioning cleanup failed: {cleanup_error:#}");
+            }
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn start(&self) -> PackageStatus {
+        log::debug!("Starting package {}", self.package_name);
         timeline_start(&self.package_name, PackagePhase::Start);
-
-        let executor = self.executor.get().await?;
-        let result = executor.start().await;
-
+        let result = match self.runtime() {
+            Ok(runtime) => runtime.executor.start().await,
+            Err(error) => Err(error),
+        };
         timeline_complete(&self.package_name, PackagePhase::Start);
-        log::debug!("Package {pkg_name} starting job has finished with result {result:?}");
-        result
+        result.map_or_else(
+            |error| PackageStatus::Error(format!("{error:#}")),
+            PackageStatus::from,
+        )
     }
 
-    async fn stop(&self) -> anyhow::Result<ExecutionResult> {
-        let pkg_name = self.package_name.as_str();
-        log::debug!("Stopping package {pkg_name}");
-
+    async fn stop(&self) -> PackageStatus {
+        log::debug!("Stopping package {}", self.package_name);
         timeline_start(&self.package_name, PackagePhase::Stop);
-        let executor = self.executor.get().await?;
-        let result = executor.stop().await;
-
+        let result = match self.runtime() {
+            Ok(runtime) => runtime.executor.stop().await,
+            Err(error) => Err(error),
+        };
         timeline_complete(&self.package_name, PackagePhase::Stop);
-        log::debug!("Package {pkg_name} stopping job has finished with result {result:?}");
-        result
+        result.map_or_else(
+            |error| PackageStatus::Error(format!("{error:#}")),
+            PackageStatus::from,
+        )
     }
 
-    async fn teardown(&self) -> anyhow::Result<()> {
-        log::debug!("Teardown package {}", self.package_name);
-
-        let executor = self.executor.cell.get().cloned();
-        if let Some(executor_ref) = &executor
-            && let Err(e) = executor_ref.teardown().await
-        {
-            log::warn!(
-                "{}: executor teardown failed (continuing with unmount): {e:#}",
-                self.package_name
-            );
+    async fn teardown(&mut self) -> anyhow::Result<()> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(());
+        };
+        if let Err(error) = runtime.executor.teardown().await {
+            let name = self.package_name.as_str();
+            log::warn!("{name}: executor teardown failed (continuing with unmount): {error:#}");
         }
-
-        // Unconditional: teardown only runs on remove/shutdown, and a leftover
-        // netns/veth would collide with a reinstall or fresh daemon start.
-        if let Some(net) = self.bridge_network() {
-            let _ = net
-                .detach(&self.package_name, &self.bridge_id)
-                .await
-                .inspect_err(|e| {
-                    log::warn!(
-                        "{}: detach during teardown failed: {e:#}",
-                        self.package_name
-                    );
-                });
-            let _ = net
-                .destroy_netns(&self.package_name)
-                .await
-                .inspect_err(|e| {
-                    log::warn!(
-                        "{}: destroy_netns during teardown failed: {e:#}",
-                        self.package_name
-                    );
-                });
-        }
-
-        self.pkgfs_handle
-            .unmount(&self.oci_bundle_dir.pkgfs_path())
-            .with_context(|| format!("{}: Failed to unmount package fs", self.package_name))?;
-
-        self.oci_bundle_dir.cleanup()
+        self.teardown_bundle().await?;
+        self.runtime = None;
+        Ok(())
     }
 
     async fn wipe_data(&self) -> anyhow::Result<()> {
@@ -407,10 +339,24 @@ impl PackageTransitioner for DefaultPackageTransitioner {
             .await
             .context("Failed to communicate with PackageVolumeManager Actor")?
     }
+}
 
-    fn get_name(&self) -> &str {
-        &self.package_name
+async fn mount_with_retry(
+    pkgfs: Arc<dyn PackageFsBackend>,
+    mount_point: PathBuf,
+) -> anyhow::Result<()> {
+    let name = pkgfs.package_name().to_owned();
+    match pkgfs.mount(&mount_point).await {
+        result @ Ok(()) => result,
+        Err(error) => {
+            log::warn!("{name}: retrying package fs mount after failure: {error:#?}");
+            pkgfs
+                .unmount(&mount_point)
+                .with_context(|| format!("{name}: failed to unmount before mount retry"))?;
+            pkgfs.mount(&mount_point).await
+        }
     }
+    .with_context(|| format!("{name}: failed to mount package fs"))
 }
 
 /// High-level package lifecycle manager that orchestrates state transitions
@@ -427,9 +373,8 @@ impl PackageTransitioner for DefaultPackageTransitioner {
 /// - Manages async message processing via background task
 ///
 /// # State Machine Integration
-/// The transition manager internally uses [`DefaultPackageTransitioner`] which delegates
-/// mount/unmount to volume components, ensuring clean separation between
-/// package lifecycle logic and volume management mechanics.
+/// The transition manager owns lifecycle state and drives resource operations
+/// through the [`LifecycleBackend`] implemented by `PackageLifecycle`.
 ///
 /// # Thread Safety
 /// All state mutations are serialized through the actor model. Public methods
@@ -458,12 +403,11 @@ impl Package {
         let (sender, receiver) = mpsc::channel(8);
 
         let pkg_name = context.get_name().to_owned();
-
         let package_file = context.package_file();
         let metadata = package_file.metadata();
 
         // Authoritative network-mode parse: resolved once here and passed to both
-        // the container command and the transitioner so they never diverge.
+        // the container command and the backend so they never diverge.
         let network_mode = metadata
             .get_container_network_mode()
             .map(|m| NetworkMode::parse_mode(m))
@@ -487,9 +431,8 @@ impl Package {
             );
         }
 
-        // netns is needed only when the (container) command runs in bridge mode.
-        // Gate the network manager here at the command fork so the transitioner
-        // stays network-mode-agnostic; a future non-container command passes None.
+        // netns is needed only when the (container) command runs in bridge mode;
+        // gate the network manager here so the backend stays mode-agnostic.
         let effective_network = if network_mode == NetworkMode::Bridge {
             network
         } else {
@@ -507,6 +450,7 @@ impl Package {
             pkg_name.clone()
         };
 
+        let service_info = executor::systemd::ServiceInfo::new_from_metadata(metadata)?;
         let command_spec = ContainerCommand::spec_from_package(
             &pkg_name,
             package_file,
@@ -514,17 +458,6 @@ impl Package {
             network_mode,
             packages_cgroup,
         );
-        let service_info = executor::systemd::ServiceInfo::new_from_metadata(metadata)?;
-
-        let execution_type = executor::ExecutorType::Systemd(service_info);
-
-        let init_args = ExecutorInitArgs {
-            package_name: pkg_name.clone(),
-            execution_type,
-            state_sender: sender,
-            packages_cgroup: packages_cgroup.to_owned(),
-        };
-
         let oci_bundle_dir = Arc::new(OciBundleDir::new(
             &command_spec.oci_bundle_root,
             &command_spec.package_name,
@@ -536,20 +469,22 @@ impl Package {
             command_spec,
             Arc::clone(&oci_bundle_dir),
         ));
-        let executor = Arc::new(LazyExecutor::new(command, init_args));
 
-        let pkgfs_handle = pkg_volume.packagefs();
-        let ops = DefaultPackageTransitioner {
+        let backend = PackageLifecycle {
             package_name: pkg_name.clone(),
-            executor,
-            pkgfs_handle,
+            service_info,
+            state_sender: sender,
+            packages_cgroup: packages_cgroup.to_owned(),
+            pkgfs_handle: pkg_volume.packagefs(),
             oci_bundle_dir,
+            command,
             volume_manager_ref: volume_manager_ref.clone(),
             network: effective_network,
             bridge_id,
             container_interface,
+            runtime: None,
         };
-        let transition_mgr = TransitionManager::new(Box::new(ops));
+        let transition_mgr = TransitionManager::new(backend);
         let transition_mgr_ref = transition_mgr.clone();
 
         let receiver_handle = tokio::spawn(Self::run_status_receiver(
@@ -761,564 +696,5 @@ impl Package {
             package_path: self.context.package_file_path().display().to_string(),
             quota_info,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Mock implementation for testing
-    #[derive(Debug)]
-    pub(crate) struct MockExecutionState {
-        state: String,
-    }
-
-    impl MockExecutionState {
-        pub(crate) fn new(state: &str) -> Arc<Self> {
-            Arc::new(Self {
-                state: state.to_string(),
-            })
-        }
-    }
-
-    impl executor::ExecutionState for MockExecutionState {}
-
-    impl std::fmt::Display for MockExecutionState {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.state)
-        }
-    }
-
-    // MockPackageTransitioner uses 4 bool fields to control test scenario outcomes; struct_excessive_bools is intentional.
-    #[allow(clippy::struct_excessive_bools)]
-    #[derive(Debug)]
-    pub(crate) struct MockPackageTransitioner {
-        pkg_name: String,
-        setup_should_fail: bool,
-        start_should_fail: bool,
-        stop_should_fail: bool,
-        cleanup_should_fail: bool,
-        start_result_state: String,
-        stop_result_state: String,
-    }
-
-    impl MockPackageTransitioner {
-        pub(crate) fn new(pkg_name: String) -> Self {
-            Self {
-                pkg_name,
-                setup_should_fail: false,
-                start_should_fail: false,
-                stop_should_fail: false,
-                cleanup_should_fail: false,
-                start_result_state: "running".to_string(),
-                stop_result_state: "stopped".to_string(),
-            }
-        }
-
-        pub(crate) fn with_setup_error(mut self, _error: &str) -> Self {
-            self.setup_should_fail = true;
-            self
-        }
-
-        pub(crate) fn with_start_error(mut self) -> Self {
-            self.start_should_fail = true;
-            self
-        }
-
-        pub(crate) fn with_stop_error(mut self) -> Self {
-            self.stop_should_fail = true;
-            self
-        }
-
-        pub(crate) fn with_cleanup_error(mut self) -> Self {
-            self.cleanup_should_fail = true;
-            self
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl PackageTransitioner for MockPackageTransitioner {
-        async fn setup(&self) -> anyhow::Result<()> {
-            if self.setup_should_fail {
-                Err(anyhow::anyhow!("Setup failed"))
-            } else {
-                Ok(())
-            }
-        }
-
-        async fn cleanup(&self) -> anyhow::Result<()> {
-            if self.cleanup_should_fail {
-                Err(anyhow::anyhow!("Cleanup failed"))
-            } else {
-                Ok(())
-            }
-        }
-
-        async fn start(&self) -> anyhow::Result<ExecutionResult> {
-            if self.start_should_fail {
-                Err(anyhow::anyhow!("Start failed"))
-            } else {
-                Ok(ExecutionResult::Success(executor::ExecutionStatus::Active(
-                    MockExecutionState::new(&self.start_result_state),
-                )))
-            }
-        }
-
-        async fn stop(&self) -> anyhow::Result<ExecutionResult> {
-            if self.stop_should_fail {
-                Err(anyhow::anyhow!("Stop failed"))
-            } else {
-                Ok(ExecutionResult::Success(
-                    executor::ExecutionStatus::Inactive(MockExecutionState::new(
-                        &self.stop_result_state,
-                    )),
-                ))
-            }
-        }
-
-        async fn teardown(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn wipe_data(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn get_name(&self) -> &str {
-            &self.pkg_name
-        }
-    }
-
-    #[tokio::test]
-    async fn test_transition_manager_with_mock_ops() {
-        // Test successful setup transition
-        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-        let mut actor = TransitionManagerActor::new(mock_ops);
-
-        // Initial state should be Verified
-        assert_eq!(actor.status, PackageStatus::Verified);
-
-        // Test transition to SettingUp (which should complete to Ready)
-        let result = actor.transition_to(PackageStatus::SettingUp).await;
-        assert!(result.is_ok());
-        assert_eq!(actor.status, PackageStatus::Ready);
-    }
-
-    #[tokio::test]
-    async fn test_transition_manager_with_setup_failure() {
-        // Test setup failure
-        let mock_ops = Box::new(
-            MockPackageTransitioner::new("test-package".to_string())
-                .with_setup_error("Setup failed"),
-        );
-        let mut actor = TransitionManagerActor::new(mock_ops);
-
-        // Test transition to SettingUp (which should fail and go to Error)
-        let result = actor.transition_to(PackageStatus::SettingUp).await;
-        assert!(result.is_err());
-        assert!(matches!(actor.status, PackageStatus::Error(_)));
-    }
-
-    #[tokio::test]
-    async fn test_no_transition_needed() {
-        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-        let mut actor = TransitionManagerActor::new(mock_ops);
-
-        // Transition to same state should succeed without doing anything
-        let result = actor.transition_to(PackageStatus::Verified).await;
-        assert!(result.is_ok());
-        assert_eq!(actor.status, PackageStatus::Verified);
-    }
-
-    #[tokio::test]
-    async fn test_transition_manager_actor_message_handlers() {
-        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-        let (actor_ref, _) =
-            rsactor::spawn::<TransitionManagerActor>(TransitionManagerActor::new(mock_ops));
-
-        // Test GetStatus message
-        let status = actor_ref
-            .ask(transition_messages::GetStatus)
-            .await
-            .expect("Should get status");
-        assert_eq!(status, PackageStatus::Verified);
-
-        // Test RequestTransition message
-        let result = actor_ref
-            .ask(transition_messages::RequestTransition {
-                target: PackageStatus::SettingUp,
-            })
-            .await
-            .expect("Should handle transition request");
-        assert!(result.is_ok());
-
-        // Verify status changed to Ready after setup transition
-        let status = actor_ref
-            .ask(transition_messages::GetStatus)
-            .await
-            .expect("Should get status");
-        assert_eq!(status, PackageStatus::Ready);
-
-        // Test Teardown message
-        let result = actor_ref
-            .ask(transition_messages::Teardown)
-            .await
-            .expect("Should handle teardown");
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_transition_manager_actor_invalid_transition() {
-        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-        let mut actor = TransitionManagerActor::new(mock_ops);
-
-        // Try invalid transition from Verified to Running
-        let result = actor
-            .transition_to(PackageStatus::Running("active".to_string()))
-            .await;
-        assert!(result.is_err());
-
-        // Status should remain unchanged
-        assert_eq!(actor.status, PackageStatus::Verified);
-    }
-
-    #[tokio::test]
-    async fn test_transition_manager_actor_start_and_stop_flow() {
-        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-        let mut actor = TransitionManagerActor::new(mock_ops);
-
-        // Setup -> Ready
-        let result = actor.transition_to(PackageStatus::SettingUp).await;
-        assert!(result.is_ok());
-        assert_eq!(actor.status, PackageStatus::Ready);
-
-        // Start -> Running
-        let result = actor.transition_to(PackageStatus::StartRequested).await;
-        assert!(result.is_ok());
-        assert!(matches!(actor.status, PackageStatus::Running(_)));
-
-        // Stop -> Ready
-        let result = actor.transition_to(PackageStatus::StopRequested).await;
-        assert!(result.is_ok());
-        assert_eq!(actor.status, PackageStatus::Ready);
-    }
-
-    #[tokio::test]
-    async fn test_wipe_data_is_serialized_by_package_status() {
-        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-        let manager = TransitionManager::new(mock_ops);
-
-        manager
-            .request_setup()
-            .await
-            .expect("setup should reach Ready");
-        assert!(manager.wipe_data().await.is_ok());
-
-        manager
-            .request_start()
-            .await
-            .expect("start should reach Running");
-        let result = manager.wipe_data().await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("stop it before wiping data")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_transition_manager_actor_cleanup_flow() {
-        let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-        let mut actor = TransitionManagerActor::new(mock_ops);
-
-        // Setup first
-        let result = actor.transition_to(PackageStatus::SettingUp).await;
-        assert!(result.is_ok());
-        assert_eq!(actor.status, PackageStatus::Ready);
-
-        // Cleanup -> Cleaned
-        let result = actor.transition_to(PackageStatus::CleaningUp).await;
-        assert!(result.is_ok());
-        assert_eq!(actor.status, PackageStatus::Cleaned);
-    }
-
-    mod transition_manager_handler_tests {
-
-        use super::*;
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_creation() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let _handler = TransitionManager::new(mock_ops);
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_setup() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            let result = handler.request_setup().await;
-            assert!(result.is_ok());
-
-            // Verify status changed to Ready
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Ready);
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_setup_failure() {
-            let mock_ops = Box::new(
-                MockPackageTransitioner::new("test-package".to_string())
-                    .with_setup_error("Setup failed"),
-            );
-            let handler = TransitionManager::new(mock_ops);
-
-            let result = handler.request_setup().await;
-            assert!(result.is_err());
-
-            // Verify status changed to Error
-            let status = handler.get_status().await.expect("Should get status");
-            assert!(matches!(status, PackageStatus::Error(_)));
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_start() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            // Setup first
-            handler.request_setup().await.expect("Setup should succeed");
-
-            // Then start
-            let result = handler.request_start().await;
-            assert!(result.is_ok());
-
-            // Verify status changed to Running
-            let status = handler.get_status().await.expect("Should get status");
-            assert!(matches!(status, PackageStatus::Running(_)));
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_start_failure() {
-            let mock_ops = Box::new(
-                MockPackageTransitioner::new("test-package".to_string()).with_start_error(),
-            );
-            let handler = TransitionManager::new(mock_ops);
-
-            // Setup first
-            handler.request_setup().await.expect("Setup should succeed");
-
-            // Then try to start (should fail)
-            let result = handler.request_start().await;
-            assert!(result.is_err());
-
-            // Verify status changed to Error
-            let status = handler.get_status().await.expect("Should get status");
-            assert!(matches!(status, PackageStatus::Error(_)));
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_stop() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            // Setup and start first
-            handler.request_setup().await.expect("Setup should succeed");
-            handler.request_start().await.expect("Start should succeed");
-
-            // Then stop
-            let result = handler.request_stop().await;
-            assert!(result.is_ok());
-
-            // Verify status changed to Ready
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Ready);
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_stop_failure() {
-            let mock_ops = Box::new(
-                MockPackageTransitioner::new("test-package".to_string()).with_stop_error(),
-            );
-            let handler = TransitionManager::new(mock_ops);
-
-            // Setup and start first
-            handler.request_setup().await.expect("Setup should succeed");
-            handler.request_start().await.expect("Start should succeed");
-
-            // Then try to stop (should fail)
-            let result = handler.request_stop().await;
-            assert!(result.is_err());
-
-            // Verify status changed to Error
-            let status = handler.get_status().await.expect("Should get status");
-            assert!(matches!(status, PackageStatus::Error(_)));
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_cleanup() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            // Setup first
-            handler.request_setup().await.expect("Setup should succeed");
-
-            // Then cleanup
-            let result = handler.request_cleanup().await;
-            assert!(result.is_ok());
-
-            // Verify status changed to Cleaned
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Cleaned);
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_cleanup_failure() {
-            let mock_ops = Box::new(
-                MockPackageTransitioner::new("test-package".to_string()).with_cleanup_error(),
-            );
-            let handler = TransitionManager::new(mock_ops);
-
-            // Setup first
-            handler.request_setup().await.expect("Setup should succeed");
-
-            // Then try to cleanup (should fail)
-            let result = handler.request_cleanup().await;
-            assert!(result.is_err());
-
-            // Verify status changed to Error
-            let status = handler.get_status().await.expect("Should get status");
-            assert!(matches!(status, PackageStatus::Error(_)));
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_teardown() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            let result = handler.teardown().await;
-            assert!(result.is_ok());
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_complex_workflow() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            // Initial status should be Verified
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Verified);
-
-            // Setup
-            handler.request_setup().await.expect("Setup should succeed");
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Ready);
-
-            // Start
-            handler.request_start().await.expect("Start should succeed");
-            let status = handler.get_status().await.expect("Should get status");
-            assert!(matches!(status, PackageStatus::Running(_)));
-
-            // Stop
-            handler.request_stop().await.expect("Stop should succeed");
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Ready);
-
-            // Cleanup
-            handler
-                .request_cleanup()
-                .await
-                .expect("Cleanup should succeed");
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Cleaned);
-
-            // Teardown
-            handler.teardown().await.expect("Teardown should succeed");
-        }
-
-        #[tokio::test]
-        async fn test_transition_manager_handler_ignore_transitions() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            // Setup to get to Ready state
-            handler.request_setup().await.expect("Setup should succeed");
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Ready);
-
-            // Request stop while already in Ready state (should be ignored)
-            let result = handler.request_stop().await;
-            assert!(result.is_ok()); // Should succeed but do nothing
-
-            // Status should remain Ready
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Ready);
-        }
-
-        #[tokio::test]
-        async fn test_prepare_upgrade_from_verified() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Verified);
-
-            handler
-                .prepare_upgrade()
-                .await
-                .expect("Upgrade from Verified should succeed");
-
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Upgrading);
-        }
-
-        #[tokio::test]
-        async fn test_prepare_upgrade_from_ready() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            handler.request_setup().await.expect("Setup should succeed");
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Ready);
-
-            handler
-                .prepare_upgrade()
-                .await
-                .expect("Upgrade from Ready should succeed");
-
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Upgrading);
-        }
-
-        #[tokio::test]
-        async fn test_prepare_upgrade_from_cleaned_fails() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            handler.request_setup().await.expect("Setup should succeed");
-            handler
-                .request_cleanup()
-                .await
-                .expect("Cleanup should succeed");
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Cleaned);
-
-            let result = handler.prepare_upgrade().await;
-            assert!(result.is_err());
-        }
-
-        #[tokio::test]
-        async fn test_raw_teardown_succeeds_from_any_state() {
-            let mock_ops = Box::new(MockPackageTransitioner::new("test-package".to_string()));
-            let handler = TransitionManager::new(mock_ops);
-
-            let status = handler.get_status().await.expect("Should get status");
-            assert_eq!(status, PackageStatus::Verified);
-
-            handler.teardown().await.expect("Teardown should succeed");
-        }
     }
 }

@@ -46,6 +46,10 @@ impl OciBundleDir {
     }
 
     pub(crate) fn cleanup(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !crate::mount::is_exact_mount(&self.pkgfs_path()),
+            "Refusing to remove the bundle while pkgfs is mounted"
+        );
         crate::utils::remove_path_if_exists(&self.path)
     }
 }
@@ -175,5 +179,34 @@ mod tests {
 
         assert!(marker.exists(), "symlink target must not be removed");
         assert!(!bundle_path.exists(), "stale symlink must be removed");
+    }
+
+    #[test]
+    #[ignore = "requires root to mount; run under the Docker test harness"]
+    fn cleanup_refuses_while_pkgfs_mounted() {
+        use rustix::mount::{MountFlags, UnmountFlags, mount, unmount};
+
+        let root = tempfile::tempdir().expect("bundle root should be created");
+        let oci_bundle_dir = create_oci_bundle_dir(root.path(), "abc", "1.0.0")
+            .expect("bundle directory should be created");
+        let pkgfs = oci_bundle_dir.pkgfs_path();
+        fs::create_dir(&pkgfs).expect("pkgfs mount point should be created");
+        mount(
+            "tmpfs",
+            &pkgfs,
+            "tmpfs",
+            MountFlags::empty(),
+            None::<&std::ffi::CStr>,
+        )
+        .expect("tmpfs should mount");
+        let marker = pkgfs.join("upper");
+        fs::write(&marker, b"data").expect("mounted marker should be created");
+
+        let result = oci_bundle_dir.cleanup();
+        let marker_survived = marker.exists();
+        unmount(&pkgfs, UnmountFlags::empty()).expect("tmpfs should unmount");
+
+        assert!(result.is_err(), "cleanup must refuse a mounted bundle");
+        assert!(marker_survived, "mounted contents must not be removed");
     }
 }
