@@ -28,9 +28,9 @@ flowchart TB
 
   subgraph SD["ssamd — daemon process"]
     direction TB
-    PM["«struct»<br/><b>PackageManager</b><br/>scan · load · parse · RSA signature verify"] --> PVM["«struct»<br/><b>PackageVolumeManagerActor</b><br/>data directory · ext4 quota"]
-    PVM --> TM["«struct»<br/><b>TransitionManager</b><br/>drives package state machine"]
+    PM["«struct»<br/><b>PackageManager</b><br/>scan · load · parse · RSA signature verify"] --> TM["«struct»<br/><b>TransitionManager</b><br/>drives package state machine"]
     TM --> PT["«trait»<br/><b>LifecycleBackend</b><br/>package lifecycle operations (setup · start · stop)"]
+    PT --> PVM["«struct»<br/><b>PackageVolumeManagerActor</b><br/>data directory · ext4 quota"]
 
     subgraph SU["setup — build runtime env (concurrent)"]
       direction TB
@@ -65,7 +65,7 @@ flowchart TB
 ```
 
 - **Package management.** `PackageManager` scans and loads the builtin and downloaded package directories, verifies signatures, and drives each package's state machine (`TransitionManager`).
-- **Acquiring the data volume.** `PackageVolumeManagerActor` creates the package's data directory when the package is loaded and registered, and — when configured — limits data usage.
+- **Acquiring the data volume.** `PackageVolumeManagerActor` creates the package's data directory when the package is set up, and — when configured — limits data usage.
   This limit is supported only when the data partition's filesystem is *ext4*, applied through project quota.
 - **Building the runtime environment.** `LifecycleBackend` builds the container's runtime environment from a verified package — `PackageFileSystem` enables *dm-verity* on the filesystem for runtime integrity and mounts it read-only, `ContainerCommand` generates the *OCI Runtime config*, and `NetworkManager` attaches the network namespace.
 - **Running the container.** `TransientUnitExecutor` registers and starts the assembled *OCI Runtime bundle* as a *systemd* service unit, and *crun* creates and runs the container.
@@ -81,7 +81,7 @@ Running launches the container only when a separate [`StartPackage`](../referenc
 ```mermaid
 flowchart LR
   L["load &amp; parse"] --> V["verify signature"]
-  V --> VOL["acquire data volume<br/>data dir · quota"]
+  V --> VOL["acquire data volume (at setup)<br/>data dir · quota"]
   VOL --> SU
 
   subgraph SU["build runtime env (concurrent · all must succeed)"]
@@ -101,7 +101,8 @@ First it **loads and verifies** the package, in order:
 2. **Verify signature** — check the *RSA* PKCS#1 v1.5 signature over the package's **configuration data** against the configured public key.
    A mismatch stops here and marks the package `Broken`.
 
-Once verified, it first **acquires the package's data volume** — it creates a per-package directory under [`package.dir.data`](../reference/daemon-config.md#data), creates each path the package declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and, if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps usage with *ext4* project quota.
+Loading only validates the package's volume settings.
+When the package is set up, `ssamd` first **acquires the package's data volume** — it creates a per-package directory under [`package.dir.data`](../reference/daemon-config.md#data), creates each path the package declared in [`data_dirs`](../reference/package-config.md#data_dirs) inside it, and, if [`storage_limit`](../reference/package-config.md#storage_limit) is set, caps usage with *ext4* project quota.
 
 It then **builds the runtime environment**.
 These build steps run **concurrently wherever possible, and all must succeed**:
@@ -141,7 +142,7 @@ The current state per package can be queried via the [`ListPackages`](../referen
 | State | Meaning |
 | --- | --- |
 | `Verified` | Signature checked; package is trusted but not yet set up. |
-| `SettingUp` | dm-verity / mount / provisioning in progress. |
+| `SettingUp` | Data volume acquisition, dm-verity / mount / provisioning in progress. |
 | `Ready` | Set up and installed; not currently running. |
 | `StartRequested` | [`StartPackage`](../reference/remocon-rpc.md#startpackage) accepted; container coming up. |
 | `Running` | Container active (carries the underlying *systemd* service state). |

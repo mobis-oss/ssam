@@ -47,7 +47,7 @@ flowchart TB
   subgraph SD["ssamd — daemon process"]
     direction TB
     RS["«struct»<br/><b>RemoconImpl</b><br/>gRPC control service"] --> PM["«struct»<br/><b>PackageManager</b><br/>validate · parse · verify · select mode · recover"]
-    PM --> PT["«struct»<br/><b>PackageTransactionActor</b><br/>copy · back up · acquire volume · delete file"]
+    PM --> PT["«struct»<br/><b>PackageTransactionActor</b><br/>copy · back up · purge volume · delete file"]
     PM --> PS["«struct»<br/><b>PackageStore</b><br/>package records (incl. builtin path)"]
     PT --> PV["«struct»<br/><b>PackageVolumeManagerActor</b><br/>data directory · ext4 quota"]
   end
@@ -69,7 +69,8 @@ When a client issues an install via [`InstallPackage`](../reference/remocon-rpc.
    exception that skips signature verification.
    (On the startup path, an already-present file with a bad signature is instead recorded as `Broken`.)
 3. With no package of that name present, this is a **fresh install**.
-   `PackageManager` hands the prepared install to `PackageTransactionActor`, which copies the file into the downloaded directory and, through `PackageVolumeManagerActor`, acquires the package's volume — its data directory and *ext4* project quota.
+   `PackageManager` hands the prepared install to `PackageTransactionActor`, which copies the file into the downloaded directory.
+   The package's volume — its data directory and *ext4* project quota — is only validated here and is acquired through `PackageVolumeManagerActor` when the package is set up (see [Execution](execution.md)).
 4. The built package is saved in `PackageStore`, and its state machine starts.
 
 ## Updating a package
@@ -81,8 +82,9 @@ It then selects how to proceed from where the existing package lives:
 - existing is **builtin** → upgrade over the builtin base,
 - existing is **downloaded** → upgrade the downloaded package, backing up its file first.
 
-`PackageTransactionActor` backs up the old data directory (when the caller asks to reset it), copies the new file, and re-acquires the volume.
-If any step fails, `PackageManager` recovers the previous package — restoring its file and data — so a failed update never leaves the device without a working package.
+`PackageTransactionActor` backs up the old data directory (when the caller asks to reset it) and copies the new file; the new package acquires its volume when it is set up.
+If any of these steps fails, `PackageManager` recovers the previous package — restoring its file and data — so a failed update never leaves the device without a working package.
+A later failure while the new package is being set up leaves it in `Error`.
 
 ## Removing a package
 

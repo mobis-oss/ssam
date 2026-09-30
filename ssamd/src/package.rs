@@ -5,12 +5,15 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::configuration::Configuration;
 use crate::executor::container::ContainerCommand;
 use crate::executor::oci_bundle_dir::OciBundleDir;
-use crate::executor::{self, ContainerRuntime, ExecuteCommand, ExecutionResult, ExecutionStatus};
+use crate::executor::{self, ExecuteCommand, ExecutionResult, ExecutionStatus};
 use crate::network::NetworkManager;
-use crate::package_volume::messages::{GetQuotaInfo, WipeVolumeData};
-use crate::package_volume::{PackageFsBackend, PackageVolume, PackageVolumeManagerActor};
+use crate::package_volume::messages::{AcquireVolume, GetQuotaInfo, WipeVolumeData};
+use crate::package_volume::{
+    PackageFsBackend, PackageVolume, PackageVolumeManagerActor, PackageVolumeMetadata,
+};
 use crate::utils::{timeline_complete, timeline_start};
 
 use anyhow::Context as _;
@@ -43,16 +46,6 @@ pub enum PackageStatus {
     Error(String),
     #[strum(to_string = "Broken({0})")]
     Broken(BrokenReason),
-}
-
-/// States in which wiping a package's data volume is safe: no data bind mount
-/// can be live. Deny-by-default keeps cleanup from running over a live source
-/// when setup or unmount failed and left an Error or Broken package mounted.
-pub(crate) fn is_wipeable_status(status: &PackageStatus) -> bool {
-    matches!(
-        status,
-        PackageStatus::Verified | PackageStatus::Ready | PackageStatus::Cleaned
-    )
 }
 
 impl From<ExecutionResult> for PackageStatus {
@@ -104,14 +97,49 @@ impl std::fmt::Display for InvalidTransition {
 
 #[derive(Debug)]
 pub struct PackageContext {
-    path: PathBuf,
+    package_path: PathBuf,
     package_file: PackageFile,
+    network: PackageNetwork,
+    config: Arc<Configuration>,
+    service_info: executor::systemd::ServiceInfo,
+    state_sender: mpsc::Sender<ExecutionStatus>,
+    oci_bundle_dir: Arc<OciBundleDir>,
 }
 
 impl PackageContext {
-    pub fn new(package_path: impl AsRef<Path>, package_file: PackageFile) -> Self {
-        let path = package_path.as_ref().to_path_buf();
-        Self { path, package_file }
+    pub(crate) fn new(
+        package_path: impl AsRef<Path>,
+        package_file: PackageFile,
+        network: Option<NetworkManager>,
+        config: Arc<Configuration>,
+        state_sender: mpsc::Sender<ExecutionStatus>,
+    ) -> anyhow::Result<Self> {
+        let package_path = package_path.as_ref().to_path_buf();
+        // The volume is acquired at setup; validate its metadata now to fail install.
+        PackageVolumeMetadata::new(&package_path, &package_file, &config)
+            .context("Invalid package volume metadata")?;
+        let network = PackageNetwork::new(package_file.metadata(), network)?;
+        let service_info =
+            executor::systemd::ServiceInfo::new_from_metadata(package_file.metadata())?;
+        let metadata = package_file.metadata();
+        let oci_bundle_dir = Arc::new(
+            OciBundleDir::new(
+                Path::new(config.oci_bundle_root()),
+                metadata.get_package_name(),
+                &metadata.version().to_string(),
+            )
+            .context("Failed to create OCI bundle directory")?,
+        );
+
+        Ok(Self {
+            package_path,
+            package_file,
+            network,
+            config,
+            service_info,
+            state_sender,
+            oci_bundle_dir,
+        })
     }
 
     #[must_use]
@@ -121,42 +149,129 @@ impl PackageContext {
 
     #[must_use]
     pub fn package_file_path(&self) -> &Path {
-        &self.path
+        &self.package_path
     }
 
     #[must_use]
     pub fn get_name(&self) -> &str {
-        self.package_file.metadata().get_package_name()
+        self.package_file().metadata().get_package_name()
     }
 
     #[must_use]
     pub fn is_autostart(&self) -> bool {
-        self.package_file
+        self.package_file()
             .metadata()
             .get_package_autostart()
             .copied()
             .unwrap_or(true)
+    }
+
+    #[must_use]
+    fn packages_cgroup(&self) -> &str {
+        self.config.packages_cgroup()
+    }
+
+    #[must_use]
+    fn config(&self) -> &Configuration {
+        self.config.as_ref()
+    }
+
+    #[must_use]
+    fn network(&self) -> Option<&NetworkManager> {
+        self.network.manager.as_ref()
+    }
+
+    #[must_use]
+    fn network_mode(&self) -> &NetworkMode {
+        &self.network.mode
+    }
+
+    #[must_use]
+    fn bridge_id(&self) -> &str {
+        &self.network.bridge_id
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PackageNetwork {
+    manager: Option<NetworkManager>,
+    mode: NetworkMode,
+    container_interface: String,
+    bridge_id: String,
+}
+
+impl PackageNetwork {
+    fn new(metadata: &PackageMetadata, manager: Option<NetworkManager>) -> anyhow::Result<Self> {
+        let package_name = metadata.get_package_name();
+        // Authoritative network-mode parse: resolved once here and passed to both
+        // the container command and the backend so they never diverge.
+        let mode = metadata
+            .get_container_network_mode()
+            .map(|mode| NetworkMode::parse_mode(mode))
+            .transpose()
+            .context("Invalid network mode in package config")?
+            .unwrap_or(NetworkMode::Host);
+
+        // Reject bridge mode when the daemon network is disabled rather than
+        // silently downgrading to host networking, which would misrepresent the
+        // isolation the package declared.
+        if mode == NetworkMode::Bridge && manager.is_none() {
+            anyhow::bail!(
+                "{package_name}: bridge network mode requested but the daemon network is disabled"
+            );
+        }
+
+        let container_interface = metadata
+            .get_container_network_bridge_interface_name()
+            .map_or_else(
+                || crate::network::DEFAULT_CONTAINER_INTERFACE.to_owned(),
+                std::string::ToString::to_string,
+            );
+        // netns is needed only when the (container) command runs in bridge mode;
+        // gate the network manager here so the backend stays mode-agnostic.
+        let manager = (mode == NetworkMode::Bridge).then_some(manager).flatten();
+        // bridge_id groups packages onto a shared bridge: an explicit
+        // network_name shares one, its absence gives a private bridge per package.
+        let bridge_id = if mode == NetworkMode::Bridge {
+            metadata
+                .get_container_network_bridge_network_name()
+                .cloned()
+                .unwrap_or_else(|| package_name.to_owned())
+        } else {
+            package_name.to_owned()
+        };
+
+        Ok(Self {
+            manager,
+            mode,
+            container_interface,
+            bridge_id,
+        })
+    }
+
+    async fn attach(self, package_name: String) -> anyhow::Result<()> {
+        let Some(manager) = self.manager else {
+            return Ok(());
+        };
+        manager.create_netns(&package_name).await?;
+        manager
+            .attach(&package_name, &self.bridge_id, &self.container_interface)
+            .await
     }
 }
 
 #[derive(Debug)]
 struct PackageRuntime {
     executor: executor::PackageExecutor,
+    pkgfs_handle: Arc<dyn PackageFsBackend>,
+    _command: Arc<dyn ExecuteCommand>,
+    _volume: Arc<PackageVolume>,
 }
 
 #[derive(Debug)]
 struct PackageLifecycle {
-    package_name: String,
-    service_info: executor::systemd::ServiceInfo,
-    state_sender: mpsc::Sender<ExecutionStatus>,
-    packages_cgroup: String,
-    pkgfs_handle: Arc<dyn PackageFsBackend>,
-    oci_bundle_dir: Arc<OciBundleDir>,
-    command: Arc<dyn ExecuteCommand>,
+    context: Arc<PackageContext>,
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
-    network: Option<NetworkManager>,
-    bridge_id: String,
-    container_interface: String,
     runtime: Option<PackageRuntime>,
 }
 
@@ -176,40 +291,48 @@ impl PackageLifecycle {
         })
     }
 
-    async fn setup_bundle(&self) -> anyhow::Result<()> {
-        let package_name = self.package_name.as_str();
-        self.oci_bundle_dir
+    async fn acquire_volume(&self) -> anyhow::Result<PackageVolume> {
+        let context = self.context.as_ref();
+        let volume_meta = PackageVolumeMetadata::new(
+            context.package_file_path(),
+            context.package_file(),
+            context.config(),
+        )
+        .context("Failed to create package volume metadata")?;
+        self.volume_manager_ref
+            .ask(AcquireVolume { volume_meta })
+            .await
+            .context("Failed to communicate with PackageVolumeManager Actor")?
+    }
+
+    async fn setup_bundle(
+        &self,
+        pkgfs_handle: &Arc<dyn PackageFsBackend>,
+        command: &Arc<dyn ExecuteCommand>,
+    ) -> anyhow::Result<()> {
+        let context = self.context.as_ref();
+        let package_name = context.get_name();
+        let oci_bundle_dir = &context.oci_bundle_dir;
+        oci_bundle_dir
             .ensure()
             .with_context(|| format!("{package_name}: Failed to prepare runtime directory"))?;
 
         let mount_handle = Self::spawn_phase(
             package_name,
             PackagePhase::Mount,
-            mount_with_retry(
-                Arc::clone(&self.pkgfs_handle),
-                self.oci_bundle_dir.pkgfs_path(),
-            ),
+            mount_with_retry(Arc::clone(pkgfs_handle), oci_bundle_dir.pkgfs_path()),
         );
-        let prepare_command = Arc::clone(&self.command);
+        let prepare_command = Arc::clone(command);
         let prepare_handle =
             Self::spawn_phase(package_name, PackagePhase::PrepareCommand, async move {
                 prepare_command.prepare().await
             });
-        let netns_net = self.network.clone();
-        let netns_bridge_id = self.bridge_id.clone();
-        let netns_iface = self.container_interface.clone();
-        let netns_name = package_name.to_owned();
-        let netns_handle =
-            Self::spawn_phase(package_name, PackagePhase::AttachNetwork, async move {
-                match netns_net {
-                    Some(net) => {
-                        net.create_netns(&netns_name).await?;
-                        net.attach(&netns_name, &netns_bridge_id, &netns_iface)
-                            .await
-                    }
-                    None => Ok(()),
-                }
-            });
+        let network = context.network.clone();
+        let netns_handle = Self::spawn_phase(
+            package_name,
+            PackagePhase::AttachNetwork,
+            network.attach(package_name.to_owned()),
+        );
 
         // join, not try_join: a panicked phase must not let cleanup race the others.
         let (mount, prepare, netns) = tokio::join!(mount_handle, prepare_handle, netns_handle);
@@ -218,12 +341,17 @@ impl PackageLifecycle {
             .try_for_each(|result| result.context("A bundle setup task panicked")?)
     }
 
-    async fn teardown_bundle(&self) -> anyhow::Result<()> {
-        let name = self.package_name.as_str();
+    async fn teardown_bundle(
+        &self,
+        pkgfs_handle: &Arc<dyn PackageFsBackend>,
+    ) -> anyhow::Result<()> {
+        let context = self.context.as_ref();
+        let oci_bundle_dir = &context.oci_bundle_dir;
+        let name = context.get_name();
 
         // Network release is best-effort; only a failed unmount must block removal.
-        if let Some(net) = &self.network {
-            if let Err(error) = net.detach(name, &self.bridge_id).await {
+        if let Some(net) = context.network() {
+            if let Err(error) = net.detach(name, context.bridge_id()).await {
                 log::warn!("{name}: detach during teardown failed: {error:#}");
             }
             if let Err(error) = net.destroy_netns(name).await {
@@ -232,14 +360,13 @@ impl PackageLifecycle {
         }
 
         timeline_start(name, PackagePhase::Unmount);
-        let unmount = self
-            .pkgfs_handle
-            .unmount(&self.oci_bundle_dir.pkgfs_path())
+        let unmount = pkgfs_handle
+            .unmount(&oci_bundle_dir.pkgfs_path())
             .with_context(|| format!("{name}: Failed to unmount package fs"));
         timeline_complete(name, PackagePhase::Unmount);
         unmount?;
 
-        self.oci_bundle_dir
+        oci_bundle_dir
             .cleanup()
             .with_context(|| format!("{name}: Failed to cleanup OCI bundle directory"))
     }
@@ -247,41 +374,58 @@ impl PackageLifecycle {
     fn runtime(&self) -> anyhow::Result<&PackageRuntime> {
         self.runtime
             .as_ref()
-            .with_context(|| format!("{}: package is not provisioned", self.package_name))
+            .with_context(|| format!("{}: package is not provisioned", self.context.get_name()))
     }
 }
 
 #[async_trait]
 impl LifecycleBackend for PackageLifecycle {
     fn name(&self) -> &str {
-        &self.package_name
+        self.context.get_name()
     }
 
     async fn provision(&mut self) -> anyhow::Result<()> {
-        let package_name = self.package_name.as_str();
+        let context = self.context.as_ref();
+        let package_name = context.get_name();
+        let volume = self.acquire_volume().await?;
+        let pkgfs_handle = volume.packagefs();
+        let command = ContainerCommand::from_package(
+            package_name,
+            context.package_file(),
+            &volume,
+            context.network_mode().clone(),
+            context.packages_cgroup(),
+            Arc::clone(&context.oci_bundle_dir),
+        );
+
         let executor_handle = Self::spawn_phase(
             package_name,
             PackagePhase::InitExecutor,
             executor::PackageExecutor::new(
                 package_name.to_owned(),
-                Arc::clone(&self.command),
-                executor::ExecutorType::Systemd(self.service_info.clone()),
-                self.state_sender.clone(),
-                self.packages_cgroup.clone(),
+                Arc::clone(&command),
+                executor::ExecutorType::Systemd(context.service_info.clone()),
+                context.state_sender.clone(),
+                context.packages_cgroup().to_owned(),
             ),
         );
-        let (executor, bundle) = tokio::join!(executor_handle, self.setup_bundle());
+        let (executor, bundle) =
+            tokio::join!(executor_handle, self.setup_bundle(&pkgfs_handle, &command));
         let result = executor
             .context("The executor init task panicked")
             .and_then(|result| result) // Replace with `Result::flatten` once the MSRV reaches 1.89.
             .and_then(|executor| {
                 // Kept even if the bundle failed, so removal can retry the teardown.
-                self.runtime = Some(PackageRuntime { executor });
+                self.runtime = Some(PackageRuntime {
+                    executor,
+                    pkgfs_handle: Arc::clone(&pkgfs_handle),
+                    _command: command,
+                    _volume: Arc::new(volume),
+                });
                 bundle
             });
         if let Err(error) = result {
-            let package_name = self.package_name.as_str();
-            if let Err(cleanup_error) = self.teardown_bundle().await {
+            if let Err(cleanup_error) = self.teardown_bundle(&pkgfs_handle).await {
                 log::warn!("{package_name}: Provisioning cleanup failed: {cleanup_error:#}");
             }
             Err(error)
@@ -291,13 +435,14 @@ impl LifecycleBackend for PackageLifecycle {
     }
 
     async fn start(&self) -> PackageStatus {
-        log::debug!("Starting package {}", self.package_name);
-        timeline_start(&self.package_name, PackagePhase::Start);
+        let name = self.context.get_name();
+        log::debug!("Starting package {name}");
+        timeline_start(name, PackagePhase::Start);
         let result = match self.runtime() {
             Ok(runtime) => runtime.executor.start().await,
             Err(error) => Err(error),
         };
-        timeline_complete(&self.package_name, PackagePhase::Start);
+        timeline_complete(name, PackagePhase::Start);
         result.map_or_else(
             |error| PackageStatus::Error(format!("{error:#}")),
             PackageStatus::from,
@@ -305,13 +450,14 @@ impl LifecycleBackend for PackageLifecycle {
     }
 
     async fn stop(&self) -> PackageStatus {
-        log::debug!("Stopping package {}", self.package_name);
-        timeline_start(&self.package_name, PackagePhase::Stop);
+        let name = self.context.get_name();
+        log::debug!("Stopping package {name}");
+        timeline_start(name, PackagePhase::Stop);
         let result = match self.runtime() {
             Ok(runtime) => runtime.executor.stop().await,
             Err(error) => Err(error),
         };
-        timeline_complete(&self.package_name, PackagePhase::Stop);
+        timeline_complete(name, PackagePhase::Stop);
         result.map_or_else(
             |error| PackageStatus::Error(format!("{error:#}")),
             PackageStatus::from,
@@ -323,10 +469,10 @@ impl LifecycleBackend for PackageLifecycle {
             return Ok(());
         };
         if let Err(error) = runtime.executor.teardown().await {
-            let name = self.package_name.as_str();
+            let name = self.context.get_name();
             log::warn!("{name}: executor teardown failed (continuing with unmount): {error:#}");
         }
-        self.teardown_bundle().await?;
+        self.teardown_bundle(&runtime.pkgfs_handle).await?;
         self.runtime = None;
         Ok(())
     }
@@ -334,7 +480,7 @@ impl LifecycleBackend for PackageLifecycle {
     async fn wipe_data(&self) -> anyhow::Result<()> {
         self.volume_manager_ref
             .ask(WipeVolumeData {
-                name: self.package_name.clone(),
+                name: self.context.get_name().to_owned(),
             })
             .await
             .context("Failed to communicate with PackageVolumeManager Actor")?
@@ -381,7 +527,7 @@ async fn mount_with_retry(
 /// send messages to the state machine actor, ensuring safe concurrent access.
 #[derive(Debug)]
 pub struct Package {
-    context: PackageContext,
+    context: Arc<PackageContext>,
     transition_mgr: TransitionManager,
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
     receiver_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -390,98 +536,27 @@ pub struct Package {
 impl Package {
     /// # Errors
     ///
-    /// Returns an error if the package requests bridge mode while the daemon
-    /// network is disabled, or if building the OCI runtime config or systemd
-    /// service info fails.
+    /// Returns an error if the package network, systemd service or volume
+    /// metadata configuration is invalid.
     pub fn new(
-        context: PackageContext,
-        pkg_volume: &PackageVolume,
+        package_path: impl AsRef<Path>,
+        package_file: PackageFile,
         volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
         network: Option<NetworkManager>,
-        packages_cgroup: &str,
+        config: Arc<Configuration>,
     ) -> anyhow::Result<Self> {
         let (sender, receiver) = mpsc::channel(8);
-
-        let pkg_name = context.get_name().to_owned();
-        let package_file = context.package_file();
-        let metadata = package_file.metadata();
-
-        // Authoritative network-mode parse: resolved once here and passed to both
-        // the container command and the backend so they never diverge.
-        let network_mode = metadata
-            .get_container_network_mode()
-            .map(|m| NetworkMode::parse_mode(m))
-            .transpose()
-            .context("Invalid network mode in package config")?
-            .unwrap_or(NetworkMode::Host);
-
-        let container_interface = metadata
-            .get_container_network_bridge_interface_name()
-            .map_or_else(
-                || crate::network::DEFAULT_CONTAINER_INTERFACE.to_owned(),
-                std::string::ToString::to_string,
-            );
-
-        // Reject bridge mode when the daemon network is disabled rather than
-        // silently downgrading to host networking, which would misrepresent the
-        // isolation the package declared.
-        if network_mode == NetworkMode::Bridge && network.is_none() {
-            anyhow::bail!(
-                "{pkg_name}: bridge network mode requested but the daemon network is disabled"
-            );
-        }
-
-        // netns is needed only when the (container) command runs in bridge mode;
-        // gate the network manager here so the backend stays mode-agnostic.
-        let effective_network = if network_mode == NetworkMode::Bridge {
-            network
-        } else {
-            None
-        };
-
-        // bridge_id groups packages onto a shared bridge: an explicit
-        // network_name shares one, its absence gives a private bridge per package.
-        let bridge_id = if network_mode == NetworkMode::Bridge {
-            metadata
-                .get_container_network_bridge_network_name()
-                .cloned()
-                .unwrap_or_else(|| pkg_name.clone())
-        } else {
-            pkg_name.clone()
-        };
-
-        let service_info = executor::systemd::ServiceInfo::new_from_metadata(metadata)?;
-        let command_spec = ContainerCommand::spec_from_package(
-            &pkg_name,
+        let context = Arc::new(PackageContext::new(
+            package_path,
             package_file,
-            pkg_volume,
-            network_mode,
-            packages_cgroup,
-        );
-        let oci_bundle_dir = Arc::new(OciBundleDir::new(
-            &command_spec.oci_bundle_root,
-            &command_spec.package_name,
-            &command_spec.version,
+            network,
+            config,
+            sender,
         )?);
-        let command: Arc<dyn ExecuteCommand> = Arc::new(ContainerCommand::new(
-            pkg_name.clone(),
-            ContainerRuntime::CRun,
-            command_spec,
-            Arc::clone(&oci_bundle_dir),
-        ));
-
+        let pkg_name = context.get_name().to_owned();
         let backend = PackageLifecycle {
-            package_name: pkg_name.clone(),
-            service_info,
-            state_sender: sender,
-            packages_cgroup: packages_cgroup.to_owned(),
-            pkgfs_handle: pkg_volume.packagefs(),
-            oci_bundle_dir,
-            command,
+            context: Arc::clone(&context),
             volume_manager_ref: volume_manager_ref.clone(),
-            network: effective_network,
-            bridge_id,
-            container_interface,
             runtime: None,
         };
         let transition_mgr = TransitionManager::new(backend);
@@ -634,13 +709,13 @@ impl Package {
 
     #[must_use]
     pub fn get_version(&self) -> semver::Version {
-        let metadata: &PackageMetadata = self.context.package_file.metadata();
+        let metadata: &PackageMetadata = self.context.package_file().metadata();
         metadata.version()
     }
 
     #[must_use]
     pub fn get_metadata(&self) -> &PackageMetadata {
-        self.context.package_file.metadata()
+        self.context.package_file().metadata()
     }
 
     /// # Errors
@@ -654,7 +729,7 @@ impl Package {
     ///
     /// Returns an error if the status or quota info cannot be retrieved.
     pub async fn get_package_info(&self) -> anyhow::Result<ssam_pkg_info::PackageInfo> {
-        let package_metadata_ref: &PackageMetadata = self.context.package_file.metadata();
+        let package_metadata_ref: &PackageMetadata = self.context.package_file().metadata();
 
         let package_status = self
             .get_status()

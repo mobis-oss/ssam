@@ -356,6 +356,18 @@ pub(crate) mod tests {
         builtin_dir: &Path,
         downloaded_dir: &Path,
     ) -> Arc<Configuration> {
+        test_configuration_with_dirs(
+            builtin_dir,
+            downloaded_dir,
+            Path::new("/var/lib/ssamd/data"),
+        )
+    }
+
+    pub(crate) fn test_configuration_with_dirs(
+        builtin_dir: &Path,
+        downloaded_dir: &Path,
+        data_dir: &Path,
+    ) -> Arc<Configuration> {
         Arc::new(Configuration::new(
             PackageConfig {
                 extension: DEFAULT_PACKAGE_EXTENSION.to_owned(),
@@ -371,7 +383,10 @@ pub(crate) mod tests {
                         .expect("downloaded test directory contains non-UTF-8 characters")
                         .to_owned(),
                     oci_bundle_root: "/var/lib/ssamd/oci-bundle".to_owned(),
-                    data: "/var/lib/ssamd/data".to_owned(),
+                    data: data_dir
+                        .to_str()
+                        .expect("data test directory contains non-UTF-8 characters")
+                        .to_owned(),
                 },
             },
             Some(NetworkConfig {

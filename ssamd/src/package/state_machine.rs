@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 use async_trait::async_trait;
 
-use super::{InvalidTransition, PackageStatus, is_wipeable_status};
+use super::{InvalidTransition, PackageStatus};
 
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
@@ -268,8 +268,10 @@ impl TransitionManagerActor {
         _msg: transition_messages::WipeData,
         _actor_ref: &rsactor::ActorRef<Self>,
     ) -> anyhow::Result<()> {
+        // Allow-list: an Error or Broken package may still have its data mounted,
+        // and a Verified one has no volume until setup.
         anyhow::ensure!(
-            is_wipeable_status(&self.status),
+            matches!(self.status, PackageStatus::Ready | PackageStatus::Cleaned),
             "Package '{}' is not in a wipeable state (current: {}); \
              stop it before wiping data",
             self.backend.name(),
@@ -440,12 +442,21 @@ mod tests {
             .expect_start()
             .times(1)
             .returning(|| PackageStatus::Running("running".to_owned()));
-        backend.expect_wipe_data().times(1).returning(|| Ok(()));
+        backend
+            .expect_stop()
+            .times(1)
+            .returning(|| PackageStatus::Ready);
+        backend.expect_teardown().times(1).returning(|| Ok(()));
+        backend.expect_wipe_data().times(2).returning(|| Ok(()));
         let manager = TransitionManager::new(backend);
-        manager.wipe_data().await.expect("verified is wipeable");
+        assert!(manager.wipe_data().await.is_err(), "no volume before setup");
         manager.request_setup().await.expect("setup");
+        manager.wipe_data().await.expect("ready is wipeable");
         manager.request_start().await.expect("start");
         assert!(manager.wipe_data().await.is_err());
+        manager.request_stop().await.expect("stop");
+        manager.request_cleanup().await.expect("cleanup");
+        manager.wipe_data().await.expect("cleaned is wipeable");
     }
 
     #[tokio::test]

@@ -202,7 +202,6 @@ struct InstallInfo {
     package_file: PackageFile,
     path: PathBuf,
     dest: PathBuf,
-    volume_meta: PackageVolumeMetadata,
 }
 
 /// Install version gate: reject same-version reinstall, reject an upgrade
@@ -542,16 +541,16 @@ impl PackageManagerActor {
         );
 
         let dest = self.downloaded_package_path(&package_name)?;
-
-        let volume_meta = PackageVolumeMetadata::new(&dest, &package_file, self.config.as_ref())
-            .context("Failed to create volume metadata")?;
+        // Reject a bad volume config before an upgrade stops the installed package.
+        PackageVolumeMetadata::new(&dest, &package_file, self.config.as_ref()).with_context(
+            || format!("Invalid volume configuration in package {package_name} to install"),
+        )?;
 
         Ok(InstallInfo {
             package_name,
             package_file,
             path,
             dest,
-            volume_meta,
         })
     }
 
@@ -1009,31 +1008,8 @@ impl PackageManagerActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::is_wipeable_status;
     use pkg_file::PackageFileBackend;
     use std::sync::{Arc, Mutex};
-
-    #[test]
-    fn test_is_wipeable_status_allowlist() {
-        for s in [
-            PackageStatus::Verified,
-            PackageStatus::Ready,
-            PackageStatus::Cleaned,
-        ] {
-            assert!(is_wipeable_status(&s), "{s} should be wipeable");
-        }
-        for s in [
-            PackageStatus::SettingUp,
-            PackageStatus::StartRequested,
-            PackageStatus::Running(String::new()),
-            PackageStatus::StopRequested,
-            PackageStatus::CleaningUp,
-            PackageStatus::Upgrading,
-            PackageStatus::Error(String::new()),
-        ] {
-            assert!(!is_wipeable_status(&s), "{s} must not be wipeable");
-        }
-    }
 
     #[tokio::test]
     async fn test_install_requires_downloaded_dir() {

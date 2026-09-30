@@ -551,8 +551,6 @@ pub(crate) mod oci {
         pub(crate) network_mode: NetworkMode,
         pub(crate) cgroups_path: String,
         pub(crate) package_name: String,
-        pub(crate) version: String,
-        pub(crate) oci_bundle_root: PathBuf,
         pub(crate) data_mounts: Option<DataMountPaths>,
         pub(crate) bridge_netns_path: Option<std::path::PathBuf>,
     }
@@ -675,11 +673,32 @@ pub(crate) mod container {
                 network_mode,
                 cgroups_path,
                 package_name: name.to_owned(),
-                version: metadata.version().to_string(),
-                oci_bundle_root: pkg_volume.oci_bundle_root().to_path_buf(),
                 data_mounts,
                 bridge_netns_path,
             }
+        }
+
+        pub(crate) fn from_package(
+            name: &str,
+            package_file: &PackageFile,
+            pkg_volume: &PackageVolume,
+            network_mode: container::NetworkMode,
+            packages_cgroup: &str,
+            oci_bundle_dir: Arc<OciBundleDir>,
+        ) -> Arc<dyn ExecuteCommand> {
+            let spec = Self::spec_from_package(
+                name,
+                package_file,
+                pkg_volume,
+                network_mode,
+                packages_cgroup,
+            );
+            Arc::new(Self::new(
+                name.to_owned(),
+                ContainerRuntime::CRun,
+                spec,
+                oci_bundle_dir,
+            ))
         }
     }
 
@@ -743,9 +762,12 @@ mod tests {
     }
 
     impl TestOciRuntimeConfig {
-        fn new(spec: ContainerBundleSpec) -> anyhow::Result<Self> {
-            let oci_bundle_dir =
-                OciBundleDir::new(&spec.oci_bundle_root, &spec.package_name, &spec.version)?;
+        fn new(
+            oci_bundle_root: &Path,
+            version: &str,
+            spec: ContainerBundleSpec,
+        ) -> anyhow::Result<Self> {
+            let oci_bundle_dir = OciBundleDir::new(oci_bundle_root, &spec.package_name, version)?;
             oci_bundle_dir.ensure()?;
             OciRuntimeConfig::write(spec, &oci_bundle_dir)?;
             Ok(Self { oci_bundle_dir })
@@ -763,26 +785,6 @@ mod tests {
     // Helper to create a test seccomp policy
     fn create_test_seccomp_policy() -> PackageSeccompPolicy {
         PackageSeccompPolicy::default_policy()
-    }
-
-    // Helper to create a real PackageVolume for testing using the package_volume test infrastructure
-    fn create_test_package_volume_real(mount_point: &Path) -> anyhow::Result<PackageVolume> {
-        use crate::package_volume::tests::mocks::{MockLoopDeviceControl, MockMountBackend};
-        use crate::package_volume::tests::package_fs_metadata_test;
-        use crate::package_volume::{PackageFileSystem, PackageFsMetadata};
-
-        let package_name = "test-package".to_string();
-        let test_pkg_file = package_fs_metadata_test::create_test_ssam_package_file();
-        let pkgfs_meta = PackageFsMetadata::new_for_test(mount_point, &test_pkg_file)?;
-
-        let pkgfs = PackageFileSystem {
-            package_name: package_name.clone(),
-            loop_controller: MockLoopDeviceControl,
-            pkgfs_meta,
-            mount_strategy: MockMountBackend,
-        };
-
-        Ok(PackageVolume::new(package_name, pkgfs, None))
     }
 
     // Helper to create a real PackageVolume with data directory for testing
@@ -826,22 +828,20 @@ mod tests {
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-        // Create a real PackageVolume using the same infrastructure as package_volume tests
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
-
-        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: Some(seccomp_policy),
-            mac_enabled: true,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package-basic".to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        });
+        let result = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: Some(seccomp_policy),
+                mac_enabled: true,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-basic".to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        );
 
         assert!(
             result.is_ok(),
@@ -887,21 +887,20 @@ mod tests {
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
-
-        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: Some(seccomp_policy),
-            mac_enabled: true,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package-mode".to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        })
+        let config = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: Some(seccomp_policy),
+                mac_enabled: true,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-mode".to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        )
         .expect("Test runtime config creation should succeed");
 
         let meta = fs::symlink_metadata(config.dir_path()).expect("Failed to stat bundle dir");
@@ -918,21 +917,21 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
 
-        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: None,
-            mac_enabled: false,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package-fixed-dir".to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        })
+        let config = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: None,
+                mac_enabled: false,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-fixed-dir".to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        )
         .expect("Test runtime config creation should succeed");
 
         assert_eq!(
@@ -969,21 +968,21 @@ mod tests {
         fs::create_dir_all(&bundle_path).expect("Failed to create stale bundle dir");
         let stale_file = bundle_path.join("stale");
         fs::write(&stale_file, "stale").expect("Failed to write stale file");
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
 
-        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: None,
-            mac_enabled: false,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: package_name.to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        })
+        let config = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: None,
+                mac_enabled: false,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: package_name.to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        )
         .expect("Test runtime config creation should succeed");
 
         assert_eq!(config.dir_path(), bundle_path);
@@ -1004,21 +1003,21 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
 
-        let config = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: None,
-            mac_enabled: false,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: package_name.to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        })
+        let config = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: None,
+                mac_enabled: false,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: package_name.to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        )
         .expect("Test runtime config creation should succeed");
 
         let bundle_path = config.dir_path().to_path_buf();
@@ -1041,36 +1040,38 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
 
-        let old_config = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: create_test_oci_spec(),
-            seccomp_policy: None,
-            mac_enabled: false,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: package_name.to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        })
+        let old_config = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: create_test_oci_spec(),
+                seccomp_policy: None,
+                mac_enabled: false,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: package_name.to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        )
         .expect("old runtime config should be created");
         let old_path = old_config.dir_path().to_path_buf();
 
-        let new_config = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: create_test_oci_spec(),
-            seccomp_policy: None,
-            mac_enabled: false,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: package_name.to_owned(),
-            version: "2.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        })
+        let new_config = TestOciRuntimeConfig::new(
+            &mount_point,
+            "2.0.0",
+            ContainerBundleSpec {
+                oci_template: create_test_oci_spec(),
+                seccomp_policy: None,
+                mac_enabled: false,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: package_name.to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        )
         .expect("new runtime config should be created");
         let new_path = new_config.dir_path().to_path_buf();
 
@@ -1110,18 +1111,20 @@ mod tests {
 
         let data_mounts = package_volume.data_directory().map(DataMountPaths::new);
 
-        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: Some(seccomp_policy),
-            mac_enabled: true,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package-data".to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts,
-            bridge_netns_path: None,
-        });
+        let result = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: Some(seccomp_policy),
+                mac_enabled: true,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-data".to_owned(),
+                data_mounts,
+                bridge_netns_path: None,
+            },
+        );
 
         assert!(
             result.is_ok(),
@@ -1154,21 +1157,20 @@ mod tests {
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
-
-        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: None,
-            mac_enabled: true,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package-no-seccomp".to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        });
+        let result = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: None,
+                mac_enabled: true,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-no-seccomp".to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        );
 
         assert!(
             result.is_ok(),
@@ -1201,21 +1203,20 @@ mod tests {
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
-
-        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: Some(seccomp_policy),
-            mac_enabled: true,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package-with-seccomp".to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        });
+        let result = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: Some(seccomp_policy),
+                mac_enabled: true,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-with-seccomp".to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        );
 
         assert!(
             result.is_ok(),
@@ -1255,21 +1256,21 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mount_point = temp_dir.path().join("mount");
         fs::create_dir_all(&mount_point).expect("Failed to create mount point");
-        let package_volume = create_test_package_volume_real(&mount_point)
-            .expect("Failed to create test PackageVolume");
 
-        let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-            oci_template: oci_spec,
-            seccomp_policy: Some(bad_policy),
-            mac_enabled: true,
-            network_mode: libssam::container::NetworkMode::None,
-            cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-            package_name: "test-package-bad-seccomp".to_owned(),
-            version: "1.0.0".to_owned(),
-            oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-            data_mounts: None,
-            bridge_netns_path: None,
-        });
+        let result = TestOciRuntimeConfig::new(
+            &mount_point,
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: Some(bad_policy),
+                mac_enabled: true,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-bad-seccomp".to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        );
 
         assert!(
             result.is_err(),
@@ -1327,8 +1328,6 @@ mod tests {
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: package_name.to_owned(),
-                version: "1.0.0".to_owned(),
-                oci_bundle_root: mount_point.clone(),
                 data_mounts: None,
                 bridge_netns_path: None,
             };
@@ -1813,21 +1812,20 @@ mod tests {
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-            let package_volume = create_test_package_volume_real(&mount_point)
-                .expect("Failed to create test PackageVolume");
-
-            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-                oci_template: oci_spec,
-                seccomp_policy: None,
-                mac_enabled: false,
-                network_mode: NetworkMode::Host,
-                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-                package_name: "test-host-net".to_owned(),
-                version: "1.0.0".to_owned(),
-                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-                data_mounts: None,
-                bridge_netns_path: None,
-            });
+            let result = TestOciRuntimeConfig::new(
+                &mount_point,
+                "1.0.0",
+                ContainerBundleSpec {
+                    oci_template: oci_spec,
+                    seccomp_policy: None,
+                    mac_enabled: false,
+                    network_mode: NetworkMode::Host,
+                    cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                    package_name: "test-host-net".to_owned(),
+                    data_mounts: None,
+                    bridge_netns_path: None,
+                },
+            );
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
             let config = result.unwrap();
@@ -1867,21 +1865,20 @@ mod tests {
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-            let package_volume = create_test_package_volume_real(&mount_point)
-                .expect("Failed to create test PackageVolume");
-
-            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-                oci_template: oci_spec,
-                seccomp_policy: None,
-                mac_enabled: false,
-                network_mode: NetworkMode::None,
-                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-                package_name: "test-none-net".to_owned(),
-                version: "1.0.0".to_owned(),
-                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-                data_mounts: None,
-                bridge_netns_path: None,
-            });
+            let result = TestOciRuntimeConfig::new(
+                &mount_point,
+                "1.0.0",
+                ContainerBundleSpec {
+                    oci_template: oci_spec,
+                    seccomp_policy: None,
+                    mac_enabled: false,
+                    network_mode: NetworkMode::None,
+                    cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                    package_name: "test-none-net".to_owned(),
+                    data_mounts: None,
+                    bridge_netns_path: None,
+                },
+            );
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
             let config = result.unwrap();
@@ -1914,21 +1911,20 @@ mod tests {
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-            let package_volume = create_test_package_volume_real(&mount_point)
-                .expect("Failed to create test PackageVolume");
-
-            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-                oci_template: oci_spec,
-                seccomp_policy: None,
-                mac_enabled: false,
-                network_mode: NetworkMode::None,
-                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-                package_name: "test-none-dup".to_owned(),
-                version: "1.0.0".to_owned(),
-                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-                data_mounts: None,
-                bridge_netns_path: None,
-            });
+            let result = TestOciRuntimeConfig::new(
+                &mount_point,
+                "1.0.0",
+                ContainerBundleSpec {
+                    oci_template: oci_spec,
+                    seccomp_policy: None,
+                    mac_enabled: false,
+                    network_mode: NetworkMode::None,
+                    cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                    package_name: "test-none-dup".to_owned(),
+                    data_mounts: None,
+                    bridge_netns_path: None,
+                },
+            );
 
             assert!(result.is_ok(), "Should succeed: {:?}", result.err());
             let config = result.unwrap();
@@ -1964,22 +1960,21 @@ mod tests {
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-            let package_volume = create_test_package_volume_real(&mount_point)
-                .expect("Failed to create test PackageVolume");
-
             let netns_path = std::path::Path::new("/run/netns/ssam-test");
-            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-                oci_template: oci_spec,
-                seccomp_policy: None,
-                mac_enabled: false,
-                network_mode: NetworkMode::Bridge,
-                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-                package_name: "test-bridge-path".to_owned(),
-                version: "1.0.0".to_owned(),
-                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-                data_mounts: None,
-                bridge_netns_path: Some(netns_path.to_path_buf()),
-            });
+            let result = TestOciRuntimeConfig::new(
+                &mount_point,
+                "1.0.0",
+                ContainerBundleSpec {
+                    oci_template: oci_spec,
+                    seccomp_policy: None,
+                    mac_enabled: false,
+                    network_mode: NetworkMode::Bridge,
+                    cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                    package_name: "test-bridge-path".to_owned(),
+                    data_mounts: None,
+                    bridge_netns_path: Some(netns_path.to_path_buf()),
+                },
+            );
 
             assert!(
                 result.is_ok(),
@@ -2025,21 +2020,20 @@ mod tests {
             let mount_point = temp_dir.path().join("mount");
             fs::create_dir_all(&mount_point).expect("Failed to create mount point");
 
-            let package_volume = create_test_package_volume_real(&mount_point)
-                .expect("Failed to create test PackageVolume");
-
-            let result = TestOciRuntimeConfig::new(ContainerBundleSpec {
-                oci_template: oci_spec,
-                seccomp_policy: None,
-                mac_enabled: false,
-                network_mode: NetworkMode::Bridge,
-                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
-                package_name: "test-bridge-no-path".to_owned(),
-                version: "1.0.0".to_owned(),
-                oci_bundle_root: package_volume.oci_bundle_root().to_path_buf(),
-                data_mounts: None,
-                bridge_netns_path: None,
-            });
+            let result = TestOciRuntimeConfig::new(
+                &mount_point,
+                "1.0.0",
+                ContainerBundleSpec {
+                    oci_template: oci_spec,
+                    seccomp_policy: None,
+                    mac_enabled: false,
+                    network_mode: NetworkMode::Bridge,
+                    cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                    package_name: "test-bridge-no-path".to_owned(),
+                    data_mounts: None,
+                    bridge_netns_path: None,
+                },
+            );
 
             assert!(result.is_err(), "Bridge without netns path must error");
             let err_msg = result.unwrap_err().to_string();

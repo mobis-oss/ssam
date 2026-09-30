@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::configuration::Configuration;
-use crate::package::{Package, PackageContext};
-use crate::package_volume::messages::{AcquireVolume, PurgeVolume};
-use crate::package_volume::{PackageVolume, PackageVolumeManagerActor, PackageVolumeMetadata};
+use crate::package::Package;
+use crate::package_volume::messages::PurgeVolume;
+use crate::package_volume::{PackageVolumeManagerActor, data_dir_path};
 use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor};
 use anyhow::Context;
 use rsactor::{Actor, ActorRef, message_handlers};
@@ -96,16 +96,6 @@ impl PackageTransactionActor {
         .context("fs_ops::copy task panicked")?
     }
 
-    async fn acquire_volume(
-        &self,
-        volume_meta: PackageVolumeMetadata,
-    ) -> anyhow::Result<PackageVolume> {
-        self.volume_manager_ref
-            .ask(AcquireVolume { volume_meta })
-            .await
-            .context("Failed to communicate with PackageVolumeManager Actor")?
-    }
-
     async fn purge_volume(&self, package_name: &str) -> anyhow::Result<()> {
         self.volume_manager_ref
             .ask(PurgeVolume {
@@ -141,7 +131,7 @@ pub(crate) mod message {
         pub(crate) path: PathBuf,
     }
 
-    /// Acquire volume and initialize a Package from an existing file on disk.
+    /// Initialize a Package from an existing file on disk.
     pub(crate) struct CreatePackage {
         pub(crate) path: PathBuf,
         pub(crate) package_file: PackageFile,
@@ -175,22 +165,19 @@ impl PackageTransactionActor {
     }
 
     #[handler]
+    // rsactor #[handler] requires async fn signature even without await
+    #[allow(clippy::unused_async)]
     async fn handle_create_package(
         &mut self,
         msg: message::CreatePackage,
         _actor_ref: &ActorRef<Self>,
     ) -> anyhow::Result<Arc<Package>> {
-        let volume_meta =
-            PackageVolumeMetadata::new(&msg.path, &msg.package_file, self.config.as_ref())
-                .context("Failed to create volume metadata")?;
-        let volume = self.acquire_volume(volume_meta).await?;
-        let context = PackageContext::new(&msg.path, msg.package_file);
         let package = Package::new(
-            context,
-            &volume,
+            &msg.path,
+            msg.package_file,
             self.volume_manager_ref.clone(),
             self.network.clone(),
-            self.config.packages_cgroup(),
+            self.config.clone(),
         )?;
         Ok(Arc::new(package))
     }
@@ -282,7 +269,6 @@ impl PackageTransactionActor {
             package_file,
             path,
             dest,
-            volume_meta,
         } = install_info;
 
         if let InstallMode::UpgradeDownloaded { ref installed_path } = mode {
@@ -296,9 +282,9 @@ impl PackageTransactionActor {
             return Err(e);
         }
 
-        // Back up the data dir before acquire/Package::new so a failure past
+        // Back up the data dir before Package::new so a failure past
         // this destructive point can restore it.
-        let data_dir_path = volume_meta.data_dir().to_path_buf();
+        let data_dir_path = data_dir_path(self.config.packages_data_root(), &package_name);
         let data_backup_path = (remove_data
             && matches!(
                 mode,
@@ -314,31 +300,12 @@ impl PackageTransactionActor {
         .transpose()?
         .flatten();
 
-        let volume = self
-            .acquire_volume(volume_meta)
-            .await
-            .inspect_err(|_| {
-                // acquire failed: drop any partial fresh dir, restore the backup.
-                if let Some(ref backup_path) = data_backup_path {
-                    std::fs::remove_dir_all(&data_dir_path).ok();
-                    if let Err(restore_err) = std::fs::rename(backup_path, &data_dir_path) {
-                        log::error!(
-                            "Failed to restore old data directory after acquire failure: {restore_err:#}"
-                        );
-                    }
-                }
-                self.rollback_file_ops(&mode, &dest)
-                    .inspect_err(|rb| log::error!("Rollback also failed: {rb:#}"))
-                    .ok();
-            })?;
-
-        let context = PackageContext::new(&dest, package_file);
         match Package::new(
-            context,
-            &volume,
+            &dest,
+            package_file,
             self.volume_manager_ref.clone(),
             self.network.clone(),
-            self.config.packages_cgroup(),
+            self.config.clone(),
         ) {
             Ok(package) => {
                 if let InstallMode::UpgradeDownloaded { ref installed_path } = mode {
@@ -358,26 +325,11 @@ impl PackageTransactionActor {
                 self.rollback_file_ops(&mode, &dest)
                     .inspect_err(|rb| log::error!("File rollback also failed: {rb:#}"))
                     .ok();
-                match data_backup_path {
-                    // Upgrade preserved old data: purge fresh volume, restore it.
-                    Some(ref backup_path) => {
-                        if let Err(v) = self.purge_volume(&package_name).await {
-                            log::error!("Volume purge during rollback failed: {v:#}");
-                        }
-                        // Clear the fresh dir even if purge failed, so restore can land.
-                        std::fs::remove_dir_all(&data_dir_path).ok();
-                        if let Err(restore_err) = std::fs::rename(backup_path, &data_dir_path) {
-                            log::error!("Failed to restore old data directory: {restore_err:#}");
-                        }
+                if let Some(ref backup_path) = data_backup_path {
+                    std::fs::remove_dir_all(&data_dir_path).ok();
+                    if let Err(restore_err) = std::fs::rename(backup_path, &data_dir_path) {
+                        log::error!("Failed to restore old data directory: {restore_err:#}");
                     }
-                    // Fresh, or remove_data upgrade with no old data: purge fresh volume.
-                    None if remove_data || matches!(mode, InstallMode::Fresh) => {
-                        if let Err(v) = self.purge_volume(&package_name).await {
-                            log::error!("Volume purge also failed: {v:#}");
-                        }
-                    }
-                    // remove_data=false upgrade: keep existing data for rollback.
-                    None => {}
                 }
                 Err(e)
             }
@@ -390,7 +342,6 @@ mod tests {
     use super::PackageFileBackend;
     use super::message::{Install, InstallMode};
     use super::*;
-    use crate::configuration::{DebugConfig, PackageConfig, PackageDirConfig};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -422,18 +373,21 @@ mod tests {
         }
     }
 
-    fn create_test_ssam_package_file(dir: &Path) -> libssam::ssam_package::PackageFile {
+    fn create_test_ssam_package_file(
+        dir: &Path,
+        storage_limit: i64,
+    ) -> libssam::ssam_package::PackageFile {
         use libssam::ssam_package::{PackageFilesystem, PackageFsVerityInfo};
         use libssam::superblock::FsType;
 
         let config_path = dir.join("config.toml");
         let runtime_path = dir.join("runtime.json");
         let seccomp_path = dir.join("seccomp.json");
-        let img_path = dir.join("pkg.img");
 
         std::fs::write(
             &config_path,
-            r#"
+            format!(
+                r#"
 [package]
 name = "test-pkg"
 autostart = false
@@ -441,7 +395,7 @@ version = "1.0.0"
 description = "unit test package"
 
 [container]
-storage_limit = 100
+storage_limit = {storage_limit}
 
 [container.security]
 seccomp = false
@@ -451,7 +405,8 @@ mac = false
 
 [service]
 service_type = "simple"
-"#,
+"#
+            ),
         )
         .expect("write config");
 
@@ -471,10 +426,9 @@ service_type = "simple"
         )
         .expect("write seccomp");
 
-        std::fs::write(&img_path, b"dummy").expect("write img");
-
-        let pkgfs = PackageFilesystem::from_source(
-            &img_path,
+        let pkgfs = PackageFilesystem::new(
+            0,
+            6144,
             FsType::Ext4,
             PackageFsVerityInfo {
                 data_size: 4096,
@@ -494,43 +448,32 @@ service_type = "simple"
     }
 
     fn make_install_info(name: &str, dir: &Path) -> InstallInfo {
-        use crate::package_volume::tests::package_fs_metadata_test::create_test_ssam_package_file as create_test_volume_pkg;
-
-        let package_file = create_test_ssam_package_file(dir);
+        let package_file = create_test_ssam_package_file(dir, 100);
         let dest = PathBuf::from("/tmp/dest.ssam");
-        let mock_pkg = create_test_volume_pkg();
-        let config = Configuration::new(
-            PackageConfig {
-                extension: "ssam".to_owned(),
-                cgroup: String::new(),
-                public_key: String::new(),
-                dir: PackageDirConfig {
-                    builtin: String::new(),
-                    downloaded: String::new(),
-                    oci_bundle_root: "/test/pkgfs".to_owned(),
-                    data: "/tmp".to_owned(),
-                },
-            },
-            None,
-            DebugConfig {
-                pkgfs_overlay_dir: String::new(),
-                disable_pkgfs_integrity: false,
-                disable_package_verify: true,
-            },
-        );
-        let volume_meta =
-            PackageVolumeMetadata::new(&dest, &mock_pkg, &config).expect("test volume metadata");
         InstallInfo {
             package_name: name.to_string(),
             package_file,
             path: PathBuf::from("/tmp/src.ssam"),
             dest,
-            volume_meta,
         }
     }
 
+    fn tempdir_configuration(root: &Path) -> Arc<Configuration> {
+        crate::configuration::tests::test_configuration_with_dirs(
+            &root.join("builtin"),
+            &root.join("downloaded"),
+            &root.join("data"),
+        )
+    }
+
     fn spawn_actor(fs_ops: impl PackageFileBackend + 'static) -> ActorRef<PackageTransactionActor> {
-        let config = crate::configuration::tests::test_configuration();
+        spawn_actor_with_config(fs_ops, crate::configuration::tests::test_configuration())
+    }
+
+    fn spawn_actor_with_config(
+        fs_ops: impl PackageFileBackend + 'static,
+        config: Arc<Configuration>,
+    ) -> ActorRef<PackageTransactionActor> {
         let (vol_ref, _) =
             rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(config.packages_data_root()));
         let actor = PackageTransactionActor::new(config, vol_ref, fs_ops, None);
@@ -554,6 +497,31 @@ service_type = "simple"
             .expect("actor communication");
 
         assert!(result.is_err(), "expected Failed on copy error");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_volume_metadata_rejects_install() {
+        let ops = MockTrackingPackageFile::new();
+        let removals = Arc::clone(&ops.removals);
+        let actor_ref = spawn_actor(ops);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let info = InstallInfo {
+            package_file: create_test_ssam_package_file(tmp.path(), -1),
+            ..make_install_info("test-pkg", tmp.path())
+        };
+
+        let result = actor_ref
+            .ask(Install {
+                info,
+                remove_data: false,
+                mode: InstallMode::Fresh,
+            })
+            .await
+            .expect("actor communication");
+
+        assert!(result.is_err(), "negative storage_limit must fail install");
+        let removals = removals.lock().unwrap();
+        assert_eq!(*removals, [PathBuf::from("/tmp/dest.ssam")]);
     }
 
     type CallLog = Arc<Mutex<Vec<(PathBuf, PathBuf)>>>;
@@ -699,81 +667,6 @@ service_type = "simple"
         assert!(removals.is_empty());
     }
 
-    fn spawn_actor_with_dead_volume_manager(
-        fs_ops: impl PackageFileBackend + 'static,
-    ) -> ActorRef<PackageTransactionActor> {
-        let config = crate::configuration::tests::test_configuration();
-        let (vol_ref, vol_handle) =
-            rsactor::spawn::<PackageVolumeManagerActor>(PathBuf::from(config.packages_data_root()));
-        vol_handle.abort();
-        let actor = PackageTransactionActor::new(config, vol_ref, fs_ops, None);
-        let (actor_ref, _) = rsactor::spawn::<PackageTransactionActor>(actor);
-        actor_ref
-    }
-
-    #[tokio::test]
-    async fn test_purge_failure_rolls_back_non_builtin_backup() {
-        let ops = MockTrackingPackageFile::new();
-        let renames = Arc::clone(&ops.renames);
-        let actor_ref = spawn_actor_with_dead_volume_manager(ops);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let info = make_install_info("test-pkg", tmp.path());
-
-        let installed_path = PathBuf::from("/pkg/installed.ssam");
-        let result = actor_ref
-            .ask(Install {
-                info,
-                remove_data: true,
-                mode: InstallMode::UpgradeDownloaded {
-                    installed_path: installed_path.clone(),
-                },
-            })
-            .await
-            .expect("actor communication");
-
-        assert!(result.is_err(), "expected Failed when purge_volume fails");
-
-        let renames = renames.lock().unwrap();
-        assert_eq!(renames.len(), 2);
-        assert_eq!(renames[0].0, installed_path);
-        assert_eq!(renames[0].1, PathBuf::from("/pkg/installed.ssam.old"));
-        assert_eq!(renames[1].0, PathBuf::from("/pkg/installed.ssam.old"));
-        assert_eq!(renames[1].1, PathBuf::from("/pkg/installed.ssam"));
-    }
-
-    #[tokio::test]
-    async fn test_acquire_failure_rolls_back_non_builtin_backup() {
-        let ops = MockTrackingPackageFile::new();
-        let renames = Arc::clone(&ops.renames);
-        let actor_ref = spawn_actor_with_dead_volume_manager(ops);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let info = make_install_info("test-pkg", tmp.path());
-
-        let installed_path = PathBuf::from("/pkg/installed.ssam");
-        let result = actor_ref
-            .ask(Install {
-                info,
-                remove_data: false,
-                mode: InstallMode::UpgradeDownloaded {
-                    installed_path: installed_path.clone(),
-                },
-            })
-            .await
-            .expect("actor communication");
-
-        assert!(
-            result.is_err(),
-            "expected Failed when acquire_pkg_volume fails"
-        );
-
-        let renames = renames.lock().unwrap();
-        assert_eq!(renames.len(), 2);
-        assert_eq!(renames[0].0, installed_path);
-        assert_eq!(renames[0].1, PathBuf::from("/pkg/installed.ssam.old"));
-        assert_eq!(renames[1].0, PathBuf::from("/pkg/installed.ssam.old"));
-        assert_eq!(renames[1].1, PathBuf::from("/pkg/installed.ssam"));
-    }
-
     #[tokio::test]
     async fn test_remove_package_file_success() {
         let actor_ref = spawn_actor(MockSucceedingPackageFile);
@@ -845,60 +738,15 @@ service_type = "simple"
     }
 
     #[tokio::test]
-    async fn test_acquire_failure_restores_backup_file() {
-        // Verifies the .ssam backup file is restored on acquire failure. The
-        // data-dir root (/test/data) is absent under test, so backup_data_dir
-        // returns None; the data-dir path is covered by the integration test
-        // `test_upgrade_failure_triggers_recovery`.
-        let ops = MockTrackingPackageFile::new();
-        let renames = Arc::clone(&ops.renames);
-        let removals = Arc::clone(&ops.removals);
-        let actor_ref = spawn_actor_with_dead_volume_manager(ops);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let info = make_install_info("test-pkg", tmp.path());
-
-        let installed_path = PathBuf::from("/pkg/installed.ssam");
-        let result = actor_ref
-            .ask(Install {
-                info,
-                remove_data: true,
-                mode: InstallMode::UpgradeDownloaded {
-                    installed_path: installed_path.clone(),
-                },
-            })
-            .await
-            .expect("actor communication");
-
-        assert!(result.is_err(), "expected Failed when acquire_volume fails");
-
-        let renames_guard = renames.lock().unwrap();
-        // Only backup rename and restore are tracked via fs_ops.
-        // 1: backup rename (installed.ssam -> installed.ssam.old)
-        // 2: backup restore (installed.ssam.old -> installed.ssam)
-        assert_eq!(renames_guard.len(), 2);
-        assert_eq!(renames_guard[0].0, installed_path);
-        assert_eq!(renames_guard[0].1, PathBuf::from("/pkg/installed.ssam.old"));
-        assert_eq!(renames_guard[1].0, PathBuf::from("/pkg/installed.ssam.old"));
-        assert_eq!(renames_guard[1].1, installed_path);
-
-        // No removals expected (backup not deleted on failure)
-        drop(renames_guard);
-        let removals = removals.lock().unwrap();
-        assert!(removals.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_success_removes_backup_file() {
-        // Verifies the .ssam backup file is removed on success. The data-dir
-        // root (/test/data) is absent under test, so backup_data_dir returns
-        // None; the data-dir path is covered by the integration test
-        // `test_upgrade_failure_triggers_recovery`.
         let ops = MockTrackingPackageFile::new();
         let renames = Arc::clone(&ops.renames);
         let removals = Arc::clone(&ops.removals);
-        let actor_ref = spawn_actor(ops);
         let tmp = tempfile::tempdir().expect("tempdir");
+        let actor_ref = spawn_actor_with_config(ops, tempdir_configuration(tmp.path()));
         let info = make_install_info("test-pkg", tmp.path());
+        let data_dir = tmp.path().join("data").join("test-pkg");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
 
         let installed_path = PathBuf::from("/pkg/installed.ssam");
         let result = actor_ref
@@ -923,5 +771,53 @@ service_type = "simple"
         let removals = removals.lock().unwrap();
         assert_eq!(removals.len(), 1);
         assert_eq!(removals[0], PathBuf::from("/pkg/installed.ssam.old"));
+
+        assert!(!data_dir.exists(), "remove_data must drop the old data dir");
+        assert!(
+            !data_dir.with_extension("old").exists(),
+            "the data dir backup must be removed on success"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_upgrade_restores_package_and_data() {
+        let ops = MockTrackingPackageFile::new();
+        let renames = Arc::clone(&ops.renames);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let actor_ref = spawn_actor_with_config(ops, tempdir_configuration(tmp.path()));
+        let info = InstallInfo {
+            package_file: create_test_ssam_package_file(tmp.path(), -1),
+            ..make_install_info("test-pkg", tmp.path())
+        };
+        let data_dir = tmp.path().join("data").join("test-pkg");
+        let user_data = data_dir.join("user-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(&user_data, b"keep").expect("write user data");
+
+        let installed_path = PathBuf::from("/pkg/installed.ssam");
+        let result = actor_ref
+            .ask(Install {
+                info,
+                remove_data: true,
+                mode: InstallMode::UpgradeDownloaded {
+                    installed_path: installed_path.clone(),
+                },
+            })
+            .await
+            .expect("actor communication");
+
+        assert!(
+            result.is_err(),
+            "negative storage_limit must fail the upgrade"
+        );
+        let backup_path = PathBuf::from("/pkg/installed.ssam.old");
+        assert_eq!(
+            *renames.lock().unwrap(),
+            [
+                (installed_path.clone(), backup_path.clone()),
+                (backup_path, installed_path),
+            ]
+        );
+        assert!(user_data.exists(), "old data must be restored");
     }
 }

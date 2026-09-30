@@ -173,6 +173,7 @@ $ ssam remove helloworld
 ### `wipe-data`
 
 Wipe the data volumes of one or more installed packages, keeping them installed.
+Only a package that is set up and stopped (`Ready`) or cleaned up (`Cleaned`) can be wiped; other states, including `Verified` before setup, are refused.
 Same argument shape as `start`/`stop`.
 
 ```

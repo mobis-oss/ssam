@@ -27,9 +27,9 @@ flowchart TB
 
   subgraph SD["ssamd — 데몬 프로세스"]
     direction TB
-    PM["«struct»<br/><b>PackageManager</b><br/>스캔 · 로드 · 파싱 · RSA 서명 검증"] --> PVM["«struct»<br/><b>PackageVolumeManagerActor</b><br/>데이터 디렉터리 · ext4 quota"]
-    PVM --> TM["«struct»<br/><b>TransitionManager</b><br/>패키지 상태 머신 구동"]
+    PM["«struct»<br/><b>PackageManager</b><br/>스캔 · 로드 · 파싱 · RSA 서명 검증"] --> TM["«struct»<br/><b>TransitionManager</b><br/>패키지 상태 머신 구동"]
     TM --> PT["«trait»<br/><b>LifecycleBackend</b><br/>패키지 생명주기 동작 (setup · start · stop)"]
+    PT --> PVM["«struct»<br/><b>PackageVolumeManagerActor</b><br/>데이터 디렉터리 · ext4 quota"]
 
     subgraph SU["setup — 실행 환경 구성 (동시 실행)"]
       direction TB
@@ -64,7 +64,7 @@ flowchart TB
 ```
 
 - **패키지 관리.** `PackageManager`가 builtin·downloaded 패키지 디렉터리를 스캔·로드하고 서명을 검증하며, 각 패키지의 상태 머신(`TransitionManager`)을 구동합니다.
-- **데이터 볼륨 확보.** `PackageVolumeManagerActor`가 패키지가 로드·등록될 때 패키지의 데이터 디렉터리를 만들고, 설정된 경우 데이터 사용량을 제한합니다.
+- **데이터 볼륨 확보.** `PackageVolumeManagerActor`가 패키지를 setup할 때 패키지의 데이터 디렉터리를 만들고, 설정된 경우 데이터 사용량을 제한합니다.
   이 제한은 데이터 파티션의 파일시스템이 *ext4* 일 때만 지원되며, project quota 를 활용해 설정됩니다.
 - **실행 환경 구성.** `LifecycleBackend`가 검증된 패키지로부터 컨테이너의 실행 환경을 구성합니다 — `PackageFileSystem`이 파일시스템에 *dm-verity* 를 걸어 실행 시점 무결성을 보장하고 읽기 전용으로 마운트하고, `ContainerCommand`가 *OCI Runtime config* 를 생성하며, `NetworkManager`가 네트워크 네임스페이스를 연결합니다.
 - **컨테이너 실행.** `TransientUnitExecutor`가 구성된 *OCI Runtime bundle* 을 *systemd* service unit으로 등록·시작하면, *crun* 이 컨테이너를 생성·실행합니다.
@@ -80,7 +80,7 @@ flowchart TB
 ```mermaid
 flowchart LR
   L["로드 &amp; 파싱"] --> V["서명 검증"]
-  V --> VOL["데이터 볼륨 확보<br/>데이터 디렉터리 · quota"]
+  V --> VOL["데이터 볼륨 확보 (setup 시)<br/>데이터 디렉터리 · quota"]
   VOL --> SU
 
   subgraph SU["실행 환경 구성 (동시 · 전부 성공)"]
@@ -100,7 +100,8 @@ flowchart LR
 2. **서명 검증** — 패키지의 **설정 데이터** 에 대한 *RSA* PKCS#1 v1.5 서명을 설정된 공개 키로 확인합니다.
    불일치하면 여기서 멈추고 패키지를 `Broken`으로 표시합니다.
 
-검증되면 `ssamd`는 먼저 패키지의 **데이터 볼륨을 확보** 합니다 — [`package.dir.data`](../reference/daemon-config.ko.md#data) 아래에 패키지별 디렉터리를 만들고, 패키지가 [`data_dirs`](../reference/package-config.ko.md#data_dirs)로 선언한 각 경로를 그 안에 생성하며, [`storage_limit`](../reference/package-config.ko.md#storage_limit)이 있으면 *ext4* project quota 로 용량을 제한합니다.
+로드 시에는 패키지의 볼륨 설정만 검증합니다.
+패키지를 setup할 때 `ssamd`는 먼저 패키지의 **데이터 볼륨을 확보** 합니다 — [`package.dir.data`](../reference/daemon-config.ko.md#data) 아래에 패키지별 디렉터리를 만들고, 패키지가 [`data_dirs`](../reference/package-config.ko.md#data_dirs)로 선언한 각 경로를 그 안에 생성하며, [`storage_limit`](../reference/package-config.ko.md#storage_limit)이 있으면 *ext4* project quota 로 용량을 제한합니다.
 
 이어서 **실행 환경을 구성** 합니다.
 이 구성 작업들은 가능한 경우 **동시에 실행되며, 전부 성공해야 합니다**:
@@ -141,7 +142,7 @@ flowchart LR
 | 상태 | 의미 |
 | --- | --- |
 | `Verified` | 서명 확인됨; 신뢰되지만 아직 셋업 전. |
-| `SettingUp` | dm-verity / 마운트 / 프로비저닝 진행 중. |
+| `SettingUp` | 데이터 볼륨 확보, dm-verity / 마운트 / 프로비저닝 진행 중. |
 | `Ready` | 셋업·설치됨; 현재 실행 중 아님. |
 | `StartRequested` | [`StartPackage`](../reference/remocon-rpc.ko.md#startpackage) 수락됨; 컨테이너 기동 중. |
 | `Running` | 컨테이너 활성 (하위 *systemd* service 상태를 담음). |

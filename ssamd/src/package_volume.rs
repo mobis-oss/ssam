@@ -5,7 +5,7 @@ mod data_directory;
 mod package_fs;
 
 pub(crate) use data_directory::{
-    DataDirMetadata, DataDirectoryManager, Ext4Quota, QuotaEntryBackend, QuotaInfo,
+    DataDirMetadata, DataDirectoryManager, Ext4Quota, QuotaEntryBackend, QuotaInfo, data_dir_path,
 };
 pub use data_directory::{DataDirectory, DefaultQuotaEntryBackend};
 
@@ -152,10 +152,6 @@ impl PackageVolume {
 
     pub(crate) fn packagefs(&self) -> Arc<dyn PackageFsBackend> {
         Arc::clone(&self.inner.pkgfs)
-    }
-
-    pub(crate) fn oci_bundle_root(&self) -> &Path {
-        self.inner.pkgfs.oci_bundle_root()
     }
 
     #[must_use]

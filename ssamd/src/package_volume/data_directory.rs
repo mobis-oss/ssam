@@ -243,6 +243,10 @@ pub(crate) struct DataDirMetadata {
     pub(crate) storage_limit: Option<u64>,
 }
 
+pub(crate) fn data_dir_path(data_root: impl AsRef<Path>, package_name: &str) -> PathBuf {
+    data_root.as_ref().join(package_name)
+}
+
 impl DataDirMetadata {
     pub(crate) fn new<F: PackageFileInfo + ?Sized>(
         pkg_file: &F,
@@ -259,7 +263,7 @@ impl DataDirMetadata {
             .map(|v| u64::try_from(*v))
             .transpose()
             .context("storage_limit value is invalid")?;
-        let path = data_root.as_ref().join(&package_name);
+        let path = data_dir_path(data_root, &package_name);
         Ok(Self {
             package_name,
             path,

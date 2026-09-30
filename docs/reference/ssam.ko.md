@@ -174,6 +174,7 @@ $ ssam remove helloworld
 ### `wipe-data`
 
 설치된 하나 이상의 패키지의 데이터 볼륨을 지우되, 설치 상태는 유지합니다.
+setup을 마치고 정지된(`Ready`) 패키지나 정리된(`Cleaned`) 패키지만 지울 수 있으며, setup 전의 `Verified`를 포함한 다른 상태에서는 거부됩니다.
 `start`/`stop`과 동일한 인자 형태입니다.
 
 ```

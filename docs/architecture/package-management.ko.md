@@ -47,7 +47,7 @@ flowchart TB
   subgraph SD["ssamd — 데몬 프로세스"]
     direction TB
     RS["«struct»<br/><b>RemoconImpl</b><br/>gRPC 제어 서비스"] --> PM["«struct»<br/><b>PackageManager</b><br/>검증 · 파싱 · 서명 검증 · 모드 선택 · 복구"]
-    PM --> PT["«struct»<br/><b>PackageTransactionActor</b><br/>복사 · 백업 · 볼륨 확보 · 파일 삭제"]
+    PM --> PT["«struct»<br/><b>PackageTransactionActor</b><br/>복사 · 백업 · 볼륨 purge · 파일 삭제"]
     PM --> PS["«struct»<br/><b>PackageStore</b><br/>패키지 레코드 (builtin 경로 포함)"]
     PT --> PV["«struct»<br/><b>PackageVolumeManagerActor</b><br/>데이터 디렉터리 · ext4 quota"]
   end
@@ -68,7 +68,8 @@ flowchart TB
    생략하는 개발 전용 예외입니다.
    (시작 시 경로에서는 이미 디스크에 있는 서명 불량 파일이 대신 `Broken`으로 기록됩니다.)
 3. 같은 이름의 패키지가 없으면 **신규 설치** 입니다.
-   `PackageManager`가 준비된 설치를 `PackageTransactionActor`에 넘기고, 이 액터가 파일을 downloaded 디렉터리로 복사한 뒤 `PackageVolumeManagerActor`로 패키지의 볼륨 — 데이터 디렉터리와 *ext4* project quota — 를 확보합니다.
+   `PackageManager`가 준비된 설치를 `PackageTransactionActor`에 넘기고, 이 액터가 파일을 downloaded 디렉터리로 복사합니다.
+   패키지의 볼륨 — 데이터 디렉터리와 *ext4* project quota — 은 여기서는 검증만 하고, 패키지를 setup할 때 `PackageVolumeManagerActor`로 확보합니다([실행](execution.ko.md) 참고).
 4. 구성된 패키지는 `PackageStore`에 저장되고 상태 머신이 시작됩니다.
 
 ## Updating a package
@@ -80,8 +81,9 @@ flowchart TB
 - 기존이 **builtin** → builtin 베이스 위로 업그레이드,
 - 기존이 **downloaded** → 기존 파일을 먼저 백업하고 downloaded 패키지를 업그레이드.
 
-`PackageTransactionActor`는 (호출자가 초기화를 요청하면) 기존 데이터 디렉터리를 백업하고, 새 파일을 복사한 뒤 볼륨을 다시 확보합니다.
-어느 단계든 실패하면 `PackageManager`가 이전 패키지를 — 파일과 데이터를 되돌려 — 복구하므로, 업데이트가 실패해도 디바이스에 동작 가능한 패키지가 없어지지 않습니다.
+`PackageTransactionActor`는 (호출자가 초기화를 요청하면) 기존 데이터 디렉터리를 백업하고 새 파일을 복사하며, 새 패키지는 setup될 때 볼륨을 확보합니다.
+이 단계 중 어느 것이든 실패하면 `PackageManager`가 이전 패키지를 — 파일과 데이터를 되돌려 — 복구하므로, 업데이트가 실패해도 디바이스에 동작 가능한 패키지가 없어지지 않습니다.
+그 뒤 새 패키지를 setup하는 도중 실패하면 새 패키지는 `Error` 상태가 됩니다.
 
 ## Removing a package
 
