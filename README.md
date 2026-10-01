@@ -42,7 +42,7 @@ SSAM fixes each container's configuration at build time. A conventional OCI-base
 ## Requirements
 
 ### Build requirements
-- Rust 1.88.0+ (2024 edition)
+- Rust 1.99.0+ (2024 edition)
 
 ### `ssamd` requirements
 - *OCI Runtime*: Tested with [`crun`](https://github.com/containers/crun).

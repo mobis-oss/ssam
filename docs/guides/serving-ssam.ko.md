@@ -47,7 +47,7 @@
 
 ### Build requirements
 
-- Rust 1.88.0+ (2024 edition).
+- Rust 1.99.0+ (2024 edition).
 
 ### Runtime requirements (on the target device)
 

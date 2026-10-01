@@ -46,7 +46,7 @@ SSAM은 각 컨테이너의 설정을 빌드 시점에 확정합니다. 기존�
 ## Requirements
 
 ### Build requirements
-- Rust 1.88.0+ (2024 edition)
+- Rust 1.99.0+ (2024 edition)
 
 ### `ssamd` requirements
 - *OCI Runtime*: [`crun`](https://github.com/containers/crun)과 테스트되었습니다.

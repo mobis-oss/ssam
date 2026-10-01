@@ -1,4 +1,4 @@
 # Clippy configuration for SSAM
 # https://doc.rust-lang.org/clippy/configuration.html
 
-msrv = "1.88"
+msrv = "1.99.0"
