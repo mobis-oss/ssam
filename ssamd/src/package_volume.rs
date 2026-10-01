@@ -215,16 +215,10 @@ impl PackageVolumeManagerActor {
         let package_name = volume_meta.package_name;
 
         let data_dir_meta = volume_meta.data_meta;
-        let data_directory = self
-            .data_directory_manager
-            .create_data_directory(data_dir_meta)
-            .inspect_err(|e| {
-                log::warn!(
-                    "Failed to create data directory for package {package_name}, \
-                     running without data directory: {e:#}"
-                );
-            })
-            .ok();
+        let data_directory = Some(
+            self.data_directory_manager
+                .create_data_directory(data_dir_meta)?,
+        );
 
         let pkgfs_meta = volume_meta.pkgfs_meta;
         let loop_controller = self.loop_controller.clone();

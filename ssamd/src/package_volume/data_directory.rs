@@ -434,13 +434,19 @@ impl<Q: Ext4QuotaBackend> DataDirectoryManager<Q> {
         let path = dir_meta.path;
         let package_name = dir_meta.package_name;
         let data_dirs = dir_meta.data_dirs;
+        let storage_limit = dir_meta.storage_limit;
+
+        anyhow::ensure!(
+            storage_limit.is_none() || self.quota_root.is_some(),
+            "Cannot enforce storage_limit for package {package_name}: project quotas are unavailable"
+        );
 
         let quota_info = self
             .quota_root
             .as_ref()
             .map(|quota| -> anyhow::Result<_> {
                 let id = self.id_mgr.get_project_id(&path);
-                let block_limit = dir_meta.storage_limit;
+                let block_limit = storage_limit;
                 // ID 0 is the ext4 root project; defaulting to it would corrupt
                 // quota isolation, so propagate the error instead.
                 let id_i32 = i32::try_from(id).with_context(|| {
