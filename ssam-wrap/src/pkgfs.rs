@@ -45,13 +45,23 @@ pub const SUPPORTED_CONTAINER_TRANSPORTS: &[&str] = &[
     "oci:",
 ];
 
+// mkfs.erofs defaults to the build host page size (16 KiB on some aarch64 hosts), and
+// dm-verity on a 4 KiB page kernel rejects data blocks larger than the page size.
+const EROFS_BLOCK_SIZE_ARG: &str = "-b4096";
+
 impl From<ImageType> for (&'static str, Vec<&'static str>) {
     fn from(image_type: ImageType) -> Self {
         match image_type {
             ImageType::Ext4 => ("pkgfs.ext4", vec!["mkfs.ext4"]),
-            ImageType::Erofs => ("pkgfs.erofs", vec!["mkfs.erofs"]),
-            ImageType::ErofsLz4 => ("pkgfs.erofs-lz4", vec!["mkfs.erofs", "-zlz4"]),
-            ImageType::ErofsLz4hc => ("pkgfs.erofs-lz4hc", vec!["mkfs.erofs", "-zlz4hc"]),
+            ImageType::Erofs => ("pkgfs.erofs", vec!["mkfs.erofs", EROFS_BLOCK_SIZE_ARG]),
+            ImageType::ErofsLz4 => (
+                "pkgfs.erofs-lz4",
+                vec!["mkfs.erofs", "-zlz4", EROFS_BLOCK_SIZE_ARG],
+            ),
+            ImageType::ErofsLz4hc => (
+                "pkgfs.erofs-lz4hc",
+                vec!["mkfs.erofs", "-zlz4hc", EROFS_BLOCK_SIZE_ARG],
+            ),
         }
     }
 }
@@ -159,16 +169,20 @@ mod tests {
     fn image_type_maps_to_filename_and_mkfs_args() {
         let cases = [
             (ImageType::Ext4, "pkgfs.ext4", vec!["mkfs.ext4"]),
-            (ImageType::Erofs, "pkgfs.erofs", vec!["mkfs.erofs"]),
+            (
+                ImageType::Erofs,
+                "pkgfs.erofs",
+                vec!["mkfs.erofs", "-b4096"],
+            ),
             (
                 ImageType::ErofsLz4,
                 "pkgfs.erofs-lz4",
-                vec!["mkfs.erofs", "-zlz4"],
+                vec!["mkfs.erofs", "-zlz4", "-b4096"],
             ),
             (
                 ImageType::ErofsLz4hc,
                 "pkgfs.erofs-lz4hc",
-                vec!["mkfs.erofs", "-zlz4hc"],
+                vec!["mkfs.erofs", "-zlz4hc", "-b4096"],
             ),
         ];
         for (ty, name, args) in cases {
