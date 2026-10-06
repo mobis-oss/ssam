@@ -457,7 +457,7 @@ pub(crate) mod tests {
         );
         let config = Configuration::load_from_path(file.path()).unwrap();
         assert_eq!(config.packages_ext(), DEFAULT_PACKAGE_EXTENSION);
-        assert!(config.packages_cgroup().is_empty());
+        assert_eq!(config.packages_cgroup(), "");
         assert_eq!(config.public_key_path(), DEFAULT_PUBLIC_KEY_PATH);
         assert!(!config.pkgfs_integrity_disabled());
         assert!(!config.package_verify_disabled());

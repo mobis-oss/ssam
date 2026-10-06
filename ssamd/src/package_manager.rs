@@ -19,6 +19,8 @@ use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
 use rsactor::{Actor, ActorRef, message_handlers};
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::convert::Infallible;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -184,13 +186,25 @@ use store::HashMapPackageStore;
 
 use pkg_file::DefaultPackageFileBackend;
 
-#[derive(Actor)]
 pub struct PackageManagerActor {
     config: Arc<Configuration>,
     builtin_dir: Option<PathBuf>,
     downloaded_dir: Option<PathBuf>,
     package_store: PackageStore<HashMapPackageStore<Package>>,
     transaction_actor: ActorRef<PackageTransactionActor>,
+}
+
+impl Actor for PackageManagerActor {
+    type Args = Self;
+    type Error = Infallible;
+    type IdleEvent = ();
+
+    fn on_start(
+        args: Self::Args,
+        _actor_ref: &ActorRef<Self>,
+    ) -> impl Future<Output = Result<Self, Self::Error>> {
+        std::future::ready(Ok(args))
+    }
 }
 
 impl SupervisedActor for PackageManagerActor {
@@ -1463,7 +1477,7 @@ mod tests {
         async fn test_get_package_names_empty() {
             let (pm, _b, _d) = setup_package_manager().await;
             let names = pm.get_package_names().await;
-            assert!(names.is_empty());
+            assert_eq!(names, [] as [std::string::String; 0]);
         }
 
         #[tokio::test]
@@ -1471,7 +1485,7 @@ mod tests {
             let (pm, _b, _d) = setup_package_manager().await;
             let result = pm.get_packages_status().await;
             assert!(result.is_ok());
-            assert!(result.unwrap().is_empty());
+            assert_eq!(result.unwrap(), [] as [(String, PackageStatus); 0]);
         }
 
         #[tokio::test]
@@ -1479,7 +1493,10 @@ mod tests {
             let (pm, _b, _d) = setup_package_manager().await;
             let result = pm.get_all_package_info().await;
             assert!(result.is_ok());
-            assert!(result.unwrap().is_empty());
+            assert_eq!(
+                result.unwrap(),
+                [] as [libssam::ssam_package::ssam_pkg_info::PackageInfoResult; 0]
+            );
         }
 
         #[tokio::test]

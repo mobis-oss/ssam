@@ -1600,7 +1600,10 @@ pub(crate) mod tests {
             .list_package_info_from_files(request)
             .await
             .expect("empty file list should succeed");
-        assert!(response.into_inner().packages.is_empty());
+        assert_eq!(
+            response.into_inner().packages,
+            [] as [libssam::InspectLocalPackageResult; 0]
+        );
     }
 
     #[tokio::test]
@@ -1613,7 +1616,7 @@ pub(crate) mod tests {
         let response = remocon.list_package_info(request).await;
         assert!(response.is_ok());
         let packages = response.unwrap().into_inner().packages;
-        assert!(packages.is_empty());
+        assert_eq!(packages, [] as [libssam::PackageInfo; 0]);
     }
 
     #[tokio::test]
@@ -1820,7 +1823,7 @@ pub(crate) mod tests {
                 .ssamd_uptime
                 .is_some_and(|uptime| uptime.seconds > 0 || uptime.nanos > 0)
         );
-        assert!(timeline_response.events.is_empty());
+        assert_eq!(timeline_response.events, [] as [libssam::TimelineEvent; 0]);
     }
 
     #[test]
@@ -2128,7 +2131,10 @@ pub(crate) mod tests {
             .list_package_info(request)
             .await
             .expect("response should contain no package results");
-        assert!(response.into_inner().packages.is_empty());
+        assert_eq!(
+            response.into_inner().packages,
+            [] as [libssam::PackageInfo; 0]
+        );
     }
 
     #[tokio::test]

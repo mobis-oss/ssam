@@ -81,6 +81,8 @@ pub mod actor_supervisor {
 
         struct TestActor;
 
+        // rsactor lifecycle callbacks require async signatures.
+        #[allow(clippy::unused_async_trait_impl)]
         impl Actor for TestActor {
             type Args = ();
             type Error = anyhow::Error;

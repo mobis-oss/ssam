@@ -1087,9 +1087,9 @@ mod tests {
                 .set_data_size(dm_data.data_size().unwrap());
             let payload = DmIoctlPayload::new(&io_hdr, &dm_data);
             let data_slice: &[c_char] = payload.as_data_slice().unwrap();
-            assert!(!data_slice.is_empty());
+            assert_ne!(data_slice, [] as [c_char; 0]);
             let data_slice_u8: &[u8] = payload.as_data_slice().unwrap();
-            assert!(!data_slice_u8.is_empty());
+            assert_ne!(data_slice_u8, [] as [u8; 0]);
         }
         #[test]
         fn test_dm_ioctl_payload_as_mut_ptr() {

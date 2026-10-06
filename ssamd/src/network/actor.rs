@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::convert::Infallible;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
@@ -81,7 +82,7 @@ pub struct NetworkActor {
 
 impl Actor for NetworkActor {
     type Args = Self;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
     type IdleEvent = ();
 
     /// Rebuild bridge/subnet/IP state from host truth so a container that
@@ -122,8 +123,8 @@ impl NetworkActor {
     /// An existing namespace is preserved (never destroyed) so a running
     /// container survives a daemon restart.
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_create_netns(
         &mut self,
         msg: messages::CreateNetns,
@@ -268,8 +269,8 @@ impl NetworkActor {
     /// IP set becomes empty) the bridge link is removed and its subnet released
     /// back to the pool.
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_detach(
         &mut self,
         msg: messages::Detach,
@@ -299,8 +300,8 @@ impl NetworkActor {
 
     /// Idempotently delete the package's named namespace. Absent = success.
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_destroy_netns(
         &mut self,
         msg: messages::DestroyNetns,

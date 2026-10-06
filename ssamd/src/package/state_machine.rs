@@ -3,6 +3,8 @@
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use std::convert::Infallible;
+use std::future::Future;
 
 use super::{InvalidTransition, PackageStatus};
 
@@ -109,10 +111,23 @@ impl TransitionManager {
     }
 }
 
-#[derive(Debug, rsactor::Actor)]
+#[derive(Debug)]
 pub(in crate::package) struct TransitionManagerActor {
     status: PackageStatus,
     backend: Box<dyn LifecycleBackend>,
+}
+
+impl rsactor::Actor for TransitionManagerActor {
+    type Args = Self;
+    type Error = Infallible;
+    type IdleEvent = ();
+
+    fn on_start(
+        args: Self::Args,
+        _actor_ref: &rsactor::ActorRef<Self>,
+    ) -> impl Future<Output = Result<Self, Self::Error>> {
+        std::future::ready(Ok(args))
+    }
 }
 
 impl TransitionManagerActor {
@@ -252,8 +267,8 @@ impl TransitionManagerActor {
     }
 
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_get_status(
         &mut self,
         _msg: transition_messages::GetStatus,

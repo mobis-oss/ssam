@@ -39,6 +39,8 @@ mod systemd_dbus {
     use anyhow::Context;
     use futures_util::Stream;
     use rsactor::{Actor, ActorRef, ActorWeak, message_handlers};
+    use std::convert::Infallible;
+    use std::future::Future;
     use strum::Display;
     use tokio::sync::oneshot;
 
@@ -84,32 +86,37 @@ mod systemd_dbus {
         senders: JobRemovedSenderMap,
     }
 
+    // Lifecycle callbacks must return futures even when their work is synchronous.
     impl rsactor::Actor for JobRemovedSignalWatcherActor {
         type Args = JobRemovedStream;
         type Error = anyhow::Error;
         type IdleEvent = <JobRemovedStream as Stream>::Item;
 
-        async fn on_start(args: Self::Args, actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
+        fn on_start(
+            args: Self::Args,
+            actor_ref: &ActorRef<Self>,
+        ) -> impl Future<Output = anyhow::Result<Self>> {
             log::debug!("SystemDSignalWatcher started");
-            actor_ref
+            let result = actor_ref
                 .subscribe_idle(args)
-                .map_err(|e| anyhow::anyhow!("Failed to subscribe to JobRemoved stream: {e}"))?;
-            Ok(Self {
-                senders: JobRemovedSenderMap::new(),
-            })
+                .map(|()| Self {
+                    senders: JobRemovedSenderMap::new(),
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to subscribe to JobRemoved stream: {e}"));
+            std::future::ready(result)
         }
 
-        async fn on_idle(
+        fn on_idle(
             &mut self,
             signal: Self::IdleEvent,
             _actor_ref: &ActorWeak<Self>,
-        ) -> anyhow::Result<()> {
+        ) -> impl Future<Output = anyhow::Result<()>> {
             log::debug!("JobRemovedSignalWatcher is running");
             let args = match signal.args() {
                 Ok(args) => args,
                 Err(e) => {
                     log::warn!("Got unexpected signal. Report to zbus: {e}");
-                    return Ok(());
+                    return std::future::ready(Ok(()));
                 }
             };
 
@@ -126,15 +133,15 @@ mod systemd_dbus {
                 log::debug!("Send job result to watcher for {job}. unit: {unit}, result: {result}");
                 let _ = sender.send(result);
             }
-            Ok(())
+            std::future::ready(Ok(()))
         }
     }
 
     #[message_handlers]
     impl JobRemovedSignalWatcherActor {
         #[handler]
-        // rsactor #[handler] requires async fn signature even without await
-        #[allow(clippy::unused_async)]
+        // rsactor handlers require async signatures.
+        #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
         async fn handle_watch_signal(
             &mut self,
             msg: watcher_messages::WatchSignal,
@@ -147,8 +154,8 @@ mod systemd_dbus {
         }
 
         #[handler]
-        // rsactor #[handler] requires async fn signature even without await
-        #[allow(clippy::unused_async)]
+        // rsactor handlers require async signatures.
+        #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
         async fn handle_cancel_watch_signal(
             &mut self,
             msg: watcher_messages::CancelWatchSignal,
@@ -192,10 +199,23 @@ mod systemd_dbus {
         }
     }
 
-    #[derive(Debug, Actor)]
+    #[derive(Debug)]
     pub(crate) struct SystemdManagerActor {
         manager_proxy: ManagerProxy<'static>,
         job_removed_watcher_actor: ActorRef<JobRemovedSignalWatcherActor>,
+    }
+
+    impl Actor for SystemdManagerActor {
+        type Args = Self;
+        type Error = Infallible;
+        type IdleEvent = ();
+
+        fn on_start(
+            args: Self::Args,
+            _actor_ref: &ActorRef<Self>,
+        ) -> impl Future<Output = Result<Self, Self::Error>> {
+            std::future::ready(Ok(args))
+        }
     }
 
     impl SupervisedActor for SystemdManagerActor {
@@ -392,10 +412,13 @@ impl Actor for ActiveStateConverterActor {
     type Error = anyhow::Error;
     type IdleEvent = ();
 
-    async fn on_start(args: Self::Args, _actor_ref: &ActorRef<Self>) -> anyhow::Result<Self> {
-        Ok(Self {
+    fn on_start(
+        args: Self::Args,
+        _actor_ref: &ActorRef<Self>,
+    ) -> impl Future<Output = anyhow::Result<Self>> {
+        std::future::ready(Ok(Self {
             active_state_sender: args,
-        })
+        }))
     }
 }
 
@@ -962,6 +985,8 @@ mod tests {
 
     struct MockServiceProxy;
 
+    // The production trait is async; this mock returns immediately.
+    #[allow(clippy::unused_async_trait_impl)]
     impl FailureInfoSource for MockServiceProxy {
         async fn failure_info(&self) -> anyhow::Result<FailureInfo> {
             Ok(FailureInfo {

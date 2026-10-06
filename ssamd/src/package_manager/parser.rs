@@ -192,7 +192,7 @@ mod tests {
             .await
             .expect("parse should return wrapper result");
         assert_eq!(res.path, p);
-        assert!(!res.package_name.is_empty());
+        assert_ne!(res.package_name, "");
         assert!(res.package_file.is_err());
     }
 

@@ -8,6 +8,8 @@ use crate::package_volume::{PackageVolumeManagerActor, data_dir_path};
 use crate::utils::actor_supervisor::{IgnoreOnFailure, SupervisedActor};
 use anyhow::Context;
 use rsactor::{Actor, ActorRef, message_handlers};
+use std::convert::Infallible;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -58,12 +60,24 @@ impl PackageFileBackend for DefaultPackageFileBackend {
     }
 }
 
-#[derive(Actor)]
 pub(crate) struct PackageTransactionActor {
     config: Arc<Configuration>,
     volume_manager_ref: ActorRef<PackageVolumeManagerActor>,
     fs_ops: Arc<dyn PackageFileBackend>,
     network: Option<NetworkManager>,
+}
+
+impl Actor for PackageTransactionActor {
+    type Args = Self;
+    type Error = Infallible;
+    type IdleEvent = ();
+
+    fn on_start(
+        args: Self::Args,
+        _actor_ref: &ActorRef<Self>,
+    ) -> impl Future<Output = Result<Self, Self::Error>> {
+        std::future::ready(Ok(args))
+    }
 }
 
 impl PackageTransactionActor {
@@ -155,7 +169,8 @@ impl PackageTransactionActor {
     }
 
     #[handler]
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_remove_package_file(
         &mut self,
         msg: message::RemovePackageFile,
@@ -165,8 +180,8 @@ impl PackageTransactionActor {
     }
 
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_create_package(
         &mut self,
         msg: message::CreatePackage,

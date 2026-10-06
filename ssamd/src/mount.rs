@@ -15,6 +15,7 @@ use rustix::mount::{MountFlags, UnmountFlags};
 use std::ffi::CString;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::{
+    future::Future,
     io,
     path::{Path, PathBuf},
     thread::sleep,
@@ -335,9 +336,12 @@ impl Actor for LoopDeviceControlActor {
     type Error = anyhow::Error;
     type IdleEvent = ();
 
-    async fn on_start(opener: Self::Args, _: &ActorRef<Self>) -> anyhow::Result<Self> {
-        let control = opener.open()?;
-        Ok(Self { control })
+    fn on_start(
+        opener: Self::Args,
+        _: &ActorRef<Self>,
+    ) -> impl Future<Output = anyhow::Result<Self>> {
+        let result = opener.open().map(|control| Self { control });
+        std::future::ready(result)
     }
 }
 #[cfg(not(test))]

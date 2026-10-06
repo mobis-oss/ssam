@@ -169,7 +169,7 @@ mod tests {
                 .build(),
         );
 
-        assert!(backend.get_all().is_empty());
+        assert_eq!(backend.get_all(), [] as [crate::TimelineEvent; 0]);
     }
 
     #[test]

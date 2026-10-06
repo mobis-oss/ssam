@@ -244,7 +244,7 @@ mod tests {
             parse_peer_groups(&[1000, u32::MAX], gid_size * 2).unwrap(),
             vec![1000, u32::MAX]
         );
-        assert!(parse_peer_groups(&[1000], 0).unwrap().is_empty());
+        assert_eq!(parse_peer_groups(&[1000], 0).unwrap(), [] as [u32; 0]);
         assert!(parse_peer_groups(&[1000], gid_size - 1).is_err());
         assert!(parse_peer_groups(&[1000], gid_size * 2).is_err());
     }

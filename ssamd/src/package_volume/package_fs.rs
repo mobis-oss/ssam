@@ -5,6 +5,7 @@ use crate::mount::{LoopDeviceAttacher, mount_pkgfs, unmount_pkgfs};
 use crate::utils;
 use libssam::ssam_package::{PackageFsVerityInfo, PkgfsExtent};
 use libssam::superblock::FsType;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use super::PackageFileInfo;
@@ -116,7 +117,7 @@ pub(crate) trait MountBackend: Send + Sync + std::fmt::Debug {
         pkgfs_meta: &'a PackageFsMetadata,
         mount_point: &'a Path,
         loop_controller: &'a T,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+    ) -> impl Future<Output = anyhow::Result<()>> + Send + 'a;
 
     fn unmount_pkgfs(
         &self,
@@ -136,7 +137,7 @@ impl MountBackend for DefaultMountBackend {
         pkgfs_meta: &'a PackageFsMetadata,
         mount_point: &'a Path,
         loop_controller: &'a T,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+    ) -> impl Future<Output = anyhow::Result<()>> + Send + 'a {
         mount_pkgfs(package_name, pkgfs_meta, mount_point, loop_controller)
     }
 
@@ -276,7 +277,7 @@ pub(crate) mod tests {
                 _pkgfs_meta: &'a PackageFsMetadata,
                 _mount_point: &'a Path,
                 _loop_controller: &'a T,
-            ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            ) -> impl Future<Output = anyhow::Result<()>> + Send + 'a {
                 std::future::ready(Ok(()))
             }
 

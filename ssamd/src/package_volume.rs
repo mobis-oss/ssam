@@ -204,8 +204,8 @@ impl SupervisedActor for PackageVolumeManagerActor {
 #[message_handlers]
 impl PackageVolumeManagerActor {
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_acquire_volume(
         &mut self,
         msg: messages::AcquireVolume,
@@ -239,8 +239,8 @@ impl PackageVolumeManagerActor {
     }
 
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_purge_volume(
         &mut self,
         msg: messages::PurgeVolume,
@@ -268,8 +268,8 @@ impl PackageVolumeManagerActor {
     }
 
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_wipe_volume_data(
         &mut self,
         msg: messages::WipeVolumeData,
@@ -292,8 +292,8 @@ impl PackageVolumeManagerActor {
     }
 
     #[handler]
-    // rsactor #[handler] requires async fn signature even without await
-    #[allow(clippy::unused_async)]
+    // rsactor handlers require async signatures.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn handle_get_quota_info(
         &mut self,
         msg: messages::GetQuotaInfo,
@@ -529,7 +529,7 @@ pub(crate) mod tests {
             let (actor_ref, join_handle) = spawn::<PackageVolumeManagerActor>(test_data_root());
 
             // Verify actor was created successfully
-            assert!(!format!("{:?}", actor_ref.identity()).is_empty());
+            assert_ne!(format!("{:?}", actor_ref.identity()), "");
 
             // Stop the actor gracefully
             actor_ref.stop().await;

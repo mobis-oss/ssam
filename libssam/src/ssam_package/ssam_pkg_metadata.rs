@@ -272,7 +272,7 @@ mod tests {
         assert!(serialized.is_ok());
         let serialized = serialized.unwrap();
 
-        assert!(!serialized.is_empty());
+        assert_ne!(serialized, [] as [u8; 0]);
         assert!(serialized.len() > 50);
     }
 
