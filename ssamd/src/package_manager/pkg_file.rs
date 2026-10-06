@@ -194,8 +194,7 @@ impl PackageTransactionActor {
 
 impl PackageTransactionActor {
     fn backup_path_of(path: &Path) -> PathBuf {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        path.with_extension(format!("{ext}.old"))
+        path.to_path_buf().with_added_extension("old")
     }
 
     /// Removes a file, treating `NotFound` as success. Returns `Ok(true)` if
@@ -242,11 +241,8 @@ impl PackageTransactionActor {
     /// Renames the data directory to a ".old" backup for upgrade rollback.
     /// Returns the backup path, or None if the directory does not exist.
     fn backup_data_dir(data_dir_path: &Path) -> anyhow::Result<Option<PathBuf>> {
-        // Append to the whole path; with_extension would clobber the final
-        // segment of reverse-DNS names (com.example.app).
-        let mut old = data_dir_path.to_path_buf().into_os_string();
-        old.push(".old");
-        let old = PathBuf::from(old);
+        // Append the suffix without replacing the existing extension.
+        let old = data_dir_path.to_path_buf().with_added_extension("old");
         // Clear a stale ".old"; rename onto a non-empty dir fails with ENOTEMPTY.
         std::fs::remove_dir_all(&old).ok();
         match std::fs::rename(data_dir_path, &old) {

@@ -196,11 +196,9 @@ impl Remocon for RemoconImpl {
         let remove_data = request.get_ref().remove_data;
 
         let path = PathBuf::from(package_path);
-        if !path.is_absolute() {
-            return Err(Status::invalid_argument(format!(
-                "Package path must be absolute: {path:?}"
-            )));
-        }
+        path.is_absolute().ok_or_else(|| {
+            Status::invalid_argument(format!("Package path must be absolute: {path:?}"))
+        })?;
 
         let result_inner = self
             .package_manager

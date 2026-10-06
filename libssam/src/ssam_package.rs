@@ -130,9 +130,8 @@ fn read_footer_field<const N: usize>(
 /// Verify the package file has a valid footer (MAGIC and `FORMAT_VERSION`).
 fn verify_footer(pkg_fp: &mut File) -> Result<(), PackageParseError> {
     let magic = read_footer_field::<SSAM_PKG_MAGIC_LEN>(pkg_fp, SSAM_PKG_MAGIC_LEN)?;
-    if &magic != SSAM_PKG_MAGIC {
-        return Err(PackageParseError::InvalidMagic);
-    }
+    let magic_matches = &magic == SSAM_PKG_MAGIC;
+    magic_matches.ok_or(PackageParseError::InvalidMagic)?;
 
     let version_offset_from_end = SSAM_PKG_FOOTER_LEN;
     let version =

@@ -78,11 +78,8 @@ fn raw_quotactl(
 
     let ret = unsafe { libc::quotactl(op, special_ptr, id, addr) };
 
-    if ret == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    let quotactl_succeeded = ret != -1;
+    quotactl_succeeded.ok_or_else(io::Error::last_os_error)
 }
 
 /// General quota operations (device-path based API).

@@ -917,10 +917,10 @@ mod tests {
         fn create_test_dm_name_list(name: &str, next_offset: u32, dev: u64) -> Vec<c_char> {
             let mut buffer = Vec::new();
             buffer.extend_from_slice(unsafe {
-                std::slice::from_raw_parts((&dev as *const u64).cast::<c_char>(), 8)
+                std::slice::from_raw_parts((&raw const dev).cast::<c_char>(), 8)
             });
             buffer.extend_from_slice(unsafe {
-                std::slice::from_raw_parts((&next_offset as *const u32).cast::<c_char>(), 4)
+                std::slice::from_raw_parts((&raw const next_offset).cast::<c_char>(), 4)
             });
             buffer.extend(name.as_bytes().iter().map(|&b| b as c_char));
             buffer.push(0);
@@ -1151,7 +1151,7 @@ mod tests {
             let mut test_buffer = Vec::new();
             test_buffer.extend_from_slice(unsafe {
                 std::slice::from_raw_parts(
-                    (&test_ioctl as *const dm_ioctl).cast::<u8>(),
+                    (&raw const test_ioctl).cast::<u8>(),
                     size_of::<dm_ioctl>(),
                 )
             });

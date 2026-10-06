@@ -72,7 +72,7 @@ pub trait CommandRunner: std::fmt::Debug {
         if !capture_stdout || output.stdout.is_empty() {
             Ok(String::new())
         } else {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stdout = String::from_utf8_lossy_owned(output.stdout);
             Ok(stdout)
         }
     }
