@@ -514,7 +514,7 @@ pub(crate) mod tests {
                 package_name: package_name.to_string(),
                 path: test_data_root().join(package_name),
                 data_dirs: Some("/app/data:/var/log".to_string()),
-                storage_limit: Some(1024),
+                storage_limit: None,
             };
 
             PackageVolumeMetadata {

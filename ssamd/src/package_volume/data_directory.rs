@@ -1348,6 +1348,30 @@ pub(crate) mod tests {
         }
 
         #[tokio::test]
+        async fn test_create_data_directory_storage_limit_without_quota_fails() {
+            let quota_impl: Option<mocks::MockExt4QuotaManager> = None;
+            let temp_dir = TempDir::new().unwrap();
+            let data_root = temp_dir.path();
+            let mut manager = DataDirectoryManager::new(quota_impl, data_root)
+                .await
+                .unwrap();
+
+            let test_path = data_root.join("test_package_limit_no_quota");
+            let dir_meta = DataDirMetadata {
+                path: test_path.clone(),
+                package_name: "test-package-limit-no-quota".to_string(),
+                data_dirs: None,
+                storage_limit: Some(2048),
+            };
+
+            assert!(
+                manager.create_data_directory(dir_meta).is_err(),
+                "storage_limit must not be silently dropped without project quotas"
+            );
+            assert!(!test_path.exists());
+        }
+
+        #[tokio::test]
         async fn test_create_data_directory_with_storage_limit() {
             let quota_impl = Some(mocks::MockExt4QuotaManager { should_fail: false });
             let temp_dir = TempDir::new().unwrap();
