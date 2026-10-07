@@ -76,8 +76,7 @@ When `mac = true`, `ssamd`:
 1. Looks for a profile named **`ssam-prof-<package-name>`** (the package's `name` from `config.toml`).
 2. If it is loaded, applies it to the container.
 3. If it is **not** loaded, falls back to **`container-default`**.
-4. If the host has no *AppArmor* support, skips confinement — even with `mac = true`.
-5. If the profile lookup itself fails (e.g. an I/O error reading the loaded-profiles list), it also skips — `container-default` is only used when the lookup succeeds and the named profile simply isn't loaded, not on a lookup failure.
+4. Refuses to start the container if *AppArmor* is not enabled on the host, the loaded-profile list cannot be read, or neither profile is loaded.
 
 **How to configure.**
 
@@ -103,7 +102,8 @@ When `mac = true`, `ssamd`:
    # apparmor_parser -r /etc/apparmor.d/ssam-prof-helloworld
    ```
 
-4. Optionally provide a `container-default` profile as the fallback for packages that ship without a dedicated one.
+4. Provide a `container-default` profile as the fallback for packages that ship without a dedicated one.
+   Without either profile, a package with `mac = true` fails to start.
 
 > ⚠️ Naming the profile in `runtime.json`'s `apparmorProfile` field has no effect: at runtime `ssamd` **overwrites that field** in the *OCI Runtime config* with the name derived from the package, so it is ignored.
 > To turn MAC off entirely, set `mac = false`.

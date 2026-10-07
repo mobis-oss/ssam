@@ -143,6 +143,7 @@ data_dirs = "/app/data:/app/logs"
 - **타입:** boolean · **필수** · **권장:** `true`
 - 컨테이너에 대한 강제 접근 제어(MAC) 격리를 활성화합니다.
   MAC은 *AppArmor* 로 제공되며, 대상 시스템에 **미리 약속된 이름의 AppArmor 프로파일** 이 로드되어 있어야 합니다.
+- `true`일 때 호스트 시스템에서 *AppArmor* 가 활성화돼 있지 않거나, 로드된 프로파일 목록을 읽을 수 없거나, 전용 프로파일과 `container-default` 프로파일 중 어느 것도 로드돼 있지 않으면 패키지 실행에 실패합니다.
 - 프로파일 이름 규칙과 작성·로드 방법 등 상세는 [Container Isolation](../architecture/container-isolation.ko.md) 과 [Container Hardening 가이드](../guides/container-hardening.ko.md)를 참고하세요.
 
 ---

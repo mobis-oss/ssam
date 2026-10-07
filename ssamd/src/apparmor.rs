@@ -162,26 +162,6 @@ fn parse_profiles(content: &str) -> Vec<Profile> {
         .collect()
 }
 
-/// Retrieve a specific `AppArmor` profile by name.
-///
-/// # Arguments
-///
-/// * `name` - The name of the profile to find.
-///
-/// # Returns
-///
-/// - `Ok(Some(Profile))`: If the profile with the given name is found.
-/// - `Ok(None)`: If the profile is not found.
-/// - `Err(io::Error)`: If an error occurs while retrieving the profiles.
-///
-/// # Errors
-///
-/// Returns an `io::Error` if reading the `AppArmor` profiles file fails.
-pub fn get_profile(name: &str) -> io::Result<Option<Profile>> {
-    let profiles = get_profiles()?;
-    Ok(profiles.into_iter().find(|p| p.name == name))
-}
-
 /// Determine if `AppArmor` is enabled.
 ///
 /// Returns `Ok(true)` if `AppArmor` is enabled and available on public interface,

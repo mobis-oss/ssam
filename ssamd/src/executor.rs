@@ -69,9 +69,11 @@ impl std::fmt::Display for ExecutionStatus {
 }
 
 pub(crate) mod oci {
+    use std::io;
     use std::path::{Path, PathBuf};
 
     use super::oci_bundle_dir::OciBundleDir;
+    use crate::apparmor::{self, Profile};
     use anyhow::Context;
     use libssam::container::NetworkMode;
     use libssam::ssam_package::PackageSeccompPolicy;
@@ -175,13 +177,18 @@ pub(crate) mod oci {
                 .process_mut()
                 .get_or_insert(oci_spec::runtime::Process::default());
 
-            let apparmor_profile = mac_enabled
-                .then(|| Self::build_apparmor_profile(&package_name))
-                .flatten();
-            if apparmor_profile.is_none() {
+            let apparmor_profile = if mac_enabled {
+                let profile = Self::select_apparmor_profile(&package_name).with_context(|| {
+                    format!(
+                        "{package_name}: refusing to start container without AppArmor confinement"
+                    )
+                })?;
+                Some(profile)
+            } else {
                 log::info!("{package_name}: AppArmor is disabled by configuration");
-            }
-            let _ = process.set_apparmor_profile(apparmor_profile);
+                None
+            };
+            process.set_apparmor_profile(apparmor_profile);
 
             let cgroups_path =
                 PathBuf::from(cgroups_path).join(format!("{package_name}.service/container"));
@@ -288,36 +295,45 @@ pub(crate) mod oci {
             }
         }
 
-        /// Builds the `AppArmor` profile name for the container.
+        /// Selects the loaded `AppArmor` profile to confine the container with.
         ///
-        /// If `AppArmor` is not available on the host, returns `None`.
-        /// Otherwise, returns the package-specific profile or falls back to the default.
-        fn build_apparmor_profile(package_name: &str) -> Option<String> {
-            let enabled = crate::apparmor::is_enabled()
-                .inspect_err(|e| log::warn!("Failed to check AppArmor status: {e}"))
-                .ok()?; // Err -> None, then early return
+        /// The package-specific profile is preferred over the default one.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if `AppArmor` is not enabled on the host, the loaded
+        /// profiles cannot be read, or neither profile is loaded.
+        fn select_apparmor_profile(package_name: &str) -> anyhow::Result<String> {
+            Self::resolve_apparmor_profile(
+                package_name,
+                apparmor::is_enabled(),
+                apparmor::get_profiles,
+            )
+        }
 
-            if !enabled {
-                log::info!("AppArmor is disabled on the host. Ignore to apply default profile.");
-                return None;
+        fn resolve_apparmor_profile(
+            package_name: &str,
+            enabled: io::Result<bool>,
+            loaded_profiles: impl FnOnce() -> io::Result<Vec<Profile>>,
+        ) -> anyhow::Result<String> {
+            anyhow::ensure!(
+                enabled.context("Failed to check AppArmor status")?,
+                "AppArmor is not enabled on the host"
+            );
+            let loaded = loaded_profiles().context("Failed to read loaded AppArmor profiles")?;
+            let is_loaded = |name: &str| loaded.iter().any(|p| p.name == name);
+
+            let dedicated = format!("ssam-prof-{package_name}");
+            if is_loaded(&dedicated) {
+                return Ok(dedicated);
             }
-
-            let profile_name = format!("ssam-prof-{package_name}");
-            let profile = crate::apparmor::get_profile(&profile_name)
-                .inspect_err(|e| {
-                    log::warn!(
-                        "AppArmor may not be properly configured. \
-                         Failed to get profile '{profile_name}': {e}"
-                    );
-                })
-                .ok()?; // Err -> None, then early return
-
-            profile.map(|_| profile_name).or_else(|| {
-                log::warn!(
-                    "AppArmor profile 'ssam-prof-{package_name}' not found. Falling back to default."
-                );
-                Some(Self::CONTAINER_DEFAULT_APPARMOR_PROFILE.to_string())
-            })
+            let fallback = Self::CONTAINER_DEFAULT_APPARMOR_PROFILE;
+            anyhow::ensure!(
+                is_loaded(fallback),
+                "Neither '{dedicated}' nor '{fallback}' AppArmor profile is loaded"
+            );
+            log::warn!("AppArmor profile '{dedicated}' not found. Falling back to '{fallback}'.");
+            Ok(fallback.to_owned())
         }
 
         /// Builds a `LinuxSeccomp` configuration from the given seccomp policy.
@@ -432,6 +448,69 @@ pub(crate) mod oci {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn loaded_profiles(names: &[&str]) -> Vec<Profile> {
+            names
+                .iter()
+                .map(|name| Profile {
+                    name: (*name).to_owned(),
+                    mode: apparmor::ProfileMode::Enforce,
+                })
+                .collect()
+        }
+
+        fn resolve_with_loaded(names: &[&str]) -> anyhow::Result<String> {
+            let loaded = loaded_profiles(names);
+            OciRuntimeConfig::resolve_apparmor_profile("pkg", Ok(true), || Ok(loaded))
+        }
+
+        #[test]
+        fn resolve_apparmor_profile_prefers_dedicated() {
+            for names in [
+                &["container-default", "ssam-prof-pkg"][..],
+                &["ssam-prof-pkg"],
+            ] {
+                assert_eq!(resolve_with_loaded(names).unwrap(), "ssam-prof-pkg");
+            }
+        }
+
+        #[test]
+        fn resolve_apparmor_profile_falls_back_to_default() {
+            let profile = resolve_with_loaded(&["container-default", "ssam-prof-other"]).unwrap();
+            assert_eq!(profile, "container-default");
+        }
+
+        #[test]
+        fn resolve_apparmor_profile_fails_closed_when_none_loaded() {
+            for names in [&["ssam-prof-other"][..], &[]] {
+                let error = resolve_with_loaded(names).unwrap_err().to_string();
+                assert!(error.contains("ssam-prof-pkg") && error.contains("container-default"));
+            }
+        }
+
+        #[test]
+        fn resolve_apparmor_profile_fails_closed_when_unavailable() {
+            let error = OciRuntimeConfig::resolve_apparmor_profile("pkg", Ok(false), || {
+                panic!("profiles must not be read when AppArmor is not enabled")
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("not enabled"));
+        }
+
+        #[test]
+        fn resolve_apparmor_profile_fails_closed_on_query_errors() {
+            let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+            let status = OciRuntimeConfig::resolve_apparmor_profile("pkg", Err(denied()), || {
+                panic!("profiles must not be read when the status is unknown")
+            })
+            .unwrap_err();
+            assert!(format!("{status:#}").contains("Failed to check AppArmor status"));
+
+            let profiles =
+                OciRuntimeConfig::resolve_apparmor_profile("pkg", Ok(true), || Err(denied()))
+                    .unwrap_err();
+            assert!(format!("{profiles:#}").contains("Failed to read loaded AppArmor profiles"));
+        }
 
         #[test]
         fn build_seccomp_config_none_is_disabled() {
@@ -834,7 +913,7 @@ mod tests {
             ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: Some(seccomp_policy),
-                mac_enabled: true,
+                mac_enabled: false,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-package-basic".to_owned(),
@@ -878,6 +957,39 @@ mod tests {
     }
 
     #[test]
+    fn test_oci_runtime_config_mac_disabled_clears_template_profile() {
+        let mut oci_spec = create_test_oci_spec();
+        oci_spec
+            .process_mut()
+            .as_mut()
+            .unwrap()
+            .set_apparmor_profile(Some("template-profile".to_owned()));
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+        let config = TestOciRuntimeConfig::new(
+            temp_dir.path(),
+            "1.0.0",
+            ContainerBundleSpec {
+                oci_template: oci_spec,
+                seccomp_policy: None,
+                mac_enabled: false,
+                network_mode: libssam::container::NetworkMode::None,
+                cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
+                package_name: "test-package-no-mac".to_owned(),
+                data_mounts: None,
+                bridge_netns_path: None,
+            },
+        )
+        .unwrap();
+
+        let written = oci_spec::runtime::Spec::load(config.dir_path().join("config.json")).unwrap();
+        assert_eq!(
+            written.process().as_ref().unwrap().apparmor_profile(),
+            &None
+        );
+    }
+
+    #[test]
     fn test_oci_runtime_config_bundle_dir_is_0755() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -893,7 +1005,7 @@ mod tests {
             ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: Some(seccomp_policy),
-                mac_enabled: true,
+                mac_enabled: false,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-package-mode".to_owned(),
@@ -1117,7 +1229,7 @@ mod tests {
             ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: Some(seccomp_policy),
-                mac_enabled: true,
+                mac_enabled: false,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-package-data".to_owned(),
@@ -1163,7 +1275,7 @@ mod tests {
             ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: None,
-                mac_enabled: true,
+                mac_enabled: false,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-package-no-seccomp".to_owned(),
@@ -1209,7 +1321,7 @@ mod tests {
             ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: Some(seccomp_policy),
-                mac_enabled: true,
+                mac_enabled: false,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-package-with-seccomp".to_owned(),
@@ -1263,7 +1375,7 @@ mod tests {
             ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: Some(bad_policy),
-                mac_enabled: true,
+                mac_enabled: false,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: "test-package-bad-seccomp".to_owned(),
@@ -1324,7 +1436,7 @@ mod tests {
             let spec = ContainerBundleSpec {
                 oci_template: oci_spec,
                 seccomp_policy: Some(seccomp_policy),
-                mac_enabled: true,
+                mac_enabled: false,
                 network_mode: libssam::container::NetworkMode::None,
                 cgroups_path: "/sys/fs/cgroup/system.slice".to_owned(),
                 package_name: package_name.to_owned(),

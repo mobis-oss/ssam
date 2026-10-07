@@ -268,6 +268,7 @@ You can disable filtering by setting `seccomp = false`, but that is recommended 
 
 Set [`container.security.mac`](../reference/package-config.md#mac) to `true` to confine the container with *AppArmor*.
 Profiles must be prepared and loaded on the host (outside `ssamd`); at runtime, if the per-package *AppArmor* profile **`ssam-prof-<package-name>`** is loaded, `ssamd` selects it, falling back to `container-default` if it is not loaded.
+If *AppArmor* is not enabled on the host, the loaded profiles cannot be read, or neither profile is loaded, the package fails to start.
 
 > ⚠️ Even if you set `process.apparmorProfile` in `runtime.json`, `ssamd` overwrites it with the profile name above, so it is ignored.
 

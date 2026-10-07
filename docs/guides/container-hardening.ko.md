@@ -76,8 +76,7 @@ SSAM은 *AppArmor* 프로파일로 이를 적용하며, [`container.security.mac
 1. **`ssam-prof-<패키지명>`** 이름의 프로파일을 찾습니다(패키지 `config.toml`의 `name`).
 2. 로드돼 있으면 컨테이너에 적용합니다.
 3. 로드돼 있지 **않으면** **`container-default`** 프로파일로 폴백합니다.
-4. 호스트 시스템에 *AppArmor* 지원이 없으면 — `mac = true` 여도 — 격리를 건너뜁니다.
-5. 프로파일 조회 자체가 실패하면(예: 로드된 프로파일 목록을 읽다가 I/O 에러) 마찬가지로 건너뜁니다 — `container-default`는 조회가 성공했는데 지정한 이름의 프로파일만 없을 때만 쓰이고, 조회 실패 시에는 쓰이지 않습니다.
+4. 호스트 시스템에서 *AppArmor* 가 활성화돼 있지 않거나, 로드된 프로파일 목록을 읽을 수 없거나, 두 프로파일 중 어느 것도 로드돼 있지 않으면 컨테이너 실행을 거부합니다.
 
 **설정 절차.**
 
@@ -103,6 +102,7 @@ SSAM은 *AppArmor* 프로파일로 이를 적용하며, [`container.security.mac
    # apparmor_parser -r /etc/apparmor.d/ssam-prof-helloworld
    ```
 
-4. 전용 프로파일 없이 배포되는 패키지를 위해 `container-default` 프로파일을 폴백으로 제공해 둘 수 있습니다.
+4. 전용 프로파일 없이 배포되는 패키지를 위해 `container-default` 프로파일을 폴백으로 제공합니다.
+   두 프로파일 중 어느 것도 없으면 `mac = true`인 패키지는 실행에 실패합니다.
 
 > ⚠️ `runtime.json`의 `apparmorProfile` 필드에 이름을 직접 적어도, 실행 시 `ssamd`가 패키지명에서 유도한 이름으로 *OCI Runtime config* 의 그 필드를 **덮어써 버리므로 무시됩니다.** MAC을 완전히 끄려면 `mac = false`로 설정하세요.

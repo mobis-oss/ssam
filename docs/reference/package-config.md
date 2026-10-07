@@ -142,6 +142,7 @@ Security hardening toggles.
 - **Type:** boolean · **Required** · **Recommended:** `true`
 - Enables Mandatory Access Control (MAC) confinement for the container.
   MAC is provided via *AppArmor*, and an *AppArmor* profile under a **predefined name** must be loaded on the target.
+- When `true`, the package fails to start if *AppArmor* is not enabled on the host, the loaded profiles cannot be read, or neither the dedicated nor the `container-default` profile is loaded.
 - For the profile naming convention and how to author/load it, see [Container Isolation](../architecture/container-isolation.md) and the [Container Hardening guide](../guides/container-hardening.md).
 
 ---

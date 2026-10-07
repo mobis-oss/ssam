@@ -269,6 +269,7 @@ service_type = "simple"   # simple | exec | forking | oneshot | dbus | notify | 
 
 [`container.security.mac`](../reference/package-config.ko.md#mac)을 `true`로 설정하면 컨테이너를 *AppArmor* 로 격리합니다.
 프로파일은 호스트 시스템(`ssamd` 외부)에서 준비 및 로드되어 있어야 하며, 패키지의 실행 시점에 패키지별 *AppArmor* 프로파일 **`ssam-prof-<패키지명>`** 이 로드되어 있으면 `ssamd`가 이를 지정하여 실행하고, 로드돼 있지 않으면 `container-default`로 폴백합니다.
+호스트 시스템에서 *AppArmor* 가 활성화돼 있지 않거나, 로드된 프로파일 목록을 읽을 수 없거나, 두 프로파일 중 어느 것도 로드돼 있지 않으면 패키지 실행에 실패합니다.
 
 > ⚠️ `runtime.json`의 `process.apparmorProfile`에 값을 지정하더라도 `ssamd`가 위 프로파일 이름으로 덮어쓰므로 무시됩니다.
 
