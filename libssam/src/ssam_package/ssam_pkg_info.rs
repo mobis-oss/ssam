@@ -6,6 +6,7 @@ pub use super::ssam_pkg_metadata::PackageMetadata;
 use std::fmt;
 
 use super::error::PackageParseError;
+use crate::remocon::PackageLocation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BrokenReason {
@@ -83,6 +84,7 @@ pub enum PackageInfoResult {
     Broken {
         filename: String,
         info: BrokenPackageInfo,
+        package_location: PackageLocation,
     },
     #[strum(to_string = "Package not found: {package_name}")]
     NotFound { package_name: String },
@@ -104,6 +106,7 @@ impl fmt::Display for QuotaInformation {
 pub struct PackageInfo {
     pub package_name: String,
     pub package_path: String,
+    pub package_location: PackageLocation,
     pub package_metadata: PackageMetadata,
     pub package_status: String,
     pub quota_info: QuotaInformation,
@@ -192,6 +195,7 @@ mod tests {
         let package_info = PackageInfo {
             package_name: "test-package".to_string(),
             package_path: "/tmp/test-package.ssam".to_string(),
+            package_location: PackageLocation::Downloaded,
             package_metadata,
             package_status: "Running".to_string(),
             quota_info,
@@ -303,6 +307,7 @@ mod tests {
         let pkg_info = PackageInfo {
             package_name: "test-package".to_string(),
             package_path: "/tmp/test-package.ssam".to_string(),
+            package_location: PackageLocation::Downloaded,
             package_metadata,
             package_status: "Running".to_string(),
             quota_info,
@@ -333,6 +338,7 @@ mod tests {
         let broken_result = PackageInfoResult::Broken {
             filename: "bad_package.ssam".to_string(),
             info: broken_package_info,
+            package_location: PackageLocation::Downloaded,
         };
         let broken_display = format!("{broken_result}");
 

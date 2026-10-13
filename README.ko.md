@@ -193,10 +193,10 @@ $ sudo ~/.cargo/bin/ssamd
 ```console
 $ ssam list
 List of packages
-Package name         Status
-===============================================
-docker-helloworld    Ready
-helloworld           Ready
+Package name         Location      Status
+=============================================================
+docker-helloworld    builtin       Ready
+helloworld           builtin       Ready
 ```
 
 패키지는 *systemd* 서비스로서 실행되므로 `journalctl`을 활용하여 로그를 확인합니다.

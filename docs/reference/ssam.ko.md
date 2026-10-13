@@ -90,17 +90,18 @@ ssam list [--detail]
 
 | 옵션 | 설명 |
 | --- | --- |
-| `--detail` | 각 패키지의 상세 정보 표시(경로, 버전, 설명, 쿼터). |
+| `--detail` | 각 패키지의 상세 정보 표시(경로, 위치, 버전, 설명, 쿼터). |
 
 ```console
 $ ssam list
 List of packages
-Package name         Status
-===============================================
-helloworld           Ready
+Package name         Location      Status
+=============================================================
+helloworld           builtin       Ready
 ```
 
 상태 값은 데몬의 [패키지 상태](../architecture/execution.ko.md#package-state-machine)(`Ready`, `Running`, `SettingUp`, `Broken`, …)에 대응합니다.
+Location은 패키지를 로드한 디렉터리인 `builtin` 또는 `downloaded`입니다.
 
 ### `start`
 

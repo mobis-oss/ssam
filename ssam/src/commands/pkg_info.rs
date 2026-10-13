@@ -10,7 +10,7 @@ use clap::{Arg, ArgMatches, Command};
 use tonic::async_trait;
 
 use crate::client::Client;
-use crate::commands::{CommandHandler, write_package_detail};
+use crate::commands::{CommandHandler, package_location_label, write_package_detail};
 
 /// Represents a package URI that can be either a file path or an installed package name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -69,6 +69,11 @@ impl PkgInfo {
         writeln!(stdout, "Package Information:")?;
         writeln!(stdout, "Info:")?;
         writeln!(stdout, "    Path: {}", info.package_path)?;
+        writeln!(
+            stdout,
+            "    Location: {}",
+            package_location_label(info.package_location())
+        )?;
         if !info.success {
             if let Some(summary) = &info.error_summary {
                 writeln!(stdout, "    Error Summary: {summary}")?;
@@ -380,6 +385,7 @@ mod tests {
             "Info:\n",
             "    Status: Running\n",
             "    Path: /mock/packages/test-pkg.ssam\n",
+            "    Location: downloaded\n",
             "    Version: 1.0.0\n",
             "    Name: test-pkg\n",
             "    Description: Test package\n",
@@ -413,6 +419,7 @@ mod tests {
             "Info:\n",
             "    Status: Broken\n",
             "    Path: /mock/packages/broken-pkg.ssam\n",
+            "    Location: downloaded\n",
             "    Name: broken-pkg\n",
             "    Error Summary: Parse error\n",
             "    Error Details: Failed to parse package.toml\n",
@@ -445,6 +452,7 @@ mod tests {
                 name: "missing-pkg".to_owned(),
                 status: "NotFound".to_owned(),
                 package_path: String::new(),
+                package_location: Default::default(),
                 package_data: None,
                 quota: None,
                 error_summary: Some("Package not found: missing-pkg".to_owned()),
@@ -465,6 +473,7 @@ mod tests {
         assert!(output.contains("Getting package information for: ssam://missing-pkg"));
         assert!(output.contains("Name: missing-pkg"));
         assert!(output.contains("Error Summary: Package not found: missing-pkg"));
+        assert!(!output.contains("Location:"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -502,6 +511,10 @@ mod tests {
         assert!(
             result.contains("/mock/packages/test-pkg.ssam"),
             "should show path from mock response"
+        );
+        assert!(
+            result.contains("Location: local file"),
+            "should show location from mock response"
         );
     }
 
@@ -595,6 +608,7 @@ mod tests {
         assert!(result.contains("Getting package information for: file:///tmp/test.ssam"));
         assert!(result.contains("Status: Running"));
         assert!(result.contains("Path: /mock/packages/test-pkg.ssam"));
+        assert!(result.contains("Location: downloaded"));
         assert_eq!(
             client
                 .captured_list_package_info_names
@@ -628,6 +642,7 @@ mod tests {
         package_infos.push(libssam::InspectLocalPackageResult {
             package_data: None,
             package_path: "/nonexistent/path/package.ssam".to_owned(),
+            package_location: libssam::PackageLocation::LocalFile as i32,
             success: false,
             error_summary: Some("Failed to inspect local package".to_owned()),
             error_details: Some("Package not found".to_owned()),
@@ -658,6 +673,7 @@ mod tests {
                 .contains("Getting package information for: file:///nonexistent/path/package.ssam")
         );
         assert!(output.contains("Path: /nonexistent/path/package.ssam"));
+        assert!(output.contains("Location: local file"));
         assert!(output.contains("Error Summary: Failed to inspect local package"));
         assert!(output.contains("Error Details: Package not found"));
         assert_eq!(

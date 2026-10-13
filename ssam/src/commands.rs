@@ -18,7 +18,7 @@ pub mod timeline_info;
 pub mod wipe_data;
 
 use libssam::PackageActionResult;
-use libssam::PackageInfo;
+use libssam::{PackageInfo, PackageLocation};
 
 use crate::client::Client;
 
@@ -79,6 +79,14 @@ pub(crate) fn write_package_op_results(
     Ok(all_success)
 }
 
+pub(crate) fn package_location_label(package_location: PackageLocation) -> &'static str {
+    match package_location {
+        PackageLocation::Builtin => "builtin",
+        PackageLocation::Downloaded => "downloaded",
+        PackageLocation::LocalFile => "local file",
+    }
+}
+
 /// Render the detail section of a `PackageInfo` to the given writer.
 ///
 /// Shared by `list --detail` and `pkg-info` to avoid duplicating the
@@ -89,6 +97,11 @@ pub(crate) fn write_package_detail(stdout: &mut dyn Write, info: &PackageInfo) -
 
     if info.success {
         writeln!(stdout, "    Path: {}", info.package_path)?;
+        writeln!(
+            stdout,
+            "    Location: {}",
+            package_location_label(info.package_location())
+        )?;
     }
 
     if !info.success || info.package_data.is_none() {

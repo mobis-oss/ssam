@@ -237,9 +237,9 @@ boolean 키에 빈 값이나 `""`을 지정하면 유효하지 않은 TOML이 �
 ```console
 $ ssam list
 List of packages
-Package name         Status
-===============================================
-helloworld           Ready
+Package name         Location      Status
+=============================================================
+helloworld           builtin       Ready
 ```
 
 패키지 컨테이너는 *systemd* 서비스로 실행되므로, 그 stdout/stderr와 생명주기는 패키지 unit 아래 `journalctl`에 나타납니다.

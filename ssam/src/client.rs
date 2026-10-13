@@ -221,7 +221,9 @@ pub struct MockClient {
 impl MockClient {
     pub fn new_success() -> Self {
         use libssam::remocon::QuotaInformation;
-        use libssam::{PackageActionResult, PackageData, PackageInfo, PackageStatusEntry};
+        use libssam::{
+            PackageActionResult, PackageData, PackageInfo, PackageLocation, PackageStatusEntry,
+        };
 
         let package_metadata = Self::make_test_metadata();
 
@@ -229,6 +231,7 @@ impl MockClient {
             entries: vec![PackageStatusEntry {
                 package_name: "test-pkg".to_owned(),
                 status: "running".to_owned(),
+                package_location: PackageLocation::Downloaded as i32,
             }],
         };
 
@@ -237,6 +240,7 @@ impl MockClient {
             name: "test-pkg".to_owned(),
             status: "Running".to_owned(),
             package_path: "/mock/packages/test-pkg.ssam".to_owned(),
+            package_location: PackageLocation::Downloaded as i32,
             package_data: Some((&package_metadata).into()),
             quota: Some(QuotaInformation {
                 enabled: true,
@@ -253,6 +257,7 @@ impl MockClient {
                     name: "broken-pkg".to_owned(),
                     status: "Broken".to_owned(),
                     package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
+                    package_location: PackageLocation::Downloaded as i32,
                     package_data: None,
                     quota: None,
                     error_summary: Some("Parse error".to_owned()),
@@ -263,6 +268,7 @@ impl MockClient {
 
         let inspect_local_response = InspectLocalPackageResult {
             package_path: "/mock/packages/test-pkg.ssam".to_owned(),
+            package_location: PackageLocation::LocalFile as i32,
             package_data: Some((&package_metadata).into()),
             success: true,
             error_summary: None,
@@ -419,13 +425,14 @@ impl MockClient {
     }
 
     pub fn with_broken_pkg_info(mut self) -> Self {
-        use libssam::PackageInfo;
+        use libssam::{PackageInfo, PackageLocation};
 
         let package_info_data = PackageInfo {
             success: true,
             name: "broken-pkg".to_owned(),
             status: "Broken".to_owned(),
             package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
+            package_location: PackageLocation::Downloaded as i32,
             package_data: None,
             quota: None,
             error_summary: Some("Parse error".to_owned()),
@@ -556,7 +563,7 @@ mod grpc_fake_server {
     use libssam::remocon::remocon_server::{Remocon, RemoconServer};
     use libssam::remocon::*;
     use libssam::remocon::{TimelineEvent, TimelineEventKind};
-    use libssam::{PackageActionResult, PackageStatusEntry};
+    use libssam::{PackageActionResult, PackageLocation, PackageStatusEntry};
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -593,6 +600,7 @@ mod grpc_fake_server {
                 entries: vec![PackageStatusEntry {
                     package_name: "test-pkg".to_owned(),
                     status: "running".to_owned(),
+                    package_location: PackageLocation::Downloaded as i32,
                 }],
             }))
         }
@@ -799,6 +807,7 @@ mod grpc_fake_server {
                 name: "test-pkg".to_owned(),
                 status: "Running".to_owned(),
                 package_path: "/mock/packages/test-pkg.ssam".to_owned(),
+                package_location: PackageLocation::Downloaded as i32,
                 package_data: Some((&package_metadata).into()),
                 quota: Some(QuotaInformation {
                     enabled: true,
@@ -812,6 +821,7 @@ mod grpc_fake_server {
                 name: "broken-pkg".to_owned(),
                 status: "Broken".to_owned(),
                 package_path: "/mock/packages/broken-pkg.ssam".to_owned(),
+                package_location: PackageLocation::Downloaded as i32,
                 package_data: None,
                 quota: None,
                 error_summary: Some("Parse error".to_owned()),
@@ -883,6 +893,7 @@ mod grpc_fake_server {
 
             let inspect_response = InspectLocalPackageResult {
                 package_path: "/mock/packages/test-pkg.ssam".to_owned(),
+                package_location: PackageLocation::LocalFile as i32,
                 package_data: Some((&package_metadata).into()),
                 success: true,
                 error_summary: None,
@@ -947,6 +958,7 @@ mod grpc_fake_server {
 mod grpc_tests {
     use super::*;
     use grpc_fake_server::{spawn_fake_server, spawn_fake_server_with_observer};
+    use libssam::PackageLocation;
     use libssam::remocon::remocon_client::RemoconClient;
     use tonic::transport::Endpoint;
 
@@ -1124,6 +1136,10 @@ mod grpc_tests {
         assert_eq!(
             response.packages[0].package_path,
             "/mock/packages/test-pkg.ssam"
+        );
+        assert_eq!(
+            response.packages[0].package_location(),
+            PackageLocation::Downloaded
         );
 
         shutdown_tx.send(()).ok();

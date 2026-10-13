@@ -13,6 +13,7 @@ use crate::package_manager::store::{PackageStore, PackageStoreBackend};
 use crate::package_volume::{PackageVolumeManagerActor, PackageVolumeMetadata};
 use crate::utils::actor_supervisor::{ExitOnFailure, SupervisedActor, spawn_with};
 use anyhow::Context;
+use libssam::PackageLocation;
 use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{BrokenPackageInfo, BrokenReason, PackageInfoResult};
 use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
@@ -49,10 +50,17 @@ pub(crate) fn resolve_builtin_dir(builtin_dir_str: &str) -> anyhow::Result<Optio
     Ok(Some(builtin_dir))
 }
 
+#[derive(Debug, PartialEq)]
+pub struct PackageListEntry {
+    pub package_name: String,
+    pub status: PackageStatus,
+    pub package_location: PackageLocation,
+}
+
 #[async_trait]
 pub(crate) trait PackageManagerService: Send + Sync {
     async fn get_package_names(&self) -> Vec<String>;
-    async fn get_packages_status(&self) -> anyhow::Result<Vec<(String, PackageStatus)>>;
+    async fn get_packages_status(&self) -> anyhow::Result<Vec<PackageListEntry>>;
     async fn install_package(
         &self,
         path: PathBuf,
@@ -87,7 +95,7 @@ impl PackageManagerService for PackageManager {
             .expect("PackageManagerActor crashed; daemon cannot function without it")
     }
 
-    async fn get_packages_status(&self) -> anyhow::Result<Vec<(String, PackageStatus)>> {
+    async fn get_packages_status(&self) -> anyhow::Result<Vec<PackageListEntry>> {
         self.actor_ref
             .ask(GetPackagesStatus)
             .await
@@ -474,11 +482,7 @@ impl PackageManagerActor {
                     .insert_broken(
                         package_name,
                         BrokenPackageInfo {
-                            package_path: path
-                                .canonicalize()
-                                .unwrap_or_else(|_| path.clone())
-                                .display()
-                                .to_string(),
+                            package_path: path.display().to_string(),
                             broken_info: BrokenReason::from(&e),
                         },
                     )
@@ -649,6 +653,14 @@ impl PackageManagerActor {
             .is_some_and(|builtin_dir| path.parent() == Some(builtin_dir))
     }
 
+    fn package_location(&self, path: &Path) -> PackageLocation {
+        if self.is_builtin_package(path) {
+            PackageLocation::Builtin
+        } else {
+            PackageLocation::Downloaded
+        }
+    }
+
     async fn remove_package(&self, package_name: &str, purge: bool) -> anyhow::Result<()> {
         log::debug!("Removing package: {package_name}");
         if let Some(package) = self.package_store.get(package_name).await {
@@ -736,7 +748,7 @@ impl PackageManagerActor {
             .with_context(|| format!("Failed to teardown package {package_name}"))
     }
 
-    async fn get_package_statuses(&self) -> anyhow::Result<Vec<(String, PackageStatus)>> {
+    async fn get_package_statuses(&self) -> anyhow::Result<Vec<PackageListEntry>> {
         log::trace!("PackageManagerActor::get_package_statuses");
 
         let mut status_results = Vec::new();
@@ -747,14 +759,21 @@ impl PackageManagerActor {
                 .get_status()
                 .await
                 .with_context(|| format!("Failed to get status of package {package_name}"))?;
-            status_results.push((package_name, status));
+            status_results.push(PackageListEntry {
+                package_name,
+                status,
+                package_location: self.package_location(package.get_package_file_path()),
+            });
         }
 
         let broken_pkgs = self.package_store.get_broken_all().await;
         for (filename, info) in broken_pkgs {
-            let status = PackageStatus::Broken(info.broken_info);
             // For broken packages, we don't have a package object, so we use an empty string for the name
-            status_results.push((filename, status));
+            status_results.push(PackageListEntry {
+                package_name: filename,
+                status: PackageStatus::Broken(info.broken_info),
+                package_location: self.package_location(Path::new(&info.package_path)),
+            });
         }
 
         Ok(status_results)
@@ -886,7 +905,7 @@ impl PackageManagerActor {
         &mut self,
         _msg: GetPackagesStatus,
         _actor_ref: &ActorRef<Self>,
-    ) -> anyhow::Result<Vec<(String, PackageStatus)>> {
+    ) -> anyhow::Result<Vec<PackageListEntry>> {
         log::trace!("PackageManagerActor::get_package_statuses");
         self.get_package_statuses().await
     }
@@ -916,7 +935,7 @@ impl PackageManagerActor {
 
         if let Some(package) = self.get_package(&package_name).await {
             package
-                .get_package_info()
+                .get_package_info(self.package_location(package.get_package_file_path()))
                 .await
                 .with_context(|| format!("Failed to get package info of package: {package_name}"))
                 .map(PackageInfoResult::Normal)
@@ -926,6 +945,7 @@ impl PackageManagerActor {
                 .await
                 .map(|info| PackageInfoResult::Broken {
                     filename: package_name.clone(),
+                    package_location: self.package_location(Path::new(&info.package_path)),
                     info,
                 })
                 .map_or_else(|| Ok(PackageInfoResult::NotFound { package_name }), Ok)
@@ -945,7 +965,7 @@ impl PackageManagerActor {
 
         for (name, package) in packages {
             let info = package
-                .get_package_info()
+                .get_package_info(self.package_location(package.get_package_file_path()))
                 .await
                 .with_context(|| format!("Failed to get package info of package: {name}"))?;
             results.push(PackageInfoResult::Normal(info));
@@ -953,7 +973,11 @@ impl PackageManagerActor {
 
         let broken_pkgs = self.package_store.get_broken_all().await;
         for (filename, info) in broken_pkgs {
-            results.push(PackageInfoResult::Broken { filename, info });
+            results.push(PackageInfoResult::Broken {
+                filename,
+                package_location: self.package_location(Path::new(&info.package_path)),
+                info,
+            });
         }
 
         Ok(results)
@@ -1023,6 +1047,7 @@ impl PackageManagerActor {
 mod tests {
     use super::*;
     use pkg_file::PackageFileBackend;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
@@ -1341,6 +1366,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_package_statuses_report_broken_package_location() {
+        let (_tracker, ops) = tracker_and_ops();
+        let (pm, _tmp) = make_pm(ops);
+
+        for (name, path) in [
+            ("broken-builtin", "/nonexistent/builtin/broken-builtin.ssam"),
+            ("broken-dl", "/tmp/downloaded/broken-dl.ssam"),
+        ] {
+            pm.package_store
+                .insert_broken(
+                    name.to_string(),
+                    BrokenPackageInfo {
+                        package_path: path.to_string(),
+                        broken_info: BrokenReason::new("parse failure", "corrupted package"),
+                    },
+                )
+                .await;
+        }
+
+        let locations: HashMap<String, PackageLocation> = pm
+            .get_package_statuses()
+            .await
+            .expect("get package statuses")
+            .into_iter()
+            .map(|entry| (entry.package_name, entry.package_location))
+            .collect();
+        assert_eq!(
+            locations,
+            HashMap::from([
+                ("broken-builtin".to_string(), PackageLocation::Builtin),
+                ("broken-dl".to_string(), PackageLocation::Downloaded),
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn test_remove_broken_builtin_package_is_rejected() {
         let (_tracker, ops) = tracker_and_ops();
         let (pm, _tmp) = make_pm(ops);
@@ -1485,7 +1546,7 @@ mod tests {
             let (pm, _b, _d) = setup_package_manager().await;
             let result = pm.get_packages_status().await;
             assert!(result.is_ok());
-            assert_eq!(result.unwrap(), [] as [(String, PackageStatus); 0]);
+            assert_eq!(result.unwrap(), [] as [PackageListEntry; 0]);
         }
 
         #[tokio::test]

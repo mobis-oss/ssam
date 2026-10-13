@@ -236,9 +236,9 @@ Check that the daemon started and packages are recognized:
 ```console
 $ ssam list
 List of packages
-Package name         Status
-===============================================
-helloworld           Ready
+Package name         Location      Status
+=============================================================
+helloworld           builtin       Ready
 ```
 
 Package containers run as *systemd* services, so their stdout/stderr and lifecycle appear in `journalctl` under the package's unit.

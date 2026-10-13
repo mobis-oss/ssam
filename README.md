@@ -191,10 +191,10 @@ With the daemon running, check the package status via the `ssam` CLI.
 ```console
 $ ssam list
 List of packages
-Package name         Status
-===============================================
-docker-helloworld    Ready
-helloworld           Ready
+Package name         Location      Status
+=============================================================
+docker-helloworld    builtin       Ready
+helloworld           builtin       Ready
 ```
 
 Packages run as *systemd* services, so check their logs with `journalctl`.

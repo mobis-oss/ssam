@@ -45,6 +45,7 @@ pub mod remocon {
                 package_data: None,
                 quota: None,
                 package_path: String::new(),
+                package_location: Default::default(),
                 error_summary: None,
                 error_details: None,
             };
@@ -59,12 +60,18 @@ pub mod remocon {
                         limit: info.quota_info.limit,
                     }),
                     package_path: info.package_path,
+                    package_location: info.package_location as i32,
                     ..base
                 },
-                PackageInfoResult::Broken { filename, info } => Self {
+                PackageInfoResult::Broken {
+                    filename,
+                    info,
+                    package_location,
+                } => Self {
                     name: filename,
                     status: "Broken".to_owned(),
                     package_path: info.package_path,
+                    package_location: package_location as i32,
                     error_summary: Some(info.broken_info.summary),
                     error_details: Some(info.broken_info.details),
                     ..base
@@ -73,7 +80,6 @@ pub mod remocon {
                     success: false,
                     name: package_name.clone(),
                     status: "NotFound".to_owned(),
-                    package_path: String::new(),
                     error_summary: Some(format!("Package not found: {package_name}")),
                     ..base
                 },
@@ -85,8 +91,9 @@ pub mod remocon {
 pub use remocon::{
     InspectLocalPackageResult, InstallPackageResponse, ListPackageInfoFromFilesRequest,
     ListPackageInfoRequest, ListPackageInfoResponse, ListPackagesResponse, PackageActionResult,
-    PackageData, PackageInfo, PackageStatusEntry, QuotaInformation, StartPackageResponse,
-    StopPackageResponse, TimelineData, TimelineEvent, TimelineEventKind, WipePackageDataResponse,
+    PackageData, PackageInfo, PackageLocation, PackageStatusEntry, QuotaInformation,
+    StartPackageResponse, StopPackageResponse, TimelineData, TimelineEvent, TimelineEventKind,
+    WipePackageDataResponse,
 };
 pub use ssam_package::PackageParseError;
 
@@ -144,6 +151,7 @@ mod remocon_tests {
         let response = PackageInfo::from(PackageInfoResult::Normal(PackageStateInfo {
             package_name: "test-pkg".to_owned(),
             package_path: "/packages/test-pkg.ssam".to_owned(),
+            package_location: PackageLocation::Builtin,
             package_metadata: test_metadata(),
             package_status: "Running".to_owned(),
             quota_info: QuotaInformation {
@@ -156,6 +164,7 @@ mod remocon_tests {
         assert_eq!(response.name, "test-pkg");
         assert_eq!(response.status, "Running");
         assert_eq!(response.package_path, "/packages/test-pkg.ssam");
+        assert_eq!(response.package_location(), PackageLocation::Builtin);
         let package_data = response.package_data.expect("normal package data");
         assert_eq!(package_data.package_name, "test-pkg");
         assert_eq!(package_data.version, "1.2.3");
@@ -190,12 +199,14 @@ mod remocon_tests {
                 package_path: "/packages/broken-pkg.ssam".to_owned(),
                 broken_info: BrokenReason::new("Parse error", "Invalid package metadata"),
             },
+            package_location: PackageLocation::Downloaded,
         });
 
         assert!(response.success);
         assert_eq!(response.name, "broken-pkg");
         assert_eq!(response.status, "Broken");
         assert_eq!(response.package_path, "/packages/broken-pkg.ssam");
+        assert_eq!(response.package_location(), PackageLocation::Downloaded);
         assert!(response.package_data.is_none());
         assert_eq!(response.error_summary.as_deref(), Some("Parse error"));
         assert_eq!(

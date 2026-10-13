@@ -10,7 +10,7 @@ package ssamd.remocon;
 
 enum ApiVersion {
     UNSPECIFIED = 0;
-    CURRENT = 1;
+    CURRENT = 2;
 }
 
 message StartPackageRequest {
@@ -56,9 +56,16 @@ message QuotaInformation {
     uint64 limit = 2;
 }
 
+enum PackageLocation {
+    PACKAGE_LOCATION_BUILTIN = 0;
+    PACKAGE_LOCATION_DOWNLOADED = 1;
+    PACKAGE_LOCATION_LOCAL_FILE = 2;
+}
+
 message PackageStatusEntry {
     string package_name = 1;
     string status = 2;
+    PackageLocation package_location = 3;
 }
 
 message PackageActionResult {
@@ -76,6 +83,7 @@ message PackageInfo {
     QuotaInformation quota = 6;
     optional string error_summary = 7;
     optional string error_details = 8;
+    PackageLocation package_location = 9;
 }
 
 message InstallPackageResponse {
@@ -88,6 +96,7 @@ message InspectLocalPackageResult {
     bool success = 3;
     optional string error_summary = 4;
     optional string error_details = 5;
+    PackageLocation package_location = 6;
 }
 
 enum TimelineEventKind {

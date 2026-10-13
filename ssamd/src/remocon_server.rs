@@ -14,7 +14,7 @@ use crate::package::PackageStatus as InternalPackageStatus;
 use crate::utils::ellipsis;
 use anyhow::Context as _;
 use libssam::{
-    PackageActionResult, PackageInfo, PackageStatusEntry,
+    PackageActionResult, PackageInfo, PackageLocation, PackageStatusEntry,
     remocon::{
         API_VERSION_METADATA_KEY, InspectLocalPackageResult, InstallPackageRequest,
         InstallPackageResponse, ListPackageInfoFromFilesRequest, ListPackageInfoFromFilesResponse,
@@ -110,6 +110,7 @@ fn package_info_failure(name: String, error: &anyhow::Error) -> PackageInfo {
         package_data: None,
         quota: None,
         package_path: String::new(),
+        package_location: Default::default(),
         error_summary: Some(error.to_string()),
         error_details: Some(format!("{error:?}")),
     }
@@ -119,6 +120,7 @@ fn package_info_from_file_failure(path: &Path, error: &anyhow::Error) -> Inspect
     InspectLocalPackageResult {
         package_data: None,
         package_path: path.to_string_lossy().into_owned(),
+        package_location: PackageLocation::LocalFile as i32,
         success: false,
         error_summary: Some(error.to_string()),
         error_details: Some(format!("{error:?}")),
@@ -278,17 +280,18 @@ impl Remocon for RemoconImpl {
             Ok(packages) => {
                 let entries: Vec<PackageStatusEntry> = packages
                     .into_iter()
-                    .map(|(package_name, status)| {
+                    .map(|entry| {
                         // Truncate long broken reasons for display in list view
-                        let status_str = match &status {
+                        let status_str = match &entry.status {
                             InternalPackageStatus::Broken(info) => {
                                 format!("Broken({})", ellipsis(&format!("{info}")))
                             }
-                            _ => status.to_string(),
+                            _ => entry.status.to_string(),
                         };
                         PackageStatusEntry {
-                            package_name,
+                            package_name: entry.package_name,
                             status: status_str,
+                            package_location: entry.package_location as i32,
                         }
                     })
                     .collect();
@@ -420,6 +423,7 @@ impl Remocon for RemoconImpl {
                         InspectLocalPackageResult {
                             package_data: Some(metadata.into()),
                             package_path: package_path.to_string_lossy().into_owned(),
+                            package_location: PackageLocation::LocalFile as i32,
                             success: true,
                             error_summary: None,
                             error_details: None,
@@ -444,10 +448,9 @@ impl Remocon for RemoconImpl {
 pub(crate) mod tests {
     use super::*;
     use crate::package::PackageStatus as PackageStatusEnum;
-    use crate::package_manager::PackageManagerService;
+    use crate::package_manager::{PackageListEntry, PackageManagerService};
 
     use async_trait::async_trait;
-    use libssam::PackageInfo;
     use libssam::remocon::ApiVersion;
     use libssam::ssam_package::PackageFsVerityInfo;
     use libssam::ssam_package::ssam_pkg_info::{
@@ -456,6 +459,7 @@ pub(crate) mod tests {
     };
     use libssam::ssam_package::ssam_pkg_metadata::PackageMetadata;
     use libssam::superblock::FsType;
+    use libssam::{PackageInfo, PackageLocation};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::Barrier;
@@ -467,6 +471,7 @@ pub(crate) mod tests {
     #[derive(Debug, Clone)]
     pub(crate) struct MockPackageManagerService {
         pub packages: Arc<Mutex<HashMap<String, PackageStatusEnum>>>,
+        pub builtin_packages: Arc<Mutex<HashSet<String>>>,
         pub package_infos: Arc<Mutex<HashMap<String, PackageStateInfo>>>,
         pub install_results: InstallResultMap,
         pub remove_results: Arc<Mutex<HashMap<String, Result<(), anyhow::Error>>>>,
@@ -483,6 +488,7 @@ pub(crate) mod tests {
         fn default() -> Self {
             Self {
                 packages: Arc::new(Mutex::new(HashMap::new())),
+                builtin_packages: Arc::new(Mutex::new(HashSet::new())),
                 package_infos: Arc::new(Mutex::new(HashMap::new())),
                 install_results: Arc::new(Mutex::new(HashMap::new())),
                 remove_results: Arc::new(Mutex::new(HashMap::new())),
@@ -504,6 +510,19 @@ pub(crate) mod tests {
 
         pub fn add_package(&self, name: String, status: PackageStatusEnum) {
             self.packages.lock().unwrap().insert(name, status);
+        }
+
+        pub fn add_builtin_package(&self, name: String, status: PackageStatusEnum) {
+            self.builtin_packages.lock().unwrap().insert(name.clone());
+            self.add_package(name, status);
+        }
+
+        fn package_location(&self, name: &str) -> PackageLocation {
+            if self.builtin_packages.lock().unwrap().contains(name) {
+                PackageLocation::Builtin
+            } else {
+                PackageLocation::Downloaded
+            }
         }
 
         pub fn set_install_result(
@@ -613,13 +632,17 @@ pub(crate) mod tests {
             self.packages.lock().unwrap().keys().cloned().collect()
         }
 
-        async fn get_packages_status(&self) -> anyhow::Result<Vec<(String, PackageStatusEnum)>> {
+        async fn get_packages_status(&self) -> anyhow::Result<Vec<PackageListEntry>> {
             Ok(self
                 .packages
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(name, status)| (name.clone(), status.clone()))
+                .map(|(name, status)| PackageListEntry {
+                    package_name: name.clone(),
+                    status: status.clone(),
+                    package_location: self.package_location(name),
+                })
                 .collect())
         }
 
@@ -792,6 +815,7 @@ pub(crate) mod tests {
                             package_path: format!("/mock/packages/{package_name}.ssam"),
                             broken_info,
                         },
+                        package_location: self.package_location(package_name),
                     });
                 }
 
@@ -805,6 +829,7 @@ pub(crate) mod tests {
                     package_metadata,
                     package_status: status.to_string(),
                     package_path: format!("/mock/packages/{package_name}.ssam"),
+                    package_location: self.package_location(package_name),
                     package_name: package_name.to_owned(),
                     quota_info,
                 }))
@@ -843,6 +868,7 @@ pub(crate) mod tests {
                             package_path: format!("/mock/packages/{package_name}.ssam"),
                             broken_info,
                         },
+                        package_location: self.package_location(&package_name),
                     });
                     continue;
                 }
@@ -857,6 +883,7 @@ pub(crate) mod tests {
                     package_metadata,
                     package_status: status.to_string(),
                     package_path: format!("/mock/packages/{package_name}.ssam"),
+                    package_location: self.package_location(&package_name),
                     package_name,
                     quota_info,
                 }));
@@ -1452,6 +1479,7 @@ pub(crate) mod tests {
         let package = &packages[0];
         assert!(!package.success);
         assert_eq!(package.package_path, "/nonexistent/path/package.ssam");
+        assert_eq!(package.package_location(), PackageLocation::LocalFile);
         assert!(package.package_data.is_none());
         assert!(
             package
@@ -1488,6 +1516,7 @@ pub(crate) mod tests {
             package.package_path,
             tmp.path().to_str().unwrap().to_owned()
         );
+        assert_eq!(package.package_location(), PackageLocation::LocalFile);
         assert!(
             package
                 .error_summary
@@ -1580,6 +1609,7 @@ pub(crate) mod tests {
         let package = &packages[0];
         assert!(!package.success);
         assert_eq!(package.package_path, "relative/path/package.ssam");
+        assert_eq!(package.package_location(), PackageLocation::LocalFile);
         assert!(
             package
                 .error_summary
@@ -1707,6 +1737,7 @@ pub(crate) mod tests {
             package_metadata: metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/custom-pkg.ssam".to_string(),
+            package_location: PackageLocation::Downloaded,
             package_name: "custom-pkg".to_string(),
             quota_info: QuotaInformation {
                 enabled: true,
@@ -1726,6 +1757,7 @@ pub(crate) mod tests {
         let pkg = &packages[0];
         assert_eq!(pkg.name, "custom-pkg");
         assert_eq!(pkg.package_path, "/mock/packages/custom-pkg.ssam");
+        assert_eq!(pkg.package_location(), PackageLocation::Downloaded);
         assert_eq!(pkg.quota.as_ref().map(|q| q.limit), Some(512));
     }
 
@@ -1807,6 +1839,32 @@ pub(crate) mod tests {
         assert!(status_map.contains_key("running-pkg"));
         assert!(status_map.contains_key("ready-pkg"));
         assert!(status_map.contains_key("broken-pkg"));
+    }
+
+    #[tokio::test]
+    async fn test_list_packages_reports_package_location() {
+        let (remocon, mock_manager) = create_test_remocon();
+
+        mock_manager.add_builtin_package("builtin-pkg".to_string(), PackageStatusEnum::Ready);
+        mock_manager.add_package("downloaded-pkg".to_string(), PackageStatusEnum::Ready);
+
+        let entries = remocon
+            .list_packages(Request::new(()))
+            .await
+            .expect("list packages")
+            .into_inner()
+            .entries;
+        let locations: HashMap<String, PackageLocation> = entries
+            .iter()
+            .map(|entry| (entry.package_name.clone(), entry.package_location()))
+            .collect();
+        assert_eq!(
+            locations,
+            HashMap::from([
+                ("builtin-pkg".to_string(), PackageLocation::Builtin),
+                ("downloaded-pkg".to_string(), PackageLocation::Downloaded),
+            ])
+        );
     }
 
     #[tokio::test]
@@ -1976,6 +2034,7 @@ pub(crate) mod tests {
             package_metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/test-package.ssam".to_string(),
+            package_location: PackageLocation::Downloaded,
             package_name: "test-package".to_string(),
             quota_info: QuotaInformation {
                 enabled: false,
@@ -2001,6 +2060,10 @@ pub(crate) mod tests {
         assert_eq!(
             package_info_response.package_path,
             "/mock/packages/test-package.ssam"
+        );
+        assert_eq!(
+            package_info_response.package_location(),
+            PackageLocation::Downloaded
         );
     }
 
@@ -2028,6 +2091,10 @@ pub(crate) mod tests {
             package_info_response.package_path,
             "/mock/packages/default-package.ssam"
         );
+        assert_eq!(
+            package_info_response.package_location(),
+            PackageLocation::Downloaded
+        );
     }
 
     #[tokio::test]
@@ -2054,6 +2121,10 @@ pub(crate) mod tests {
         assert_eq!(
             package_info_response.package_path,
             "/mock/packages/running-package.ssam"
+        );
+        assert_eq!(
+            package_info_response.package_location(),
+            PackageLocation::Downloaded
         );
         assert!(package_info_response.status.contains("Running"));
         assert!(
@@ -2090,6 +2161,10 @@ pub(crate) mod tests {
         assert_eq!(
             package_info_response.package_path,
             "/mock/packages/broken-package.ssam"
+        );
+        assert_eq!(
+            package_info_response.package_location(),
+            PackageLocation::Downloaded
         );
         assert!(package_info_response.error_summary.is_some());
         assert!(package_info_response.error_details.is_some());
@@ -2187,6 +2262,7 @@ pub(crate) mod tests {
             package_metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/package1.ssam".to_string(),
+            package_location: PackageLocation::Downloaded,
             package_name: "package1".to_string(),
             quota_info: QuotaInformation {
                 enabled: true,
@@ -2208,6 +2284,10 @@ pub(crate) mod tests {
         assert!(package_info1.success);
         assert_eq!(package_info1.name, "package1");
         assert_eq!(package_info1.package_path, "/mock/packages/package1.ssam");
+        assert_eq!(
+            package_info1.package_location(),
+            PackageLocation::Downloaded
+        );
         assert_eq!(package_info1.quota.as_ref().map(|q| q.limit), Some(512));
 
         let missing_package = &packages[1];
@@ -2225,6 +2305,10 @@ pub(crate) mod tests {
         assert!(package_info2.success);
         assert_eq!(package_info2.name, "package2");
         assert_eq!(package_info2.package_path, "/mock/packages/package2.ssam");
+        assert_eq!(
+            package_info2.package_location(),
+            PackageLocation::Downloaded
+        );
         assert!(package_info2.status.contains("Running"));
         assert_eq!(package_info2.quota.as_ref().map(|q| q.limit), Some(1024));
     }
@@ -2273,6 +2357,7 @@ pub(crate) mod tests {
             package_metadata,
             package_status: PackageStatusEnum::Ready.to_string(),
             package_path: "/mock/packages/complex-package.ssam".to_string(),
+            package_location: PackageLocation::Downloaded,
             package_name: "complex-package".to_string(),
             quota_info: QuotaInformation {
                 enabled: true,
@@ -2298,6 +2383,10 @@ pub(crate) mod tests {
         assert_eq!(
             package_info_response.package_path,
             "/mock/packages/complex-package.ssam"
+        );
+        assert_eq!(
+            package_info_response.package_location(),
+            PackageLocation::Downloaded
         );
 
         assert!(

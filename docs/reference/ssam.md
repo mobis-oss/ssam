@@ -89,17 +89,18 @@ ssam list [--detail]
 
 | Option | Description |
 | --- | --- |
-| `--detail` | Show detailed information for each package (path, version, description, quota). |
+| `--detail` | Show detailed information for each package (path, location, version, description, quota). |
 
 ```console
 $ ssam list
 List of packages
-Package name         Status
-===============================================
-helloworld           Ready
+Package name         Location      Status
+=============================================================
+helloworld           builtin       Ready
 ```
 
 Status values correspond to the daemon's [package states](../architecture/execution.md#package-state-machine) (`Ready`, `Running`, `SettingUp`, `Broken`, …).
+Location is the directory the package was loaded from, `builtin` or `downloaded`.
 
 ### `start`
 

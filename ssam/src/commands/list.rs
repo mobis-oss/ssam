@@ -8,8 +8,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use tonic::async_trait;
 
 use crate::client::Client;
-use crate::commands::{CommandHandler, write_package_detail};
-use libssam::{PackageInfo, PackageStatusEntry};
+use crate::commands::{CommandHandler, package_location_label, write_package_detail};
+use libssam::{PackageInfo, PackageLocation, PackageStatusEntry};
 
 pub static COMMAND: List = List;
 
@@ -43,6 +43,7 @@ fn write_detail_list(stdout: &mut dyn Write, packages: &[PackageInfo]) -> io::Re
 
 fn write_table_list(stdout: &mut dyn Write, packages: &[PackageStatusEntry]) -> io::Result<()> {
     const HEADER_NAME: &str = "Package name";
+    const HEADER_LOCATION: &str = "Location";
     const HEADER_STATUS: &str = "Status";
     const COLUMN_GAP: usize = 4;
 
@@ -58,14 +59,25 @@ fn write_table_list(stdout: &mut dyn Write, packages: &[PackageStatusEntry]) -> 
         .max(HEADER_NAME.len());
 
     let name_col_width = max_name_width + COLUMN_GAP;
-    let bar_width = (name_col_width + HEADER_STATUS.len() + 20).min(get_terminal_width());
+    let location_col_width = package_location_label(PackageLocation::Downloaded).len() + COLUMN_GAP;
+    let bar_width =
+        (name_col_width + location_col_width + HEADER_STATUS.len() + 20).min(get_terminal_width());
 
     writeln!(stdout)?;
     writeln!(stdout, "List of packages")?;
-    writeln!(stdout, "{HEADER_NAME:<name_col_width$}{HEADER_STATUS}")?;
+    writeln!(
+        stdout,
+        "{HEADER_NAME:<name_col_width$}{HEADER_LOCATION:<location_col_width$}{HEADER_STATUS}"
+    )?;
     writeln!(stdout, "{:=<bar_width$}", "")?;
     for p in packages {
-        writeln!(stdout, "{:<name_col_width$}{}", p.package_name, p.status)?;
+        writeln!(
+            stdout,
+            "{:<name_col_width$}{:<location_col_width$}{}",
+            p.package_name,
+            package_location_label(p.package_location()),
+            p.status
+        )?;
     }
     Ok(())
 }
@@ -156,10 +168,12 @@ mod tests {
             libssam::PackageStatusEntry {
                 package_name: "test-pkg".to_owned(),
                 status: "running".to_owned(),
+                package_location: PackageLocation::Builtin as i32,
             },
             libssam::PackageStatusEntry {
                 package_name: "extra-pkg".to_owned(),
                 status: "stopped".to_owned(),
+                package_location: PackageLocation::Downloaded as i32,
             },
         ];
         let mut client = MockClient {
@@ -176,8 +190,17 @@ mod tests {
             .unwrap();
         let result = String::from_utf8(stdout).unwrap();
 
-        assert!(result.contains("test-pkg"));
-        assert!(result.contains("extra-pkg"));
+        assert!(result.contains("Location"));
+        assert!(
+            result
+                .lines()
+                .any(|line| line.starts_with("test-pkg") && line.contains("builtin"))
+        );
+        assert!(
+            result
+                .lines()
+                .any(|line| line.starts_with("extra-pkg") && line.contains("downloaded"))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

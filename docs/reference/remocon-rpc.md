@@ -128,7 +128,9 @@ Clear stored data for one or more packages.
 
 ### `ListPackages`
 
-List installed packages and their status, including `Broken` entries.
+List installed packages with their status and package location, including `Broken` entries.
+When a downloaded package overrides a builtin package of the same name, only the downloaded entry is listed.
+A downloaded package that fails parsing or signature verification is listed under its file name and does not override the builtin package.
 
 - **Request:** `google.protobuf.Empty`
 - **Response:** [`ListPackagesResponse`](#response-messages)
@@ -235,6 +237,15 @@ The response messages use the following protobuf messages.
 | --- | --- | --- |
 | `package_name` | `string` | Installed package name |
 | `status` | `string` | Package state (`Ready`, `Running`, `Broken`, …) — corresponds to the daemon's [package states](../architecture/execution.md#package-state-machine) |
+| `package_location` | [`PackageLocation`](#packagelocation) | Package location |
+
+### `PackageLocation`
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| `PACKAGE_LOCATION_BUILTIN` | `0` | Package loaded from `package.dir.builtin` |
+| `PACKAGE_LOCATION_DOWNLOADED` | `1` | Package loaded from `package.dir.downloaded` |
+| `PACKAGE_LOCATION_LOCAL_FILE` | `2` | SSAM package file inspected by `ListPackageInfoFromFiles` |
 
 ### `PackageData`
 
@@ -258,6 +269,7 @@ Returned for each requested package by `ListPackageInfo`.
 | `name` | `string` | always | Package name |
 | `status` | `string` | always | Package status |
 | `package_path` | `string` | always | On-device package path; empty when unavailable |
+| `package_location` | [`PackageLocation`](#packagelocation) | always | Package location; meaningful only when `success` is `true` |
 | `package_data` | `PackageData` | optional | Package data for a normal package |
 | `quota` | `QuotaInformation` | optional | Data-quota limits for a normal package |
 | `error_summary` | `string` | optional | Display-level lookup or package-load error |
@@ -286,6 +298,7 @@ Per-package outcome for the bulk operations (`StartPackage`, `StopPackage`, `Wip
 | --- | --- | --- |
 | `package_data` | `PackageData` | Package data read from the SSAM package file |
 | `package_path` | `string` | Path that was queried |
+| `package_location` | [`PackageLocation`](#packagelocation) | Always `PACKAGE_LOCATION_LOCAL_FILE` |
 | `success` | `bool` | Whether package inspection succeeded |
 | `error_summary` | `string` | Display-level inspection error |
 | `error_details` | `string` | Optional detailed error information |
@@ -335,6 +348,7 @@ packages {
   name: "navi"
   status: "Running"
   package_path: "/var/lib/ssam/packages/navi"
+  package_location: PACKAGE_LOCATION_DOWNLOADED
   package_data {
     package_name: "navi"
     version: "1.4.0"

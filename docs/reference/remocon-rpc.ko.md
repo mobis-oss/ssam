@@ -129,8 +129,10 @@ peer의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID
 
 ### `ListPackages`
 
-설치된 패키지와 상태 목록.
+설치된 패키지와 상태, 패키지 위치 목록.
 `Broken` 항목도 포함합니다.
+downloaded 패키지가 같은 이름의 builtin 패키지를 대체하면 downloaded 항목만 반환합니다.
+파싱이나 서명 검증에 실패한 downloaded 패키지는 파일명으로 반환되며 builtin 패키지를 대체하지 않습니다.
 
 - **Request:** `google.protobuf.Empty`
 - **Response:** [`ListPackagesResponse`](#response-messages)
@@ -239,6 +241,15 @@ peer의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID
 | --- | --- | --- |
 | `package_name` | `string` | 설치된 패키지 이름 |
 | `status` | `string` | 패키지 상태(`Ready`, `Running`, `Broken`, …) — 데몬의 [패키지 상태](../architecture/execution.ko.md#package-state-machine)에 대응 |
+| `package_location` | [`PackageLocation`](#packagelocation) | 패키지 위치 |
+
+### `PackageLocation`
+
+| 값 | 번호 | 의미 |
+| --- | --- | --- |
+| `PACKAGE_LOCATION_BUILTIN` | `0` | `package.dir.builtin`에서 로드한 패키지 |
+| `PACKAGE_LOCATION_DOWNLOADED` | `1` | `package.dir.downloaded`에서 로드한 패키지 |
+| `PACKAGE_LOCATION_LOCAL_FILE` | `2` | `ListPackageInfoFromFiles`로 검사한 SSAM 패키지 파일 |
 
 ### `PackageData`
 
@@ -262,6 +273,7 @@ peer의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID
 | `name` | `string` | 항상 | 패키지 이름 |
 | `status` | `string` | 항상 | 패키지 상태 |
 | `package_path` | `string` | 항상 | 디바이스상의 패키지 경로. 사용할 수 없으면 빈 값 |
+| `package_location` | [`PackageLocation`](#packagelocation) | 항상 | 패키지 위치. `success`가 `true`일 때만 의미가 있음 |
 | `package_data` | `PackageData` | 선택 | 정상 패키지의 패키지 데이터 |
 | `quota` | `QuotaInformation` | 선택 | 정상 패키지의 데이터 쿼터 한도 |
 | `error_summary` | `string` | 선택 | 표시용 조회 또는 package-load 오류 |
@@ -291,6 +303,7 @@ peer의 effective 또는 supplementary GID 중 하나가 데몬의 effective GID
 | --- | --- | --- |
 | `package_data` | `PackageData` | SSAM 패키지 파일에서 읽은 패키지 데이터 |
 | `package_path` | `string` | 조회한 경로 |
+| `package_location` | [`PackageLocation`](#packagelocation) | 항상 `PACKAGE_LOCATION_LOCAL_FILE` |
 | `success` | `bool` | 패키지 검사 성공 여부 |
 | `error_summary` | `string` | 표시용 검사 오류 |
 | `error_details` | `string` | 선택적 자세한 오류 정보 |
@@ -340,6 +353,7 @@ packages {
   name: "navi"
   status: "Running"
   package_path: "/var/lib/ssam/packages/navi"
+  package_location: PACKAGE_LOCATION_DOWNLOADED
   package_data {
     package_name: "navi"
     version: "1.4.0"

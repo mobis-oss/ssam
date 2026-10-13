@@ -18,6 +18,7 @@ use crate::utils::{timeline_complete, timeline_start};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use libssam::PackageLocation;
 use libssam::container::NetworkMode;
 use libssam::ssam_package::PackageFile;
 use libssam::ssam_package::ssam_pkg_info::{self, BrokenReason};
@@ -728,7 +729,10 @@ impl Package {
     /// # Errors
     ///
     /// Returns an error if the status or quota info cannot be retrieved.
-    pub async fn get_package_info(&self) -> anyhow::Result<ssam_pkg_info::PackageInfo> {
+    pub async fn get_package_info(
+        &self,
+        package_location: PackageLocation,
+    ) -> anyhow::Result<ssam_pkg_info::PackageInfo> {
         let package_metadata_ref: &PackageMetadata = self.context.package_file().metadata();
 
         let package_status = self
@@ -769,6 +773,7 @@ impl Package {
             package_status,
             package_name,
             package_path: self.context.package_file_path().display().to_string(),
+            package_location,
             quota_info,
         })
     }
