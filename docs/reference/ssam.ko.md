@@ -74,6 +74,12 @@ $ ssam remove helloworld                  # 제거
 ssam <COMMAND> [ARGS...]
 ```
 
+### 전역 옵션
+
+| 옵션 | 설명 |
+| --- | --- |
+| `-V`, `--version` | `ssamd`에 연결하지 않고 워크스페이스에서 관리하는 `ssam` 패키지의 버전을 출력합니다. |
+
 ### `list`
 
 모든 패키지와 그 상태를 나열합니다.

@@ -78,6 +78,7 @@ $ cargo install --path ssamd
 ```
 
 `ssamd` 바이너리가 `~/.cargo/bin`에 설치됩니다.
+빌드 및 호환성 버전은 `ssamd --version`으로 확인할 수 있습니다. 자세한 내용은 [ssamd CLI 레퍼런스](../reference/ssamd.ko.md)를 참고하세요.
 
 혹은 크로스 컴파일할 수 있습니다.
 예를 들어 다음과 같이 musl을 이용한 aarch64용 정적 링크 바이너리를 빌드합니다:

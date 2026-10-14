@@ -161,25 +161,9 @@ impl Commands {
     /// Build the root CLI command
     pub fn command() -> Command {
         Command::new("ssam")
-            .version("1.0")
+            .version(env!("CARGO_PKG_VERSION"))
             .about("Client tool for M.Container(Package) Daemon")
             .subcommands(Self::get_commands().iter().map(|&cmd| cmd.command()))
-    }
-
-    // Run CLI with args from environment (main entry point)
-    pub async fn run(client: &mut dyn Client, stdout: &mut dyn Write) -> Result<()> {
-        use std::env;
-        Self::run_from(env::args_os(), client, stdout).await
-    }
-
-    // Run CLI with custom args (for testing)
-    async fn run_from<I, T>(args: I, client: &mut dyn Client, stdout: &mut dyn Write) -> Result<()>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        let matches = Self::command().get_matches_from(args);
-        Self::dispatch(&matches, client, stdout).await
     }
 
     fn get_command(name: &str) -> Option<&'static dyn CommandHandler> {
@@ -189,8 +173,8 @@ impl Commands {
             .copied()
     }
 
-    /// Internal dispatcher (private)
-    async fn dispatch(
+    /// Run the subcommand selected by `matches`.
+    pub async fn run(
         matches: &ArgMatches,
         client: &mut dyn Client,
         stdout: &mut dyn Write,
@@ -250,7 +234,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_dispatch_no_subcommand() {
+    async fn test_run_no_subcommand() {
         use crate::client::MockClient;
         use std::io::Cursor;
 
@@ -263,17 +247,17 @@ mod tests {
         let mut client = MockClient::new_success();
         let mut stdout = Cursor::new(Vec::new());
 
-        // Call dispatch - should return error because no subcommand was provided
-        let result = Commands::dispatch(&matches, &mut client, &mut stdout).await;
+        // Call run - should return error because no subcommand was provided
+        let result = Commands::run(&matches, &mut client, &mut stdout).await;
 
         assert!(
             result.is_err(),
-            "dispatch should return Err when no subcommand provided"
+            "run should return Err when no subcommand provided"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_dispatch_success_with_test_command() {
+    async fn test_run_success_with_test_command() {
         use crate::client::MockClient;
         use std::io::Cursor;
 
@@ -286,17 +270,14 @@ mod tests {
         let mut client = MockClient::new_success();
         let mut stdout = Cursor::new(Vec::new());
 
-        // Call dispatch - should succeed with test-only command
-        let result = Commands::dispatch(&matches, &mut client, &mut stdout).await;
+        // Call run - should succeed with test-only command
+        let result = Commands::run(&matches, &mut client, &mut stdout).await;
 
-        assert!(
-            result.is_ok(),
-            "dispatch should succeed with test-only command"
-        );
+        assert!(result.is_ok(), "run should succeed with test-only command");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_dispatch_unknown_subcommand() {
+    async fn test_run_unknown_subcommand() {
         use crate::client::MockClient;
 
         let mut client = MockClient::new_success();
@@ -309,22 +290,7 @@ mod tests {
             .try_get_matches_from(["ssam", "definitely-unknown"])
             .unwrap();
 
-        let result = Commands::dispatch(&matches, &mut client, &mut stdout).await;
+        let result = Commands::run(&matches, &mut client, &mut stdout).await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_run_from_success() {
-        use crate::client::MockClient;
-
-        let mut client = MockClient::new_success();
-        let mut stdout = std::io::Cursor::new(Vec::new());
-
-        let result = Commands::run_from(["ssam", "__test_noop__"], &mut client, &mut stdout).await;
-
-        assert!(
-            result.is_ok(),
-            "run_from should succeed with test-only command"
-        );
     }
 }

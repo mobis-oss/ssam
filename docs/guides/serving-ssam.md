@@ -78,6 +78,7 @@ $ cargo install --path ssamd
 ```
 
 This installs the `ssamd` binary into `~/.cargo/bin`.
+Run `ssamd --version` to view its build and compatibility versions; see the [ssamd CLI reference](../reference/ssamd.md).
 
 Or you can cross-compile.
 For example, build a statically linked aarch64 binary using musl:

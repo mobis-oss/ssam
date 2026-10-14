@@ -19,6 +19,8 @@ const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    // Parse before connecting so `--version` and `--help` work without ssamd.
+    let matches = Commands::command().get_matches();
     let channel = Endpoint::from_shared(unix_socket_uri(CONTROL_SOCKET_PATH))
         .context("Error creating channel")?
         .connect_timeout(GRPC_CONNECT_TIMEOUT)
@@ -29,5 +31,5 @@ async fn main() -> anyhow::Result<()> {
     let mut client = GrpcClient::new(RemoconClient::new(channel));
     let mut stdout = std::io::stdout().lock();
 
-    Commands::run(&mut client, &mut stdout).await
+    Commands::run(&matches, &mut client, &mut stdout).await
 }

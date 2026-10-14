@@ -94,6 +94,14 @@ const SSAM_PKG_MAGIC: &[u8; SSAM_PKG_MAGIC_LEN] = b"MIRAEPLATFORMGAEBALGROUP";
 const SSAM_PKG_FORMAT_VERSION: &[u8; SSAM_PKG_FORMAT_VERSION_LEN] = b"0.6.0\0\0\0";
 const SSAM_PKG_FOOTER_LEN: usize = SSAM_PKG_MAGIC_LEN + SSAM_PKG_FORMAT_VERSION_LEN;
 
+/// Return the human-readable SSAM package format version.
+#[must_use]
+pub fn package_format_version() -> &'static str {
+    std::str::from_utf8(SSAM_PKG_FORMAT_VERSION)
+        .unwrap_or_default()
+        .trim_end_matches('\0')
+}
+
 /// Read N bytes from the end of file at given offset.
 fn read_footer_field<const N: usize>(
     pkg_fp: &mut File,
@@ -137,9 +145,7 @@ fn verify_footer(pkg_fp: &mut File) -> Result<(), PackageParseError> {
     let version =
         read_footer_field::<SSAM_PKG_FORMAT_VERSION_LEN>(pkg_fp, version_offset_from_end)?;
     if &version != SSAM_PKG_FORMAT_VERSION {
-        let expected = String::from_utf8_lossy(SSAM_PKG_FORMAT_VERSION)
-            .trim_end_matches('\0')
-            .to_string();
+        let expected = package_format_version().to_owned();
         let actual = String::from_utf8_lossy(&version)
             .trim_end_matches('\0')
             .to_string();

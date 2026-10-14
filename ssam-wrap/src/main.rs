@@ -41,6 +41,7 @@ struct WrapOnlyArgs {
 }
 
 #[derive(Parser, Debug)]
+#[command(version)]
 struct Cli {
     #[command(flatten)]
     wrap_only_args: WrapOnlyArgs,

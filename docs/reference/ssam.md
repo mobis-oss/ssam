@@ -73,6 +73,12 @@ Global form:
 ssam <COMMAND> [ARGS...]
 ```
 
+### Global option
+
+| Option | Description |
+| --- | --- |
+| `-V`, `--version` | Print the version declared by the `ssam` workspace package without connecting to `ssamd`. |
+
 ### `list`
 
 List all packages and their status.

@@ -78,6 +78,7 @@ ssam-wrap [OPTIONS] <WORKSPACE>
 | `-k <FILE>` | `--private-key <FILE>` | ✓ | RSA private key used to sign the package. **Required in wrap mode.** |
 | `-o <FILE>` | `--output <FILE>` | ✓ | Output package path. Defaults to `<WORKSPACE>/<name>-<version>.ssam`. |
 | `-t <TYPE>` | `--pkgfs-type <TYPE>` | ✓ | Package filesystem image type. Only used when the source is a directory. One of `ext4`, `erofs`, `erofs-lz4`, `erofs-lz4hc` (default). |
+| `-V` | `--version` | — | Print the version declared by the `ssam-wrap` workspace package. |
 
 > ⚠️ **Wrap-only** (✓) options passed together with `--prepare` are an error.
 

@@ -78,6 +78,7 @@ ssam-wrap [OPTIONS] <WORKSPACE>
 | `-k <FILE>` | `--private-key <FILE>` | ✓ | 패키지 서명에 사용할 RSA 개인 키. **wrap 모드에서 필수입니다.** |
 | `-o <FILE>` | `--output <FILE>` | ✓ | 출력 패키지 경로. 기본값은 `<WORKSPACE>/<name>-<version>.ssam` 입니다. |
 | `-t <TYPE>` | `--pkgfs-type <TYPE>` | ✓ | 패키지 파일시스템 이미지 타입. 소스가 디렉터리일 때만 사용됩니다. `ext4`, `erofs`, `erofs-lz4`, `erofs-lz4hc`(기본) 중 하나. |
+| `-V` | `--version` | — | 워크스페이스에서 관리하는 `ssam-wrap` 패키지의 버전을 출력합니다. |
 
 > ⚠️ **wrap 전용**(✓) 옵션을 `--prepare`와 함께 전달하면 오류가 발생합니다.
 
