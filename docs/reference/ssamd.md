@@ -16,10 +16,10 @@ Run `ssamd` without arguments to start the daemon.
 
 ```console
 $ ssamd --version
-Daemon version:           0.1.0
-RPC API version:          1
-Package format:           0.6.0
-OCI Runtime Spec Version: 1.1.0
+Daemon version:           <DAEMON_VERSION>
+RPC API version:          <RPC_API_VERSION>
+Package format:           <PACKAGE_FORMAT_VERSION>
+OCI Runtime Spec Version: <OCI_RUNTIME_SPEC_VERSION>
 ```
 
 | Field | Meaning |
