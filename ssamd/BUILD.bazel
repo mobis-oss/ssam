@@ -64,6 +64,8 @@ rust_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":ssamd_lib",
+        "//libssam:libssam",
         "@crates//:anyhow",
+        "@crates//:oci-spec",
     ],
 )
