@@ -1,4 +1,7 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("//bazel/tools:cargo.bzl", "crate_cargo_env_vars")
+
+crate_cargo_env_vars()
 
 rust_library(
     name = "ssamd_lib",
@@ -8,6 +11,7 @@ rust_library(
     ),
     crate_name = "ssamd",
     edition = "2024",
+    rustc_env_files = [":cargo_env_vars"],
     visibility = ["//visibility:public"],
     deps = [
         "//libssam:libssam",
@@ -61,6 +65,7 @@ rust_binary(
     name = "ssamd",
     srcs = ["src/main.rs"],
     edition = "2024",
+    rustc_env_files = [":cargo_env_vars"],
     visibility = ["//visibility:public"],
     deps = [
         ":ssamd_lib",

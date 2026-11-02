@@ -1,10 +1,14 @@
 load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//bazel/tools:cargo.bzl", "crate_cargo_env_vars")
+
+crate_cargo_env_vars()
 
 rust_library(
     name = "quotactl-rs",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "quotactl_rs",
     edition = "2024",
+    rustc_env_files = [":cargo_env_vars"],
     visibility = ["//visibility:public"],
     deps = [
         "@crates//:bitflags",

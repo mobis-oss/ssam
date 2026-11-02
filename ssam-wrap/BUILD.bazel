@@ -1,5 +1,8 @@
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//bazel/tools:cargo.bzl", "crate_cargo_env_vars")
+
+crate_cargo_env_vars()
 
 cargo_build_script(
     name = "build_script",
@@ -17,6 +20,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/main.rs",
     edition = "2024",
+    rustc_env_files = [":cargo_env_vars"],
     deps = [
         ":build_script",
         "//libssam:libssam",

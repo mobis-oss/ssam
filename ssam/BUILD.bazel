@@ -1,10 +1,14 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//bazel/tools:cargo.bzl", "crate_cargo_env_vars")
+
+crate_cargo_env_vars()
 
 rust_binary(
     name = "ssam",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/main.rs",
     edition = "2024",
+    rustc_env_files = [":cargo_env_vars"],
     deps = [
         "//libssam:libssam",
         "@crates//:anyhow",
