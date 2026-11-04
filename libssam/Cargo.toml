@@ -20,7 +20,7 @@ serde_json.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 thiserror.workspace = true
-zip = "8"
+zip = { version = "8", default-features = false }
 toml.workspace = true
 serde-big-array.workspace = true
 derive_more.workspace = true
