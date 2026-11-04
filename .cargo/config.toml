@@ -1,7 +1,17 @@
 [target.aarch64-unknown-linux-musl]
 linker = "rust-lld"
-# Enables the Cortex-A53 erratum fix that the gcc driver adds by default.
-rustflags = ["-C", "link-arg=--fix-cortex-a53-843419"]
+# rustc links this target as static non-PIE by default.
+# The options below make rust-lld produce static-pie instead, with rcrt1.o
+# relocating the binary at startup in place of crt1.o.
+# The Cortex-A53 erratum fix is passed explicitly because rust-lld, unlike
+# the gcc driver, does not add it by default.
+rustflags = [
+    "-C", "link-arg=--fix-cortex-a53-843419",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=--no-dynamic-linker",
+    "-C", "link-arg=--remap-inputs=*/self-contained/crt1.o=/dev/null",
+    "-C", "link-arg=-l:rcrt1.o",
+]
 
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
