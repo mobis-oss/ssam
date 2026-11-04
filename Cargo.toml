@@ -39,7 +39,7 @@ semver = "1.0.28"
 rustix = "1.1.4"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99.0"
 license = "Apache-2.0"

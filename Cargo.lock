@@ -1572,7 +1572,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libssam"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "proc_macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "quotactl-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "ssam"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "ssam-log"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "log",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "ssam-wrap"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "ssamd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
