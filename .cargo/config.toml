@@ -1,8 +1,10 @@
 [target.aarch64-unknown-linux-musl]
-linker = "aarch64-linux-gnu-gcc"
+linker = "rust-lld"
+# Enables the Cortex-A53 erratum fix that the gcc driver adds by default.
+rustflags = ["-C", "link-arg=--fix-cortex-a53-843419"]
 
 [target.x86_64-unknown-linux-musl]
-linker = "x86_64-linux-gnu-gcc"
+linker = "rust-lld"
 
 # https://doc.rust-lang.org/cargo/reference/profiles.html#custom-profiles
 [profile.release-lto]
